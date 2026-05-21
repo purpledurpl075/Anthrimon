@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo, useCallback } from 'react'
+import React, { useState, useRef, useMemo, useCallback, useEffect } from 'react'
 import { useRole, hasRole } from '../hooks/useCurrentUser'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import {
@@ -13,6 +13,7 @@ import TimeSeriesChart from '../components/TimeSeriesChart'
 import { fetchCredentials } from '../api/credentials'
 import { fetchConfigStatus, fetchBackups, fetchDiffs, fetchBackup, fetchDiff, triggerCollect, fetchComplianceResults, deployConfig, type ConfigBackupMeta, type ConfigDiffMeta } from '../api/config'
 import { fetchCollectors } from '../api/collectors'
+import { fetchDeviceBGPSessions, fetchBGPSessionEvents, type BGPSession, type BGPSessionEvent } from '../api/bgp'
 import { fetchMaintenanceWindows, createMaintenanceWindow, deleteMaintenanceWindow, type MaintenanceWindow } from '../api/maintenance'
 import StatusBadge from '../components/StatusBadge'
 import VendorBadge from '../components/VendorBadge'
@@ -400,7 +401,14 @@ function NeighborsSection({ deviceId, deviceName }: { deviceId: string; deviceNa
     queryFn: () => fetchDeviceOSPF(deviceId),
     staleTime: 30_000,
   })
-  const total = lldp.length + cdp.length + ospfData.length
+
+  const { data: bgpSessions = [] } = useQuery({
+    queryKey: ['bgp-sessions', deviceId],
+    queryFn:  () => fetchDeviceBGPSessions(deviceId),
+    staleTime: 30_000,
+  })
+
+  const total = lldp.length + cdp.length + ospfData.length + bgpSessions.length
 
   // Merged node list for the map — deduplicate by remote name
   const topoNodes: TopoNode[] = [
@@ -514,9 +522,7 @@ function NeighborsSection({ deviceId, deviceName }: { deviceId: string; deviceNa
                           {n.state.toUpperCase().replace('_', '-')}
                         </span>
                         <span className="font-mono text-slate-700 truncate">{n.neighbor_ip ?? n.router_id ?? '—'}</span>
-                        {n.display_name && (
-                          <span className="text-slate-500 shrink-0">{n.display_name}</span>
-                        )}
+                        {n.display_name && <span className="text-slate-500 shrink-0">{n.display_name}</span>}
                         {!n.display_name && n.router_id && n.router_id !== n.neighbor_ip && (
                           <span className="font-mono text-slate-400 shrink-0">{n.router_id}</span>
                         )}
@@ -527,6 +533,40 @@ function NeighborsSection({ deviceId, deviceName }: { deviceId: string; deviceNa
                         {n.last_state_change && <span>changed {new Date(n.last_state_change).toLocaleString()}</span>}
                         {n.inferred && <span className="text-slate-300 italic">seen from peer</span>}
                       </div>
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+
+          {bgpSessions.length > 0 && (
+            <div>
+              <p className="text-xs font-semibold text-slate-500 uppercase tracking-wide mb-1.5">BGP</p>
+              <div className="space-y-1.5">
+                {bgpSessions.map(s => {
+                  const isUp = s.session_state === 'established'
+                  return (
+                    <div key={s.id} className={`rounded-lg border px-3 py-2 text-xs ${isUp ? 'border-green-200 bg-green-50' : 'border-slate-200'}`}>
+                      <div className="flex items-center gap-2">
+                        <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ backgroundColor: s.state_color }} />
+                        <span className="font-medium capitalize" style={{ color: s.state_color }}>{s.session_state}</span>
+                        <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${s.session_type === 'iBGP' ? 'bg-purple-100 text-purple-700' : 'bg-blue-100 text-blue-700'}`}>
+                          {s.session_type}
+                        </span>
+                        <span className="font-mono text-slate-700">{s.peer_ip}</span>
+                        {s.peer_asn && <span className="text-slate-400">AS{s.peer_asn}</span>}
+                        {s.peer_router_id && s.peer_router_id !== s.peer_ip && (
+                          <span className="font-mono text-slate-400 text-[10px]">{s.peer_router_id}</span>
+                        )}
+                      </div>
+                      {isUp && (
+                        <div className="mt-1 flex flex-wrap gap-2 text-slate-400">
+                          {s.uptime_seconds != null && s.uptime_seconds > 0 && <span>up {fmtUptime(s.uptime_seconds)}</span>}
+                          {s.prefixes_received != null && <span>{s.prefixes_received} pfx rx</span>}
+                          {s.flap_count > 0 && <span className="text-amber-500">{s.flap_count} flaps</span>}
+                        </div>
+                      )}
                     </div>
                   )
                 })}
@@ -549,19 +589,34 @@ const PROTO_STYLE: Record<string, string> = {
   connected: 'bg-green-100 text-green-700',
   static:    'bg-yellow-100 text-yellow-700',
   ospf:      'bg-blue-100 text-blue-700',
+  bgp:       'bg-purple-100 text-purple-700',
+  isis:      'bg-orange-100 text-orange-700',
+  rip:       'bg-pink-100 text-pink-700',
+  eigrp:     'bg-cyan-100 text-cyan-700',
   other:     'bg-slate-100 text-slate-500',
+}
+
+const PROTO_LABEL: Record<string, string> = {
+  connected: 'Connected', static: 'Static', ospf: 'OSPF',
+  bgp: 'BGP', isis: 'IS-IS', rip: 'RIP', eigrp: 'EIGRP', other: 'Other',
 }
 
 function RoutesSection({ deviceId }: { deviceId: string }) {
   const [protoFilter, setProto] = useState<string>('all')
 
-  const { data: routes = [], isLoading } = useQuery({
-    queryKey: ['routes', deviceId, protoFilter],
-    queryFn: () => fetchDeviceRoutes(deviceId, protoFilter === 'all' ? undefined : protoFilter),
+  const { data: allRoutes = [], isLoading } = useQuery({
+    queryKey: ['routes', deviceId],
+    queryFn:  () => fetchDeviceRoutes(deviceId, undefined),
     staleTime: 30_000,
   })
 
-  const protocols = ['all', 'connected', 'ospf', 'static', 'other']
+  // Derive which protocols actually have routes
+  const presentProtos = Array.from(new Set(allRoutes.map(r => r.protocol))).sort()
+  const protocols = ['all', ...presentProtos]
+
+  const routes = protoFilter === 'all'
+    ? allRoutes
+    : allRoutes.filter(r => r.protocol === protoFilter)
 
   return (
     <div className="space-y-3">
@@ -574,7 +629,7 @@ function RoutesSection({ deviceId }: { deviceId: string }) {
                 ? 'bg-slate-800 text-white border-slate-800'
                 : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'
             }`}>
-            {p === 'all' ? 'All' : p.charAt(0).toUpperCase() + p.slice(1)}
+            {p === 'all' ? 'All' : (PROTO_LABEL[p] ?? p.toUpperCase())}
           </button>
         ))}
         {routes.length > 0 && (
@@ -1398,7 +1453,17 @@ export default function DeviceDetail() {
   const canAdmin   = hasRole(role, 'admin')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const [tab, setTab] = useState<'interfaces' | 'neighbors' | 'addresses' | 'routes' | 'vlans' | 'stp' | 'health' | 'config'>('interfaces')
+  const [tab, setTab] = useState<'interfaces' | 'neighbors' | 'addresses' | 'routes' | 'vlans' | 'stp' | 'health' | 'config' | 'bgp'>('interfaces')
+
+  // Lightweight count queries for tab badges — long staleTime, no refetch interval
+  const { data: bgpSessionsForBadge = [] } = useQuery({
+    queryKey:  ['bgp-sessions', id],
+    queryFn:   () => fetchDeviceBGPSessions(id!),
+    enabled:   !!id,
+    staleTime: 60_000,
+  })
+  const bgpCount = bgpSessionsForBadge.length
+  const bgpDownCount = bgpSessionsForBadge.filter(s => s.session_state !== 'established').length
 
   const deleteMutation = useMutation({
     mutationFn: () => deleteDevice(id!),
@@ -1897,15 +1962,16 @@ export default function DeviceDetail() {
           <div className="border-b border-slate-100 px-2 md:px-4 flex items-center gap-0 overflow-x-auto scrollbar-hide"
             style={{ WebkitOverflowScrolling: 'touch' }}>
             {([
-              { id: 'interfaces',  label: 'Interfaces', badge: totalIfaces || undefined },
+              { id: 'interfaces', label: 'Interfaces', badge: totalIfaces || undefined },
               { id: 'neighbors',  label: 'Neighbors' },
-              { id: 'addresses',   label: 'Addresses' },
-              { id: 'routes',      label: 'Routes' },
-              { id: 'vlans',       label: 'VLANs' },
-              { id: 'stp',         label: 'STP' },
-              { id: 'health',      label: 'Health' },
-              { id: 'config',      label: 'Config' },
-            ] as const).map(t => (
+              { id: 'addresses',  label: 'Addresses' },
+              { id: 'routes',     label: 'Routes' },
+              { id: 'vlans',      label: 'VLANs' },
+              { id: 'stp',        label: 'STP' },
+              { id: 'health',     label: 'Health' },
+              ...(bgpCount > 0 ? [{ id: 'bgp' as const, label: 'BGP', badge: bgpCount, badgeAlert: bgpDownCount > 0 }] : []),
+              { id: 'config',     label: 'Config' },
+            ] as { id: typeof tab; label: string; badge?: number; badgeAlert?: boolean }[]).map(t => (
               <button key={t.id} onClick={() => setTab(t.id as typeof tab)}
                 className={`flex items-center gap-1 px-2.5 md:px-3 py-2.5 md:py-3 text-xs md:text-sm font-medium border-b-2 transition-colors whitespace-nowrap shrink-0 ${
                   tab === t.id
@@ -1913,9 +1979,11 @@ export default function DeviceDetail() {
                     : 'border-transparent text-slate-500 hover:text-slate-700'
                 }`}>
                 {t.label}
-                {'badge' in t && t.badge ? (
+                {t.badge ? (
                   <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full ${
-                    tab === t.id ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'
+                    t.badgeAlert
+                      ? 'bg-red-100 text-red-600'
+                      : tab === t.id ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'
                   }`}>{t.badge}</span>
                 ) : null}
               </button>
@@ -2005,6 +2073,11 @@ export default function DeviceDetail() {
           {tab === 'health' && (
             <HealthTab deviceId={id!} currentHealth={health ?? null} />
           )}
+          {tab === 'bgp' && id && (
+            <div className="p-5">
+              <BGPSection deviceId={id} />
+            </div>
+          )}
           {tab === 'config' && id && (
             <div className="p-5">
               <DeviceConfigTab deviceId={id} vendor={device?.vendor} />
@@ -2061,6 +2134,194 @@ function CollectorSection({ deviceId, currentCollectorId, onSave }: {
         </button>
       )}
     </Section>
+  )
+}
+
+// ── BGP Section ───────────────────────────────────────────────────────────────
+
+function fmtUptime(secs: number | null): string {
+  if (!secs) return '—'
+  if (secs < 60)    return `${secs}s`
+  if (secs < 3600)  return `${Math.floor(secs / 60)}m`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`
+  return `${Math.floor(secs / 86400)}d ${Math.floor((secs % 86400) / 3600)}h`
+}
+
+function BGPEventDrawer({ session }: { session: BGPSession }) {
+  const { data: events = [], isLoading } = useQuery({
+    queryKey:  ['bgp-events', session.id],
+    queryFn:   () => fetchBGPSessionEvents(session.id),
+    staleTime: 60_000,
+  })
+
+  const STATE_COLOR: Record<string, string> = {
+    established: 'text-green-700 bg-green-50',
+    active:      'text-amber-700 bg-amber-50',
+    idle:        'text-slate-600 bg-slate-100',
+    connect:     'text-blue-700 bg-blue-50',
+    opensent:    'text-purple-700 bg-purple-50',
+    openconfirm: 'text-purple-700 bg-purple-50',
+  }
+
+  return (
+    <tr>
+      <td colSpan={8} className="bg-slate-50 px-6 py-3 border-b border-slate-100">
+        <div className="text-xs font-medium text-slate-500 mb-2">State transition history</div>
+        {isLoading ? (
+          <span className="text-xs text-slate-400">Loading…</span>
+        ) : events.length === 0 ? (
+          <span className="text-xs text-slate-400">No transitions recorded yet</span>
+        ) : (
+          <div className="flex flex-col gap-1 max-h-40 overflow-y-auto">
+            {events.map(e => (
+              <div key={e.id} className="flex items-center gap-2 text-xs">
+                <span className="text-slate-400 tabular-nums w-36 shrink-0">
+                  {new Date(e.recorded_at).toLocaleString()}
+                </span>
+                <span className={`px-1.5 py-0.5 rounded capitalize font-medium ${STATE_COLOR[e.prev_state] ?? 'text-slate-600 bg-slate-100'}`}>
+                  {e.prev_state}
+                </span>
+                <span className="text-slate-400">→</span>
+                <span className={`px-1.5 py-0.5 rounded capitalize font-medium ${STATE_COLOR[e.new_state] ?? 'text-slate-600 bg-slate-100'}`}>
+                  {e.new_state}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </td>
+    </tr>
+  )
+}
+
+function BGPSection({ deviceId }: { deviceId: string }) {
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const queryClient = useQueryClient()
+
+  const { data: sessions = [], isLoading } = useQuery({
+    queryKey:        ['bgp-sessions', deviceId],
+    queryFn:         () => fetchDeviceBGPSessions(deviceId),
+    refetchInterval: 30_000,
+  })
+
+  // Prefetch event history for all sessions so drawer opens instantly
+  useEffect(() => {
+    sessions.forEach(s => {
+      queryClient.prefetchQuery({
+        queryKey:  ['bgp-events', s.id],
+        queryFn:   () => fetchBGPSessionEvents(s.id),
+        staleTime: 60_000,
+      })
+    })
+  }, [sessions, queryClient])
+
+  const established = sessions.filter(s => s.session_state === 'established').length
+  const flappers    = sessions.filter(s => s.flap_count > 0).length
+
+  return (
+    <div className="space-y-4">
+      {sessions.length > 0 && (
+        <div className="flex items-center gap-4 text-sm">
+          <span className="text-slate-600">
+            <span className="font-semibold text-slate-800">{established}</span>/{sessions.length} peers established
+          </span>
+          {established < sessions.length && (
+            <span className="text-xs font-medium text-red-500 bg-red-50 px-2 py-0.5 rounded">
+              {sessions.length - established} down
+            </span>
+          )}
+          {flappers > 0 && (
+            <span className="text-xs font-medium text-amber-600 bg-amber-50 px-2 py-0.5 rounded">
+              {flappers} flapping
+            </span>
+          )}
+        </div>
+      )}
+
+      {isLoading ? (
+        <div className="text-slate-400 text-sm">Loading…</div>
+      ) : sessions.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 p-8 text-center">
+          <p className="text-sm text-slate-400">No BGP sessions found</p>
+          <p className="text-xs text-slate-300 mt-1">BGP data is collected via SNMP bgpPeerTable (RFC 1657)</p>
+        </div>
+      ) : (
+        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-slate-50 border-b border-slate-100">
+                <th className="text-left px-4 py-2.5 text-xs font-medium text-slate-500">State</th>
+                <th className="text-left px-4 py-2.5 text-xs font-medium text-slate-500">Type</th>
+                <th className="text-left px-4 py-2.5 text-xs font-medium text-slate-500">Peer IP</th>
+                <th className="text-left px-4 py-2.5 text-xs font-medium text-slate-500">Peer AS</th>
+                <th className="text-right px-4 py-2.5 text-xs font-medium text-slate-500">Pfx Rx</th>
+                <th className="text-right px-4 py-2.5 text-xs font-medium text-slate-500">Updates In/Out</th>
+                <th className="text-right px-4 py-2.5 text-xs font-medium text-slate-500">Flaps</th>
+                <th className="text-right px-4 py-2.5 text-xs font-medium text-slate-500">Uptime</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-50">
+              {sessions.map(s => (
+                <React.Fragment key={s.id}>
+                  <tr
+                    className="hover:bg-slate-50 transition-colors cursor-pointer"
+                    onClick={() => setExpanded(expanded === s.id ? null : s.id)}
+                  >
+                    <td className="px-4 py-3">
+                      <span className="flex items-center gap-1.5">
+                        <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: s.state_color }} />
+                        <span className="text-xs font-medium capitalize" style={{ color: s.state_color }}>
+                          {s.session_state}
+                        </span>
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${
+                        s.session_type === 'iBGP'
+                          ? 'bg-purple-100 text-purple-700'
+                          : 'bg-blue-100 text-blue-700'
+                      }`}>
+                        {s.session_type}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="font-mono text-xs text-slate-700">{s.peer_ip}</div>
+                      {s.peer_router_id && s.peer_router_id !== s.peer_ip && (
+                        <div className="font-mono text-[10px] text-slate-400">{s.peer_router_id}</div>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-slate-600">
+                      {s.peer_asn ? `AS${s.peer_asn}` : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-slate-600 text-right tabular-nums">
+                      {s.prefixes_received ?? '—'}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-slate-500 text-right tabular-nums">
+                      {s.in_updates > 0 || s.out_updates > 0
+                        ? `${s.in_updates.toLocaleString()} / ${s.out_updates.toLocaleString()}`
+                        : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-right">
+                      {s.flap_count > 0 ? (
+                        <span className="text-xs font-semibold text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">
+                          {s.flap_count}
+                        </span>
+                      ) : (
+                        <span className="text-xs text-slate-300">0</span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-slate-500 text-right tabular-nums">
+                      {s.session_state === 'established' ? fmtUptime(s.uptime_seconds) : '—'}
+                    </td>
+                  </tr>
+                  {expanded === s.id && <BGPEventDrawer session={s} />}
+                </React.Fragment>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
   )
 }
 

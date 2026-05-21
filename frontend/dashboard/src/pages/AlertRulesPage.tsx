@@ -22,6 +22,8 @@ const METRICS = [
   { value: 'flow_bandwidth',   label: 'Flow bandwidth',              hasThreshold: true,  conditions: ['gt'],           unit: 'B/s', thresholdLabel: 'Threshold (bytes/s)', simple: true },
   { value: 'syslog_match',     label: 'Syslog pattern match',        hasThreshold: true,  conditions: ['gt'],           unit: 'matches', thresholdLabel: 'Min occurrences', simple: true },
   { value: 'config_change',   label: 'Config change detected',      hasThreshold: false, conditions: [],               unit: '',        thresholdLabel: '',               simple: true },
+  { value: 'bgp_session_down',     label: 'BGP session down',         hasThreshold: false, conditions: [],        unit: '',   thresholdLabel: '',                 simple: true },
+  { value: 'bgp_session_flapping', label: 'BGP session flapping',     hasThreshold: true,  conditions: ['gt','gte'], unit: 'flaps', thresholdLabel: 'Min flaps in window', simple: false },
   { value: 'custom_oid',        label: 'Custom OID',                 hasThreshold: true,  conditions: ['gt','lt','eq'], unit: '', thresholdLabel: 'Threshold value',   simple: false },
 ]
 

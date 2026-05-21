@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from typing import Optional
 
@@ -22,10 +23,36 @@ router = APIRouter(prefix="/topology", tags=["topology"])
 
 _ZERO_UUID = "00000000-0000-0000-0000-000000000000"
 
+# ── In-memory cache ────────────────────────────────────────────────────────────
+# tenant_id → (computed_at, result_dict)
+_cache:      dict[str, tuple[float, dict]] = {}
+_in_flight:  set[str] = set()   # tenants currently being refreshed
+CACHE_TTL    = 30                # seconds — return stale data instantly, refresh behind
+
+
+def _cache_get(tenant_id: str) -> Optional[dict]:
+    entry = _cache.get(tenant_id)
+    if entry and (time.monotonic() - entry[0]) < CACHE_TTL:
+        return entry[1]
+    return None
+
+
+def _cache_set(tenant_id: str, result: dict) -> None:
+    _cache[tenant_id] = (time.monotonic(), result)
+
+
+# ── Edge computation ───────────────────────────────────────────────────────────
 
 async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
-    """Build edge list from LLDP/CDP neighbor tables."""
-    dev_by_ip   = {str(d.mgmt_ip).split("/")[0]: str(d.id) for d in devices}
+    """Build edge list from LLDP/CDP neighbor tables — 3 queries total."""
+    if not devices:
+        return []
+
+    dev_ids = [d.id for d in devices]
+
+    dev_by_ip: dict[str, str] = {
+        str(d.mgmt_ip).split("/")[0]: str(d.id) for d in devices
+    }
     dev_by_host: dict[str, str] = {}
     for d in devices:
         if d.hostname:
@@ -35,9 +62,9 @@ async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
 
     def resolve_device(name: Optional[str], ip: Optional[str]) -> Optional[str]:
         if ip:
-            clean_ip = str(ip).split("/")[0]
-            if clean_ip in dev_by_ip:
-                return dev_by_ip[clean_ip]
+            clean = str(ip).split("/")[0]
+            if clean in dev_by_ip:
+                return dev_by_ip[clean]
         if name:
             key = name.lower()
             if key in dev_by_host:
@@ -47,26 +74,26 @@ async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
                     return did
         return None
 
-    ifaces = (await db.execute(
-        select(Interface).where(Interface.device_id.in_([d.id for d in devices]))
-    )).scalars().all()
+    # Fetch interfaces + both neighbor tables in parallel
+    ifaces_q   = db.execute(select(Interface).where(Interface.device_id.in_(dev_ids)))
+    lldp_q     = db.execute(select(LLDPNeighbor).where(LLDPNeighbor.device_id.in_(dev_ids)))
+    cdp_q      = db.execute(select(CDPNeighbor).where(CDPNeighbor.device_id.in_(dev_ids)))
+
+    ifaces_r, lldp_r, cdp_r = await asyncio.gather(ifaces_q, lldp_q, cdp_q)
+
     iface_info: dict[str, dict] = {
         f"{str(i.device_id)}:{i.name}": {
             "id":        str(i.id),
             "speed_bps": i.speed_bps,
             "if_index":  i.if_index,
         }
-        for i in ifaces
+        for i in ifaces_r.scalars().all()
     }
 
     edges: list[dict] = []
     seen_pairs: set[frozenset] = set()
 
-    lldp_rows = (await db.execute(
-        select(LLDPNeighbor).where(LLDPNeighbor.device_id.in_([d.id for d in devices]))
-    )).scalars().all()
-
-    for n in lldp_rows:
+    for n in lldp_r.scalars().all():
         src_id = str(n.device_id)
         dst_id = resolve_device(n.remote_system_name, n.remote_mgmt_ip)
         if not dst_id or dst_id == src_id:
@@ -88,11 +115,7 @@ async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
             "protocol":         "lldp",
         })
 
-    cdp_rows = (await db.execute(
-        select(CDPNeighbor).where(CDPNeighbor.device_id.in_([d.id for d in devices]))
-    )).scalars().all()
-
-    for n in cdp_rows:
+    for n in cdp_r.scalars().all():
         src_id = str(n.device_id)
         dst_id = resolve_device(n.remote_device_id, n.remote_mgmt_ip)
         if not dst_id or dst_id == src_id:
@@ -117,63 +140,86 @@ async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
     return edges
 
 
+# ── Topology persist ───────────────────────────────────────────────────────────
+
 async def _persist_topology_links(tenant_id: str, edges: list[dict]) -> None:
-    """Upsert computed topology edges into topology_links and prune stale ones."""
+    """Batch-upsert topology edges using unnest arrays — single round-trip."""
+    if not edges:
+        return
     try:
+        # Normalise: canonical ordering (lower UUID = source)
+        srcs, dsts, ltypes, metas, sifaces = [], [], [], [], []
+        for edge in edges:
+            src, dst = edge["source"], edge["target"]
+            if src > dst:
+                src, dst = dst, src
+                meta = {
+                    "source_port":      edge.get("target_port"),
+                    "dest_port":        edge.get("source_port"),
+                }
+                siface = None
+            else:
+                meta = {
+                    "source_port":      edge.get("source_port"),
+                    "dest_port":        edge.get("target_port"),
+                    "source_speed_bps": edge.get("source_speed_bps"),
+                    "source_if_index":  edge.get("source_if_index"),
+                }
+                siface = edge.get("source_iface_id")
+            srcs.append(src)
+            dsts.append(dst)
+            ltypes.append(edge.get("protocol", "lldp"))
+            metas.append(json.dumps({k: v for k, v in meta.items() if v is not None}))
+            sifaces.append(siface or _ZERO_UUID)
+
         async with AsyncSessionLocal() as db:
-            for edge in edges:
-                src, dst = edge["source"], edge["target"]
-                # Canonical ordering: lower UUID is always source
-                if src > dst:
-                    src, dst = dst, src
-                    siface = None
-                    meta = {
-                        "source_port":      edge.get("target_port"),
-                        "dest_port":        edge.get("source_port"),
-                        "source_speed_bps": None,
-                        "source_if_index":  None,
-                    }
-                else:
-                    siface = edge.get("source_iface_id")
-                    meta = {
-                        "source_port":      edge.get("source_port"),
-                        "dest_port":        edge.get("target_port"),
-                        "source_speed_bps": edge.get("source_speed_bps"),
-                        "source_if_index":  edge.get("source_if_index"),
-                    }
-                meta = {k: v for k, v in meta.items() if v is not None}
-
-                await db.execute(text("""
-                    INSERT INTO topology_links
-                        (tenant_id, source_device_id, source_interface_id,
-                         dest_device_id, link_type, metadata, discovered_at, updated_at)
-                    VALUES
-                        (:tid::uuid, :src::uuid, :siface::uuid,
-                         :dst::uuid, :ltype::topology_link_type, :meta::jsonb, now(), now())
-                    ON CONFLICT (source_device_id, dest_device_id, link_type,
-                        COALESCE(source_interface_id, :zero::uuid),
-                        COALESCE(dest_interface_id,   :zero::uuid))
-                    DO UPDATE SET
-                        source_interface_id = EXCLUDED.source_interface_id,
-                        metadata            = EXCLUDED.metadata,
-                        updated_at          = now()
-                """), {"tid": tenant_id, "src": src, "siface": siface,
-                       "dst": dst, "ltype": edge.get("protocol", "lldp"),
-                       "meta": json.dumps(meta), "zero": _ZERO_UUID})
-
+            await db.execute(text("""
+                INSERT INTO topology_links
+                    (tenant_id, source_device_id, source_interface_id,
+                     dest_device_id, link_type, metadata, discovered_at, updated_at)
+                SELECT
+                    :tid::uuid,
+                    unnest(:srcs::uuid[]),
+                    NULLIF(unnest(:sifaces::uuid[]), :zero::uuid),
+                    unnest(:dsts::uuid[]),
+                    unnest(:ltypes::topology_link_type[]),
+                    unnest(:metas::jsonb[]),
+                    now(), now()
+                ON CONFLICT (source_device_id, dest_device_id, link_type,
+                    COALESCE(source_interface_id, :zero::uuid),
+                    COALESCE(dest_interface_id,   :zero::uuid))
+                DO UPDATE SET
+                    source_interface_id = EXCLUDED.source_interface_id,
+                    metadata            = EXCLUDED.metadata,
+                    updated_at          = now()
+            """), {
+                "tid":    tenant_id,
+                "srcs":   srcs,
+                "dsts":   dsts,
+                "ltypes": ltypes,
+                "metas":  metas,
+                "sifaces":sifaces,
+                "zero":   _ZERO_UUID,
+            })
+            # Prune edges not seen in the last 10 minutes
             await db.execute(text("""
                 DELETE FROM topology_links
                 WHERE tenant_id = :tid::uuid
-                AND updated_at < now() - interval '10 minutes'
+                  AND updated_at < now() - interval '10 minutes'
             """), {"tid": tenant_id})
-
             await db.commit()
     except Exception:
         logger.exception("topology_links_persist_failed")
 
 
+# ── Refresh ────────────────────────────────────────────────────────────────────
+
 async def _refresh_topology(tenant_id: str) -> None:
-    """Recompute topology from neighbor tables and update topology_links."""
+    """Recompute topology, update topology_links, and populate the in-memory cache."""
+    if tenant_id in _in_flight:
+        return  # already running for this tenant
+    _in_flight.add(tenant_id)
+    t0 = time.monotonic()
     try:
         async with AsyncSessionLocal() as db:
             devices = (await db.execute(
@@ -183,13 +229,37 @@ async def _refresh_topology(tenant_id: str) -> None:
                 )
             )).scalars().all()
             edges = await _compute_edges(devices, db)
+
         await _persist_topology_links(tenant_id, edges)
+
+        connected_ids = {e["source"] for e in edges} | {e["target"] for e in edges}
+        result = {
+            "nodes": [
+                {
+                    "id":          str(d.id),
+                    "hostname":    d.fqdn or d.hostname,
+                    "mgmt_ip":     str(d.mgmt_ip).split("/")[0],
+                    "vendor":      d.vendor,
+                    "device_type": d.device_type,
+                    "status":      d.status,
+                    "connected":   str(d.id) in connected_ids,
+                }
+                for d in devices
+            ],
+            "edges": edges,
+        }
+        _cache_set(tenant_id, result)
+        logger.debug("topology_refresh_complete", tenant_id=tenant_id,
+                     nodes=len(result["nodes"]), edges=len(edges),
+                     ms=round((time.monotonic() - t0) * 1000))
     except Exception:
-        logger.exception("topology_refresh_failed")
+        logger.exception("topology_refresh_failed", tenant_id=tenant_id)
+    finally:
+        _in_flight.discard(tenant_id)
 
 
 async def start_topology_refresh_loop(interval_seconds: int = 300) -> asyncio.Task:
-    """Periodic topology refresh — runs for all active tenants every interval."""
+    """Periodic topology refresh — runs for all tenants concurrently."""
     async def _loop() -> None:
         while True:
             await asyncio.sleep(interval_seconds)
@@ -198,13 +268,81 @@ async def start_topology_refresh_loop(interval_seconds: int = 300) -> asyncio.Ta
                     tenant_ids = (await db.execute(
                         text("SELECT DISTINCT tenant_id::text FROM devices WHERE is_active = true")
                     )).scalars().all()
-                for tid in tenant_ids:
-                    await _refresh_topology(tid)
-                    logger.debug("topology_refresh_complete", tenant_id=tid)
+                # Refresh all tenants concurrently
+                await asyncio.gather(*[_refresh_topology(tid) for tid in tenant_ids],
+                                     return_exceptions=True)
             except Exception:
                 logger.exception("topology_refresh_loop_error")
 
     return asyncio.create_task(_loop(), name="topology-refresh-loop")
+
+
+# ── HTTP endpoints ─────────────────────────────────────────────────────────────
+
+@router.get("", summary="Network topology graph derived from LLDP/CDP neighbor data")
+async def get_topology(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    tenant_id = str(current_user.tenant_id)
+
+    # Fast path: return cached result immediately
+    cached = _cache_get(tenant_id)
+    if cached is not None:
+        return cached
+
+    # Stale or first load: check topology_links for a warm-start
+    link_rows = (await db.execute(text("""
+        SELECT source_device_id::text, source_interface_id::text,
+               dest_device_id::text, link_type, metadata
+        FROM topology_links
+        WHERE tenant_id = :tid
+    """), {"tid": tenant_id})).mappings().all()
+
+    if link_rows:
+        # Return persisted edges immediately and refresh in background
+        edges = [
+            {
+                "id":               f"{row['link_type']}-{row['source_device_id'][:8]}-{row['dest_device_id'][:8]}",
+                "source":           row["source_device_id"],
+                "target":           row["dest_device_id"],
+                "source_port":      (row["metadata"] or {}).get("source_port"),
+                "target_port":      (row["metadata"] or {}).get("dest_port"),
+                "source_iface_id":  row["source_interface_id"],
+                "source_speed_bps": (row["metadata"] or {}).get("source_speed_bps"),
+                "source_if_index":  (row["metadata"] or {}).get("source_if_index"),
+                "protocol":         row["link_type"],
+            }
+            for row in link_rows
+        ]
+        devices = (await db.execute(
+            select(Device).where(Device.tenant_id == current_user.tenant_id,
+                                 Device.is_active == True)  # noqa: E712
+        )).scalars().all()
+        connected_ids = {e["source"] for e in edges} | {e["target"] for e in edges}
+        result = {
+            "nodes": [
+                {
+                    "id":          str(d.id),
+                    "hostname":    d.fqdn or d.hostname,
+                    "mgmt_ip":     str(d.mgmt_ip).split("/")[0],
+                    "vendor":      d.vendor,
+                    "device_type": d.device_type,
+                    "status":      d.status,
+                    "connected":   str(d.id) in connected_ids,
+                }
+                for d in devices
+            ],
+            "edges": edges,
+        }
+        _cache_set(tenant_id, result)
+        # Kick off background refresh — next request will get fresher data
+        asyncio.create_task(_refresh_topology(tenant_id))
+        return result
+
+    # Truly first run — compute synchronously so the page isn't blank
+    await _refresh_topology(tenant_id)
+    return _cache.get(tenant_id, (0, {"nodes": [], "edges": []}))[1]
 
 
 @router.get("/link-utilisation", summary="Current utilisation snapshot for a set of interfaces")
@@ -229,18 +367,13 @@ async def get_link_utilisation_batch(
     rows = (await db.execute(
         select(Interface.id, Interface.device_id, Interface.if_index, Interface.speed_bps)
         .join(Device, Interface.device_id == Device.id)
-        .where(
-            Interface.id.in_(valid_uuids),
-            Device.tenant_id == current_user.tenant_id,
-        )
+        .where(Interface.id.in_(valid_uuids), Device.tenant_id == current_user.tenant_id)
     )).all()
     if not rows:
         return {}
 
-    # (device_id, if_index) → (iface_id, speed_bps)
     key_to_iface: dict[tuple[str, str], tuple[str, int | None]] = {
-        (str(r.device_id), str(r.if_index)): (str(r.id), r.speed_bps)
-        for r in rows
+        (str(r.device_id), str(r.if_index)): (str(r.id), r.speed_bps) for r in rows
     }
     device_re = "|".join({str(r.device_id) for r in rows})
 
@@ -248,10 +381,8 @@ async def get_link_utilisation_batch(
         query = f'rate({metric}{{device_id=~"{device_re}"}}[2m]) * 8'
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get(
-                    "http://localhost:8428/api/v1/query",
-                    params={"query": query},
-                )
+                resp = await client.get("http://localhost:8428/api/v1/query",
+                                        params={"query": query})
             series_list = resp.json().get("data", {}).get("result", [])
         except Exception:
             logger.exception("topo_util_vm_failed", metric=metric)
@@ -261,10 +392,9 @@ async def get_link_utilisation_batch(
             did = series["metric"].get("device_id", "")
             idx = series["metric"].get("if_index", "")
             val = series.get("value")
-            bps = float(val[1]) if val else 0.0
             entry = key_to_iface.get((did, idx))
             if entry:
-                out[entry[0]] = bps
+                out[entry[0]] = float(val[1]) if val else 0.0
         return out
 
     in_map, out_map = await asyncio.gather(
@@ -280,63 +410,3 @@ async def get_link_utilisation_batch(
         }
         for r in rows
     }
-
-
-@router.get("", summary="Network topology graph derived from LLDP/CDP neighbor data")
-async def get_topology(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db),
-) -> dict:
-    tenant_id = current_user.tenant_id
-
-    devices = (await db.execute(
-        select(Device).where(Device.tenant_id == tenant_id, Device.is_active == True)  # noqa: E712
-    )).scalars().all()
-
-    # Read pre-computed edges from topology_links
-    link_rows = (await db.execute(text("""
-        SELECT source_device_id::text, source_interface_id::text,
-               dest_device_id::text, link_type, metadata
-        FROM topology_links
-        WHERE tenant_id = :tid
-    """), {"tid": str(tenant_id)})).mappings().all()
-
-    if link_rows:
-        edges = []
-        for row in link_rows:
-            meta     = row["metadata"] or {}
-            src_id   = row["source_device_id"]
-            dst_id   = row["dest_device_id"]
-            protocol = row["link_type"]
-            edges.append({
-                "id":               f"{protocol}-{src_id[:8]}-{dst_id[:8]}",
-                "source":           src_id,
-                "target":           dst_id,
-                "source_port":      meta.get("source_port"),
-                "target_port":      meta.get("dest_port"),
-                "source_iface_id":  row["source_interface_id"],
-                "source_speed_bps": meta.get("source_speed_bps"),
-                "source_if_index":  meta.get("source_if_index"),
-                "protocol":         protocol,
-            })
-        asyncio.create_task(_refresh_topology(str(tenant_id)))
-    else:
-        # First run or table expired — compute synchronously so the page isn't blank
-        edges = await _compute_edges(devices, db)
-        asyncio.create_task(_persist_topology_links(str(tenant_id), edges))
-
-    connected_ids = {e["source"] for e in edges} | {e["target"] for e in edges}
-    nodes = [
-        {
-            "id":          str(d.id),
-            "hostname":    d.fqdn or d.hostname,
-            "mgmt_ip":     str(d.mgmt_ip).split("/")[0],
-            "vendor":      d.vendor,
-            "device_type": d.device_type,
-            "status":      d.status,
-            "connected":   str(d.id) in connected_ids,
-        }
-        for d in devices
-    ]
-
-    return {"nodes": nodes, "edges": edges}

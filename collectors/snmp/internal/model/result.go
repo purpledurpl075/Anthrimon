@@ -133,6 +133,22 @@ type OSPFNeighbour struct {
 	InterfaceName string // resolved from ospfIfTable → ifIndex → ifName
 }
 
+// BGPSession is one row from bgpPeerTable (RFC 1657) for a device.
+type BGPSession struct {
+	DeviceID         uuid.UUID
+	PeerIP           string // bgpPeerRemoteAddr (index, dotted-decimal)
+	PeerRouterID     string // bgpPeerIdentifier
+	LocalASN         int64
+	RemoteASN        int64
+	State            string // "established" | "active" | "idle" | "connect" | "opensent" | "openconfirm" | "unknown"
+	AdminStatus      string // "start" | "stop"
+	UptimeSeconds    int64  // seconds since session established (0 if not established)
+	InUpdates        int64
+	OutUpdates       int64
+	FlapCount        int64  // bgpPeerFsmEstablishedTransitions — total times entered Established
+	PrefixesReceived int
+}
+
 // ARPEntry is one row from the device's ARP table (ipNetToMediaTable).
 type ARPEntry struct {
 	DeviceID      uuid.UUID

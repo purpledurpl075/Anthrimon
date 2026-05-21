@@ -195,6 +195,26 @@ const (
 	UCDMemAvailReal = "1.3.6.1.4.1.2021.4.6.0"   // memAvailReal — available physical RAM (KB)
 )
 
+// ── BGP4-MIB (RFC 1657) ──────────────────────────────────────────────────────
+// bgpPeerTable: one row per BGP peer. Indexed by bgpPeerRemoteAddr (dotted IPv4).
+const BGPPeerTable = "1.3.6.1.2.1.15.3.1"
+
+// bgpPeerTable column subtrees (col.a.b.c.d).
+const (
+	BGPLocalAs              = "1.3.6.1.2.1.15.2.0" // scalar — local AS number
+	BGPPeerState            = "1.3.6.1.2.1.15.3.1.2"  // 1=idle 2=connect 3=active 4=opensent 5=openconfirm 6=established
+	BGPPeerAdminStatus      = "1.3.6.1.2.1.15.3.1.3"  // 1=stop 2=start
+	BGPPeerRemoteAs         = "1.3.6.1.2.1.15.3.1.9"  // remote AS number
+	BGPPeerInUpdates        = "1.3.6.1.2.1.15.3.1.7"  // total UPDATE messages received
+	BGPPeerOutUpdates       = "1.3.6.1.2.1.15.3.1.8"  // total UPDATE messages sent
+	BGPPeerEstablishedTime  = "1.3.6.1.2.1.15.3.1.16" // sysUpTime when session became established
+	BGPPeerIdentifier       = "1.3.6.1.2.1.15.3.1.1"  // peer BGP router-ID
+	BGPPeerHoldTime         = "1.3.6.1.2.1.15.3.1.19" // negotiated hold time
+	BGPPeerKeepAlive             = "1.3.6.1.2.1.15.3.1.20" // negotiated keepalive
+	BGPPeerInPrefixes            = "1.3.6.1.2.1.15.3.1.11" // prefixes received (RFC 1657 col 11)
+	BGPPeerFsmEstablishedTrans   = "1.3.6.1.2.1.15.3.1.15" // total times entered Established (flap counter)
+)
+
 // ── OSPF-MIB (RFC 1850) ───────────────────────────────────────────────────────
 // ospfNbrTable: one row per OSPF neighbour relationship.
 // Indexed by (ospfNbrIpAddr, ospfNbrAddressLessIndex).

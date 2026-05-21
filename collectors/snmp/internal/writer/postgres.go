@@ -84,6 +84,12 @@ func (w *PostgresWriter) Handle(ctx context.Context, result *poller.PollResult) 
 		}
 	}
 
+	if len(result.BGPSessions) > 0 {
+		if err := w.upsertBGPSessions(ctx, result.DeviceID, result.BGPSessions); err != nil {
+			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert bgp sessions failed")
+		}
+	}
+
 	if len(result.ARPEntries) > 0 {
 		if err := w.upsertARPEntries(ctx, result.DeviceID, result.ARPEntries); err != nil {
 			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert arp entries failed")
@@ -363,6 +369,123 @@ func (w *PostgresWriter) upsertOSPFNeighbours(ctx context.Context, deviceID uuid
 	for i := 0; i < batch.Len(); i++ {
 		if _, err := br.Exec(); err != nil {
 			w.log.Error().Err(err).Msg("ospf neighbour batch exec error")
+		}
+	}
+	return nil
+}
+
+// ── BGP ───────────────────────────────────────────────────────────────────────
+
+func (w *PostgresWriter) upsertBGPSessions(ctx context.Context, deviceID uuid.UUID, sessions []*model.BGPSession) error {
+	if len(sessions) == 0 {
+		return nil
+	}
+
+	// Snapshot current state + flap_count so we can detect transitions.
+	type snap struct {
+		id        string
+		peerIP    string
+		state     string
+		flapCount int64
+	}
+	snapRows, err := w.pool.Query(ctx,
+		`SELECT id::text, peer_ip::text, session_state::text, flap_count FROM bgp_sessions WHERE device_id = $1`,
+		deviceID,
+	)
+	prev := map[string]snap{}
+	if err == nil {
+		for snapRows.Next() {
+			var sn snap
+			if scanErr := snapRows.Scan(&sn.id, &sn.peerIP, &sn.state, &sn.flapCount); scanErr == nil {
+				prev[sn.peerIP] = sn
+			}
+		}
+		snapRows.Close()
+	}
+
+	// Upsert all sessions.
+	batch := &pgx.Batch{}
+	for _, s := range sessions {
+		batch.Queue(`
+			INSERT INTO bgp_sessions (
+				device_id, peer_ip, peer_router_id, peer_description,
+				local_asn, peer_asn,
+				session_state, admin_status,
+				prefixes_received,
+				uptime_seconds,
+				in_updates, out_updates,
+				flap_count,
+				updated_at
+			) VALUES (
+				$1, $2::inet, $3, $3,
+				$4, $5,
+				$6::bgp_session_state, $7,
+				$8,
+				$9,
+				$10, $11,
+				$12,
+				NOW()
+			)
+			ON CONFLICT (device_id, vrf, peer_ip) DO UPDATE SET
+				peer_router_id    = EXCLUDED.peer_router_id,
+				peer_description  = EXCLUDED.peer_description,
+				local_asn         = EXCLUDED.local_asn,
+				peer_asn          = EXCLUDED.peer_asn,
+				session_state     = EXCLUDED.session_state,
+				admin_status      = EXCLUDED.admin_status,
+				prefixes_received = EXCLUDED.prefixes_received,
+				uptime_seconds    = EXCLUDED.uptime_seconds,
+				in_updates        = EXCLUDED.in_updates,
+				out_updates       = EXCLUDED.out_updates,
+				flap_count        = EXCLUDED.flap_count,
+				last_state_change = CASE
+					WHEN bgp_sessions.session_state != EXCLUDED.session_state THEN NOW()
+					ELSE bgp_sessions.last_state_change
+				END,
+				updated_at = NOW()
+		`,
+			deviceID,
+			s.PeerIP,
+			s.PeerRouterID,
+			s.LocalASN, s.RemoteASN,
+			s.State, s.AdminStatus,
+			s.PrefixesReceived,
+			s.UptimeSeconds,
+			s.InUpdates, s.OutUpdates,
+			s.FlapCount,
+		)
+	}
+	br := w.pool.SendBatch(ctx, batch)
+	defer br.Close()
+	for i := 0; i < batch.Len(); i++ {
+		if _, err := br.Exec(); err != nil {
+			w.log.Error().Err(err).Msg("bgp session upsert error")
+		}
+	}
+
+	// Log an event for every state transition detected since last poll.
+	eventBatch := &pgx.Batch{}
+	for _, s := range sessions {
+		p, existed := prev[s.PeerIP]
+		if existed && p.state != s.State {
+			eventBatch.Queue(`
+				INSERT INTO bgp_session_events (session_id, device_id, peer_ip, prev_state, new_state, recorded_at)
+				SELECT id, $1, $2::inet, $3, $4, NOW() FROM bgp_sessions WHERE device_id = $1 AND peer_ip = $2::inet LIMIT 1
+			`, deviceID, s.PeerIP, p.state, s.State)
+			w.log.Info().
+				Str("device_id", deviceID.String()).
+				Str("peer_ip", s.PeerIP).
+				Str("prev", p.state).Str("new", s.State).
+				Msg("bgp state transition")
+		}
+	}
+	if eventBatch.Len() > 0 {
+		ebr := w.pool.SendBatch(ctx, eventBatch)
+		defer ebr.Close()
+		for i := 0; i < eventBatch.Len(); i++ {
+			if _, err := ebr.Exec(); err != nil {
+				w.log.Error().Err(err).Msg("bgp event insert error")
+			}
 		}
 	}
 	return nil

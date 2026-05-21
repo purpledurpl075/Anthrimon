@@ -14,26 +14,43 @@ export interface DiscoveredDevice {
   sys_object_id: string
   already_in_db: boolean
   device_id: string | null
+  credential_id: string | null  // which credential responded
 }
 
 export interface SweepJob {
-  job_id: string
-  status: 'pending' | 'running' | 'done' | 'error'
-  cidr: string
-  total: number
-  scanned: number
-  found: DiscoveredDevice[]
-  error: string | null
-  started_at: string
+  job_id:      string
+  status:      'pending' | 'running' | 'done' | 'cancelled' | 'error'
+  cidr:        string
+  total:       number
+  scanned:     number
+  found:       DiscoveredDevice[]
+  error:       string | null
+  started_at:  string
+  finished_at: string | null
+}
+
+export interface SweepJobSummary {
+  job_id:      string
+  status:      string
+  cidr:        string
+  total:       number
+  scanned:     number
+  found:       number
+  started_at:  string
   finished_at: string | null
 }
 
 export const fetchCredentials = () =>
-  api.get<Credential[]>('/credentials').then(r => r.data)
-// Note: fetchCredentials here fetches SNMP-only (no ?all=true) for the sweep dropdown
+  api.get<Credential[]>('/credentials', { params: { all: true } }).then(r => r.data)
 
-export const startSweep = (cidr: string, credential_id: string, timeout_s = 3) =>
-  api.post<SweepJob>('/discovery/sweep', { cidr, credential_id, timeout_s }).then(r => r.data)
+export const startSweep = (cidr: string, credential_ids: string[], timeout_s = 3) =>
+  api.post<SweepJob>('/discovery/sweep', { cidr, credential_ids, timeout_s }).then(r => r.data)
 
-export const getSweepJob = (job_id: string) =>
+export const getSweepJob    = (job_id: string) =>
   api.get<SweepJob>(`/discovery/sweep/${job_id}`).then(r => r.data)
+
+export const listSweepJobs  = () =>
+  api.get<SweepJobSummary[]>('/discovery/sweep').then(r => r.data)
+
+export const cancelSweepJob = (job_id: string) =>
+  api.delete(`/discovery/sweep/${job_id}`)

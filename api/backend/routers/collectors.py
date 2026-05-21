@@ -172,7 +172,7 @@ def _ca_cert_pem() -> Optional[str]:
     try:
         with open("/etc/anthrimon/tls/ca.crt") as f:
             return f.read()
-    except FileNotFoundError:
+    except Exception:
         return None
 
 
@@ -243,7 +243,7 @@ async def create_collector(
         site_id          = body.site_id,
         name             = body.name,
         token_hash       = token_hash,
-        token_expires_at = datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS),
+        token_expires_at = datetime.utcnow() + timedelta(hours=TOKEN_TTL_HOURS),
         status           = "pending",
     )
     db.add(c)
@@ -313,7 +313,7 @@ async def regenerate_token(
         raise HTTPException(status_code=404, detail="Collector not found")
     token, token_hash = _generate_token()
     c.token_hash       = token_hash
-    c.token_expires_at = datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)
+    c.token_expires_at = datetime.utcnow() + timedelta(hours=TOKEN_TTL_HOURS)
     await db.commit()
     return {"registration_token": token, "ca_cert": _ca_cert_pem(),
             "expires_at": c.token_expires_at.isoformat()}

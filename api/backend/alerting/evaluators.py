@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from dataclasses import dataclass, field
@@ -223,13 +224,16 @@ async def eval_interface_util(db: AsyncSession, device: dict, threshold: float) 
     device_id = device["id"]
     # Compute utilisation % = (rate of octets * 8 bits) / link_speed * 100
     # Use max(in, out) so a single threshold covers both directions.
+    # Only evaluate interfaces that have a known non-zero speed (> 0).
+    # Dividing by a zero-speed interface produces Infinity which causes false positives.
+    speed_filter = f'anthrimon_if_speed_bps{{device_id="{device_id}"}} > 0'
     query = (
         f'max by (if_index, if_name) ('
         f'  clamp_min(rate(anthrimon_if_in_octets_total{{device_id="{device_id}"}}[5m]) * 8'
-        f'    / on(if_index) group_left() anthrimon_if_speed_bps{{device_id="{device_id}"}} * 100, 0)'
+        f'    / on(if_index) group_left() ({speed_filter}) * 100, 0)'
         f') or max by (if_index, if_name) ('
         f'  clamp_min(rate(anthrimon_if_out_octets_total{{device_id="{device_id}"}}[5m]) * 8'
-        f'    / on(if_index) group_left() anthrimon_if_speed_bps{{device_id="{device_id}"}} * 100, 0)'
+        f'    / on(if_index) group_left() ({speed_filter}) * 100, 0)'
         f')'
     )
     try:
@@ -244,7 +248,7 @@ async def eval_interface_util(db: AsyncSession, device: dict, threshold: float) 
     seen_if_indexes: set[str] = set()
     for r in results:
         val = float(r.get("value", [0, 0])[1] or 0)
-        if val < threshold:
+        if not math.isfinite(val) or val < threshold:
             continue
         if_index = r["metric"].get("if_index", "")
         # Deduplicate — the `or` can produce two rows per interface
@@ -550,6 +554,61 @@ async def fetch_syslog_context(device_id: str, count: int = 5) -> list[dict]:
         ]
     except Exception:
         return []
+
+
+async def eval_bgp_session_down(db: AsyncSession, device: dict) -> list[Breach]:
+    """Alert when any BGP session with admin_status=start is not established."""
+    rows = (await db.execute(
+        text(
+            "SELECT peer_ip::text, peer_asn, local_asn, session_state "
+            "FROM bgp_sessions "
+            "WHERE device_id = :did "
+            "  AND admin_status = 'start' "
+            "  AND session_state != 'established' "
+            "  AND session_state != 'unknown'"
+        ),
+        {"did": device["id"]},
+    )).mappings().all()
+
+    return [
+        Breach(device["id"], device["hostname"], extra={
+            "peer_ip":       row["peer_ip"],
+            "peer_asn":      row["peer_asn"],
+            "local_asn":     row["local_asn"],
+            "session_state": row["session_state"],
+        })
+        for row in rows
+    ]
+
+
+async def eval_bgp_session_flapping(
+    db: AsyncSession, device: dict, threshold: int = 3, window_minutes: int = 60
+) -> list[Breach]:
+    """Alert when a BGP session has flapped >= threshold times in the last window_minutes."""
+    rows = (await db.execute(
+        text("""
+            SELECT s.peer_ip::text, s.peer_asn, s.local_asn, s.session_state,
+                   COUNT(e.id) AS flap_count
+            FROM bgp_sessions s
+            JOIN bgp_session_events e ON e.session_id = s.id
+            WHERE s.device_id = :did
+              AND e.recorded_at >= NOW() - INTERVAL ':window minutes'
+            GROUP BY s.id, s.peer_ip, s.peer_asn, s.local_asn, s.session_state
+            HAVING COUNT(e.id) >= :threshold
+        """),
+        {"did": device["id"], "window": window_minutes, "threshold": threshold},
+    )).mappings().all()
+
+    return [
+        Breach(device["id"], device["hostname"], extra={
+            "peer_ip":       row["peer_ip"],
+            "peer_asn":      row["peer_asn"],
+            "session_state": row["session_state"],
+            "flap_count":    int(row["flap_count"]),
+            "window_minutes": window_minutes,
+        })
+        for row in rows
+    ]
 
 
 async def eval_route_missing(db: AsyncSession, device: dict, prefix: str) -> list[Breach]:

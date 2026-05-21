@@ -25,6 +25,7 @@ export const WIDGET_DEFS: WidgetDef[] = [
   { id: 'open_alerts',          label: 'Open alerts',          description: 'Highest-severity open alerts',               defaultSize: 'half' },
   { id: 'top_alerting_devices', label: 'Top alerting devices', description: 'Devices with the most open alerts',          defaultSize: 'half' },
   { id: 'recently_resolved',    label: 'Recently resolved',    description: 'Alerts resolved in the last hour',           defaultSize: 'full' },
+  { id: 'bgp_summary',          label: 'BGP summary',          description: 'BGP session health across all devices',       defaultSize: 'half' },
 ]
 
 const STORAGE_KEY = 'anthrimon-dashboard-layout-v1'

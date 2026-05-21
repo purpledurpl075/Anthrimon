@@ -183,7 +183,7 @@ async def create_device(
     current_user: User = Depends(require_role("admin", "superadmin", "operator")),
     db: AsyncSession = Depends(get_db),
 ) -> DeviceRead:
-    fields = body.model_dump(exclude_none=True, exclude={"mgmt_ip"})
+    fields = body.model_dump(exclude_none=True, exclude={"mgmt_ip", "credential_id"})
     if "device_type" not in fields and "vendor" in fields:
         fields.setdefault("device_type", _VENDOR_DEVICE_TYPE.get(fields["vendor"], "unknown"))
     device = Device(
@@ -192,6 +192,19 @@ async def create_device(
         mgmt_ip=str(body.mgmt_ip),
     )
     db.add(device)
+    await db.flush()  # get device.id before linking credential
+
+    if body.credential_id:
+        cred = (await db.execute(
+            select(Credential).where(
+                Credential.id == body.credential_id,
+                Credential.tenant_id == current_user.tenant_id,
+            )
+        )).scalar_one_or_none()
+        if cred is None:
+            raise HTTPException(status_code=404, detail="Credential not found")
+        db.add(DeviceCredential(device_id=device.id, credential_id=body.credential_id, priority=0))
+
     await db.commit()
     await db.refresh(device)
     logger.info("device_created", device_id=str(device.id), hostname=device.hostname)

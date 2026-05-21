@@ -16,7 +16,7 @@ from .alerting.engine import start_alert_engine
 from .configmgmt.collector import start_config_collector
 from .collectors.monitor import start_collector_monitor
 from .routers import (admin_router, alerts_router, auth_router, channels_router,
-                      collectors_router, config_router, credentials_router, devices_router,
+                      bgp_router, collectors_router, config_router, credentials_router, devices_router,
                       discovery_router, flow_router, syslog_router, interfaces_router,
                       maintenance_router, overview_router, policies_router, topology_router,
                       users_router)
@@ -119,6 +119,7 @@ app.include_router(overview_router,    prefix=PREFIX)
 app.include_router(flow_router,        prefix=PREFIX)
 app.include_router(syslog_router,      prefix=PREFIX)
 app.include_router(config_router,      prefix=PREFIX)
+app.include_router(bgp_router,         prefix=PREFIX)
 app.include_router(collectors_router,  prefix=PREFIX)
 app.include_router(policies_router,    prefix=PREFIX)
 app.include_router(topology_router,    prefix=PREFIX)

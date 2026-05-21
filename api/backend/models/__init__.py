@@ -1,5 +1,6 @@
 from .tenant import Tenant, User, ApiToken
 from .site import Site, RemoteCollector, WgIpPool
+from .bgp import BGPSession
 from .credential import Credential, DeviceCredential
 from .device import Device
 from .interface import Interface, InterfaceStatusLog

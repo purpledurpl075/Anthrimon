@@ -1,0 +1,14 @@
+[Unit]
+Description=Anthrimon SNMP collector
+After=network.target postgresql.service victoria-metrics.service
+
+[Service]
+User=poly
+ExecStart=/home/poly/Anthri-mon/collectors/snmp/snmp-collector --config /home/poly/Anthri-mon/collectors/snmp/snmp-collector.yaml
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

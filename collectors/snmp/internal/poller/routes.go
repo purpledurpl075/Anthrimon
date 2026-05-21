@@ -12,7 +12,7 @@ import (
 )
 
 // PollRouteTable walks ipCidrRouteTable (RFC 2096) and returns connected,
-// static and OSPF routes. BGP and IS-IS entries are skipped for now.
+// static, OSPF, BGP, IS-IS, RIP, and EIGRP routes.
 func PollRouteTable(s *client.Session, deviceID uuid.UUID, ifByIndex map[int]string) ([]*model.RouteEntry, error) {
 	pdus, err := s.BulkWalkAll(oid.IPCidrRouteTable)
 	if err != nil || len(pdus) == 0 {
@@ -50,7 +50,7 @@ func PollRouteTable(s *client.Session, deviceID uuid.UUID, ifByIndex map[int]str
 	for k, r := range rows {
 		proto := cidrProtoName(r.proto)
 		if proto == "" {
-			continue // skip BGP, IS-IS, etc.
+			continue // skip unknown/uninteresting protocols
 		}
 		if r.routeType == 2 {
 			continue // reject/null route
@@ -100,14 +100,18 @@ func splitCidrRouteIndex(pduName string) (col int, dest, mask, nexthop string, o
 	return c, dest, mask, nexthop, true
 }
 
-// cidrProtoName maps ipCidrProto integer to our protocol string.
-// Returns "" for protocols we skip (BGP, IS-IS, etc.).
+// cidrProtoName maps RFC 2096 ipCidrRouteProto values to protocol strings.
+// Returns "" for protocols we don't care about.
 func cidrProtoName(v int) string {
 	switch v {
-	case 2: return "connected" // local
-	case 3: return "static"    // netmgmt
-	case 9: return "ospf"
-	case 1: return "other"
-	default: return "" // skip BGP(13), ISIS(14), IGRP(7), EIGRP(11), RIP(8), etc.
+	case 2:  return "connected" // local
+	case 3:  return "static"    // netmgmt
+	case 8:  return "rip"
+	case 9:  return "isis"      // IS-IS (NOT ospf — common mistake)
+	case 13: return "ospf"      // ospf is 13 in RFC 2096
+	case 14: return "bgp"
+	case 16: return "eigrp"
+	case 1:  return "other"
+	default: return ""
 	}
 }

@@ -22,13 +22,26 @@ from .evaluators import (
     eval_interface_down, eval_interface_flap,
     eval_uptime, eval_temperature, eval_interface_errors, eval_interface_util,
     eval_custom_oid, eval_ospf_state, eval_route_missing, eval_flow_bandwidth,
-    eval_syslog_match, fetch_syslog_context,
+    eval_syslog_match, eval_bgp_session_down, eval_bgp_session_flapping, fetch_syslog_context,
     resolve_devices,
 )
 
 logger = structlog.get_logger(__name__)
 
 EVAL_INTERVAL = 15  # seconds
+
+
+def _safe_context(ctx: dict) -> dict:
+    """Sanitize a context dict for JSONB storage — replace Infinity/NaN with None."""
+    def _clean(v):
+        if isinstance(v, float) and not math.isfinite(v):
+            return None
+        if isinstance(v, dict):
+            return {k: _clean(val) for k, val in v.items()}
+        if isinstance(v, list):
+            return [_clean(i) for i in v]
+        return v
+    return {k: _clean(v) for k, v in ctx.items()}
 
 # Pending notification: (alert, rule, resolved)
 _PendingNotif = tuple[Alert, AlertRule, bool]
@@ -98,8 +111,10 @@ def _build_title(rule: AlertRule, breach: Breach) -> str:
         "uptime":          f"rebooted (uptime {int(breach.value) if breach.value and math.isfinite(breach.value) else 0}s)",
         "route_missing":    f"route {breach.extra.get('prefix', rule.custom_oid or '?')} missing",
         "flow_bandwidth":  f"flow bandwidth {breach.value / 1e6:.1f} Mbps ({breach.extra.get('flow_filter','')}) high" if breach.value is not None else "flow bandwidth high",
-        "syslog_match":    f"syslog match ({int(breach.value or 0)}×): {breach.extra.get('syslog_message', breach.extra.get('syslog_pattern','')[:60])}",
+        "syslog_match":    f"syslog match ({int(breach.value) if breach.value and math.isfinite(breach.value) else 0}×): {breach.extra.get('syslog_message', breach.extra.get('syslog_pattern','')[:60])}",
         "config_change":   f"config changed (+{breach.extra.get('lines_added',0)} -{breach.extra.get('lines_removed',0)} lines)",
+        "bgp_session_down":    f"BGP peer {breach.extra.get('peer_ip','?')} (AS{breach.extra.get('peer_asn','?')}) {breach.extra.get('session_state','down')}",
+        "bgp_session_flapping":f"BGP peer {breach.extra.get('peer_ip','?')} (AS{breach.extra.get('peer_asn','?')}) flapped {breach.extra.get('flap_count',0)}× in {breach.extra.get('window_minutes',60)}m",
     }
     return f"{base}: {metric_labels.get(rule.metric, rule.metric)}"
 
@@ -306,6 +321,12 @@ class AlertEngine:
             elif rule.metric == "flow_bandwidth" and rule.threshold is not None:
                 b = await eval_flow_bandwidth(device, rule.custom_oid or "", rule.threshold)
                 if b: breaches.append(b)
+            elif rule.metric == "bgp_session_down":
+                breaches.extend(await eval_bgp_session_down(db, device))
+            elif rule.metric == "bgp_session_flapping":
+                threshold  = int(rule.threshold)  if rule.threshold  else 3
+                window_min = int(rule.duration_seconds // 60) if rule.duration_seconds else 60
+                breaches.extend(await eval_bgp_session_flapping(db, device, threshold, window_min))
             elif rule.metric == "syslog_match" and rule.custom_oid:
                 b = await eval_syslog_match(
                     device, rule.custom_oid,
@@ -433,7 +454,7 @@ class AlertEngine:
                     status="suppressed" if suppressed else "open",
                     title=_build_title(rule, breach),
                     message=rule.description,
-                    context={
+                    context=_safe_context({
                         "metric":      rule.metric,
                         "device_name": breach.device_name,
                         "value":       breach.value,
@@ -443,7 +464,7 @@ class AlertEngine:
                         # Annotate with recent syslog from this device (best-effort)
                         "syslog_context": await fetch_syslog_context(breach.device_id, count=5)
                                           if breach.device_id else [],
-                    },
+                    }),
                     triggered_at=now,
                     fingerprint=fp,
                     last_notified_at=now if not suppressed else None,
