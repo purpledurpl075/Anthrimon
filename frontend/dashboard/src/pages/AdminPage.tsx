@@ -599,6 +599,7 @@ interface PlatformSettings {
   business_hours_end:             number
   business_days:                  number[]
   alert_retention_days:           number
+  abuseipdb_api_key:              string
 }
 
 const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
@@ -815,6 +816,14 @@ function PlatformTab() {
             {numInput('alert_retention_days')}
             <span className="text-xs text-slate-400 shrink-0">days</span>
           </div>
+        </SettingRow>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 px-6">
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide pt-4 pb-2">Threat Intelligence</h3>
+        <SettingRow label="AbuseIPDB API key"
+          description="Used to score IPs in flow data. Free key at abuseipdb.com — 1 000 checks/day. Leave blank to disable.">
+          {textInput('abuseipdb_api_key', 'Paste API key here', 'password')}
         </SettingRow>
       </div>
 

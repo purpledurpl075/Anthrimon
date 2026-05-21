@@ -178,16 +178,16 @@ async def _persist_topology_links(tenant_id: str, edges: list[dict]) -> None:
                     (tenant_id, source_device_id, source_interface_id,
                      dest_device_id, link_type, metadata, discovered_at, updated_at)
                 SELECT
-                    :tid::uuid,
-                    unnest(:srcs::uuid[]),
-                    NULLIF(unnest(:sifaces::uuid[]), :zero::uuid),
-                    unnest(:dsts::uuid[]),
-                    unnest(:ltypes::topology_link_type[]),
-                    unnest(:metas::jsonb[]),
+                    CAST(:tid AS uuid),
+                    unnest(CAST(:srcs AS uuid[])),
+                    NULLIF(unnest(CAST(:sifaces AS uuid[])), CAST(:zero AS uuid)),
+                    unnest(CAST(:dsts AS uuid[])),
+                    unnest(CAST(:ltypes AS topology_link_type[])),
+                    unnest(CAST(:metas AS jsonb[])),
                     now(), now()
                 ON CONFLICT (source_device_id, dest_device_id, link_type,
-                    COALESCE(source_interface_id, :zero::uuid),
-                    COALESCE(dest_interface_id,   :zero::uuid))
+                    COALESCE(source_interface_id, CAST(:zero AS uuid)),
+                    COALESCE(dest_interface_id,   CAST(:zero AS uuid)))
                 DO UPDATE SET
                     source_interface_id = EXCLUDED.source_interface_id,
                     metadata            = EXCLUDED.metadata,

@@ -422,6 +422,16 @@ async def collect_device(device_id: str, db: AsyncSession) -> Optional[ConfigBac
 
     now = datetime.now(timezone.utc)
 
+    # Clear old is_latest BEFORE inserting the new one to avoid the
+    # unique partial index constraint firing during autoflush.
+    if prev:
+        await db.execute(
+            update(ConfigBackup)
+            .where(ConfigBackup.id == prev.id)
+            .values(is_latest=False)
+        )
+        await db.flush()
+
     # Create new backup
     backup = ConfigBackup(
         device_id=device_id,
@@ -432,15 +442,6 @@ async def collect_device(device_id: str, db: AsyncSession) -> Optional[ConfigBac
         is_latest=True,
     )
     db.add(backup)
-
-    # Clear old is_latest
-    if prev:
-        await db.execute(
-            update(ConfigBackup)
-            .where(ConfigBackup.id == prev.id)
-            .values(is_latest=False)
-        )
-
     await db.flush()  # get backup.id
 
     # Generate diff

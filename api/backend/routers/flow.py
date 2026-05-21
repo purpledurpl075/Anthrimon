@@ -802,51 +802,104 @@ async def asn_summary(
         return []
 
     dev_filter = _device_filter(device_ids)
+    ip_col = "src_ip" if direction != "dst" else "dst_ip"
+    from sqlalchemy import text as sq_text
 
-    if direction == "src":
-        asn_col, asn_label = "src_asn", "asn"
-    elif direction == "dst":
-        asn_col, asn_label = "dst_asn", "asn"
-    else:  # both
-        asn_col, asn_label = "src_asn", "asn"
-
-    rows = await _ch(f"""
-        SELECT
-            {asn_col}             AS asn,
-            sum(bytes_total)      AS bytes_total,
-            sum(flow_count)       AS flow_count,
-            sum(packets_total)    AS packets_total
+    # Try native ASN fields from flow records first (populated when exporter
+    # provides BGP peer data). Fall back to ip_intel GeoIP lookup when the
+    # exporter sets asn=0 (common with sFlow and many NetFlow configurations).
+    asn_col = "src_asn" if direction != "dst" else "dst_asn"
+    native_check = await _ch(f"""
+        SELECT countIf({asn_col} > 0) AS has_asn
         FROM flow_agg_asn_5min
         WHERE {dev_filter}
           AND bucket >= now() - INTERVAL {minutes} MINUTE
-          AND {asn_col} > 0
-        GROUP BY asn
+        LIMIT 1
+    """)
+    use_native = native_check and int(native_check[0].get("has_asn", 0)) > 0
+
+    if use_native:
+        rows = await _ch(f"""
+            SELECT
+                {asn_col}             AS asn,
+                sum(bytes_total)      AS bytes_total,
+                sum(flow_count)       AS flow_count
+            FROM flow_agg_asn_5min
+            WHERE {dev_filter}
+              AND bucket >= now() - INTERVAL {minutes} MINUTE
+              AND {asn_col} > 0
+            GROUP BY asn
+            ORDER BY bytes_total DESC
+            LIMIT {limit}
+        """)
+        asn_nums = [int(r["asn"]) for r in rows if r["asn"]]
+        asn_names: dict[int, str] = {}
+        if asn_nums:
+            name_rows = (await db.execute(
+                sq_text("SELECT DISTINCT ON (asn) asn, asn_org FROM ip_intel WHERE asn = ANY(:asns) AND asn_org IS NOT NULL"),
+                {"asns": asn_nums},
+            )).all()
+            asn_names = {r.asn: r.asn_org for r in name_rows}
+        total_bytes = sum(int(r["bytes_total"]) for r in rows) or 1
+        return [
+            {
+                "asn":         int(r["asn"]),
+                "asn_name":    asn_names.get(int(r["asn"]), f"AS{r['asn']}"),
+                "bytes_total": int(r["bytes_total"]),
+                "flow_count":  int(r["flow_count"]),
+                "pct":         round(int(r["bytes_total"]) / total_bytes * 100, 1),
+            }
+            for r in rows
+        ]
+
+    # --- Fallback: derive ASN from ip_intel GeoIP cache ---
+    # Get top IPs by bytes, then group by their ASN from the intel table.
+    top_ips = await _ch(f"""
+        SELECT
+            IPv4NumToString({ip_col}) AS ip,
+            sum(bytes_total)          AS bytes_total,
+            sum(flow_count)           AS flow_count
+        FROM flow_agg_1min
+        WHERE {dev_filter}
+          AND minute >= now() - INTERVAL {minutes} MINUTE
+        GROUP BY {ip_col}
         ORDER BY bytes_total DESC
-        LIMIT {limit}
+        LIMIT 500
     """)
 
-    # Enrich with ASN name from ip_intel
-    from sqlalchemy import text as sq_text
-    asn_nums = [int(r["asn"]) for r in rows if r["asn"]]
-    asn_names: dict[int, str] = {}
-    if asn_nums:
-        name_rows = (await db.execute(
-            sq_text("SELECT DISTINCT ON (asn) asn, asn_org FROM ip_intel WHERE asn = ANY(:asns) AND asn_org IS NOT NULL"),
-            {"asns": asn_nums},
-        )).all()
-        asn_names = {r.asn: r.asn_org for r in name_rows}
+    if not top_ips:
+        return []
 
-    total_bytes = sum(int(r["bytes_total"]) for r in rows) or 1
-    return [
-        {
-            "asn":        int(r["asn"]),
-            "asn_name":   asn_names.get(int(r["asn"]), f"AS{r['asn']}"),
-            "bytes_total": int(r["bytes_total"]),
-            "flow_count":  int(r["flow_count"]),
-            "pct":         round(int(r["bytes_total"]) / total_bytes * 100, 1),
-        }
-        for r in rows
-    ]
+    ips = [r["ip"] for r in top_ips if not is_private(r["ip"])]
+    if not ips:
+        return []
+
+    # Look up ASNs from ip_intel for all these IPs, trigger background enrichment
+    intel = await get_intel(ips)
+    import asyncio as _asyncio
+    _asyncio.create_task(enrich_ips(ips))
+
+    # Aggregate bytes by ASN
+    asn_totals: dict[int, dict] = {}
+    for r in top_ips:
+        ip = r["ip"]
+        entry = intel.get(ip, {})
+        asn = entry.get("asn")
+        if not asn:
+            continue
+        name = entry.get("asn_org") or f"AS{asn}"
+        b = int(r["bytes_total"])
+        if asn not in asn_totals:
+            asn_totals[asn] = {"asn": asn, "asn_name": name, "bytes_total": 0, "flow_count": 0}
+        asn_totals[asn]["bytes_total"] += b
+        asn_totals[asn]["flow_count"]  += int(r["flow_count"])
+
+    results = sorted(asn_totals.values(), key=lambda x: x["bytes_total"], reverse=True)[:limit]
+    total_bytes = sum(r["bytes_total"] for r in results) or 1
+    for r in results:
+        r["pct"] = round(r["bytes_total"] / total_bytes * 100, 1)
+    return results
+
 
 
 @router.get("/application-summary", summary="Traffic grouped by application/service")
