@@ -47,6 +47,8 @@ PLATFORM_DEFAULTS: dict = {
     "business_days":                 [0, 1, 2, 3, 4],
     # Data
     "alert_retention_days":          90,
+    # Threat intelligence
+    "abuseipdb_api_key":             "",
 }
 
 
@@ -66,6 +68,7 @@ class PlatformSettingsRead(BaseModel):
     business_hours_end:             int
     business_days:                  list[int]
     alert_retention_days:           int
+    abuseipdb_api_key:              str        = ""
 
 
 class PlatformSettingsWrite(BaseModel):
@@ -84,6 +87,7 @@ class PlatformSettingsWrite(BaseModel):
     business_hours_end:             int        = 18
     business_days:                  list[int]  = [0, 1, 2, 3, 4]
     alert_retention_days:           int        = 90
+    abuseipdb_api_key:              str        = ""
 
 DEFAULT_SUBJECT  = "[{{tag}}] {{title}}"
 

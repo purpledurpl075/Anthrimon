@@ -167,6 +167,12 @@ const (
 // We walk the whole table and filter by protocol column.
 const IPCidrRouteTable = "1.3.6.1.2.1.4.24.4.1"
 
+// ── IP-FORWARD-MIB: inetCidrRouteTable (RFC 4292) ────────────────────────────
+// Successor to ipCidrRouteTable. Used by modern devices (Aruba CX, Juniper,
+// newer IOS-XE). Indexed by (destType, dest, pfxLen, policy, nhType, nextHop).
+// Protocol values differ from RFC 2096: ospf=10, bgp=11, local=2, static=3.
+const InetCidrRouteTable = "1.3.6.1.2.1.4.24.7.1"
+
 // ── IP-MIB: ipAddrTable (RFC 1213) ───────────────────────────────────────────
 // One row per IP address configured on the device.
 // Indexed by the IP address itself (4 decimal octets).

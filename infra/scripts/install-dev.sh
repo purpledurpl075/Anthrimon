@@ -9,18 +9,19 @@
 #   3.  Installs Node.js 20.x (via NodeSource)
 #   4.  Installs Python virtualenv + API requirements
 #   5.  Installs PostgreSQL 14, creates role/database
-#   6.  Runs all PostgreSQL migrations
+#   6.  Runs all PostgreSQL migrations + grants
 #   7.  Installs ClickHouse, runs all ClickHouse migrations
 #   8.  Installs VictoriaMetrics as a systemd service
-#   9.  Builds the SNMP collector (Go)
-#   10. Builds the flow collector (Go)
-#   11. Builds the syslog collector (Go)
-#   12. Builds the frontend production bundle (npm)
-#   13. Generates TLS certificate (self-signed CA + server cert)
-#   14. Configures nginx with HTTPS
-#   15. Sets up WireGuard hub interface (wg0)
-#   16. Installs systemd units for all services
-#   17. Starts everything and prints a summary
+#   9.  Builds the SNMP collector (Go) + installs systemd unit
+#   10. Builds the flow collector (Go) + installs systemd unit
+#   11. Builds the syslog collector (Go) + installs systemd unit
+#   12. Builds the remote collector binary (no service — needs token first)
+#   13. Builds the frontend production bundle (npm)
+#   14. Generates TLS certificate (self-signed CA + server cert)
+#   15. Configures nginx with HTTPS
+#   16. Sets up WireGuard hub interface (wg0)
+#   17. Installs the API systemd unit + seeds platform settings
+#   18. Starts everything and prints a summary
 
 set -euo pipefail
 
@@ -254,6 +255,7 @@ for f in "${PG_MIGRATIONS}"/*.sql; do
         pg_su -d "${DB_NAME}" < "$f"
         pg_su -d "${DB_NAME}" -c \
             "INSERT INTO schema_migrations(filename) VALUES ('${fname}');"
+        # Grant full access to the app role on every new object
         pg_su -d "${DB_NAME}" -c "
             GRANT ALL PRIVILEGES ON ALL TABLES    IN SCHEMA public TO ${DB_USER};
             GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${DB_USER};
@@ -262,6 +264,15 @@ for f in "${PG_MIGRATIONS}"/*.sql; do
         ok "${fname} — applied"
     fi
 done
+
+# Ensure default privileges so future tables are also accessible
+pg_su -d "${DB_NAME}" -c "
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT ALL ON TABLES    TO ${DB_USER};
+    ALTER DEFAULT PRIVILEGES IN SCHEMA public
+        GRANT ALL ON SEQUENCES TO ${DB_USER};
+" 2>/dev/null || true
+ok "Default privileges set"
 
 # ── 7. ClickHouse ─────────────────────────────────────────────────────────────
 
@@ -327,6 +338,7 @@ ExecStart=${VM_INSTALL} \\
     -httpListenAddr=:8428 \\
     -retentionPeriod=12
 Restart=on-failure
+RestartSec=5
 LimitNOFILE=65536
 
 [Install]
@@ -338,7 +350,7 @@ systemctl enable victoria-metrics
 systemctl restart victoria-metrics
 ok "VictoriaMetrics service running"
 
-# ── 9. SNMP collector (Go) ────────────────────────────────────────────────────
+# ── 9. SNMP collector ─────────────────────────────────────────────────────────
 
 hdr "SNMP collector"
 SNMP_DIR="${REPO_DIR}/collectors/snmp"
@@ -362,9 +374,9 @@ snmp:
   retries: 3
 
 polling:
-  default_interval_s: 60
+  default_interval_s: 15
   health_multiplier: 1
-  device_refresh_s: 60
+  device_refresh_s: 30
   max_concurrent_devices: 500
 
 metrics:
@@ -375,7 +387,7 @@ EOF
     chown "${REAL_USER}":"${REAL_USER}" "${SNMP_YAML}"
     ok "snmp-collector.yaml written"
 else
-    ok "snmp-collector.yaml already exists"
+    ok "snmp-collector.yaml already exists — skipping"
 fi
 
 cat > /etc/systemd/system/snmp-collector.service <<EOF
@@ -400,7 +412,7 @@ systemctl enable snmp-collector
 systemctl restart snmp-collector
 ok "snmp-collector service running"
 
-# ── 10. Flow collector (Go) ───────────────────────────────────────────────────
+# ── 10. Flow collector ────────────────────────────────────────────────────────
 
 hdr "Flow collector"
 FLOW_DIR="${REPO_DIR}/collectors/flow"
@@ -437,7 +449,7 @@ EOF
     chown "${REAL_USER}":"${REAL_USER}" "${FLOW_YAML}"
     ok "flow-collector.yaml written"
 else
-    ok "flow-collector.yaml already exists"
+    ok "flow-collector.yaml already exists — skipping"
 fi
 
 cat > /etc/systemd/system/flow-collector.service <<EOF
@@ -462,7 +474,7 @@ systemctl enable flow-collector
 systemctl restart flow-collector
 ok "flow-collector service running"
 
-# ── 11. Syslog collector (Go) ─────────────────────────────────────────────────
+# ── 11. Syslog collector ──────────────────────────────────────────────────────
 
 hdr "Syslog collector"
 SYSLOG_DIR="${REPO_DIR}/collectors/syslog"
@@ -498,7 +510,7 @@ EOF
     chown "${REAL_USER}":"${REAL_USER}" "${SYSLOG_YAML}"
     ok "syslog-collector.yaml written"
 else
-    ok "syslog-collector.yaml already exists"
+    ok "syslog-collector.yaml already exists — skipping"
 fi
 
 cat > /etc/systemd/system/syslog-collector.service <<EOF
@@ -525,8 +537,8 @@ systemctl enable syslog-collector
 systemctl restart syslog-collector
 ok "syslog-collector service running"
 
-# ── 11b. Remote collector (Go) ────────────────────────────────────────────────
-# Builds the binary and installs it system-wide. The service is NOT started here
+# ── 12. Remote collector (build only) ────────────────────────────────────────
+# Builds the binary and installs it system-wide. The service is NOT started
 # because it requires a registration token from the hub UI first.
 
 hdr "Remote collector (build only)"
@@ -536,7 +548,6 @@ sudo -u "${REAL_USER}" bash -c "cd '${REMOTE_DIR}' && /usr/local/go/bin/go build
 install -m 755 "${REMOTE_DIR}/remote-collector" /usr/local/bin/anthrimon-collector
 ok "anthrimon-collector installed to /usr/local/bin/anthrimon-collector"
 
-# Write default config + env template (do not overwrite if already bootstrapped)
 mkdir -p /etc/anthrimon
 if [[ ! -f "/etc/anthrimon/remote-collector.yaml" ]]; then
     cat > /etc/anthrimon/remote-collector.yaml <<EOF
@@ -571,24 +582,22 @@ EOF
     ok "Remote collector config written to /etc/anthrimon/remote-collector.yaml"
 fi
 
-# Write the env template (operator fills in ANTHRIMON_TOKEN before first run)
 if [[ ! -f "/etc/anthrimon/collector.env" ]]; then
     cat > /etc/anthrimon/collector.env <<'EOF'
-# Paste the registration token from Anthrimon UI → Configuration → Collectors
+# Paste the registration token from Anthrimon UI → Configuration → Collectors → New
 # ANTHRIMON_TOKEN=paste-token-here
 EOF
     chmod 600 /etc/anthrimon/collector.env
     ok "Env template written to /etc/anthrimon/collector.env"
 fi
 
-# Install systemd unit but do NOT enable/start — requires token first
 cp "${REMOTE_DIR}/remote-collector.service" /etc/systemd/system/anthrimon-collector.service
 systemctl daemon-reload
 warn "anthrimon-collector NOT started — register a collector in the UI first, then:"
 warn "  1. Edit /etc/anthrimon/collector.env and set ANTHRIMON_TOKEN"
 warn "  2. sudo systemctl enable --now anthrimon-collector"
 
-# ── 12. Frontend production build ─────────────────────────────────────────────
+# ── 13. Frontend production build ─────────────────────────────────────────────
 
 hdr "Frontend production build"
 FRONTEND_DIR="${REPO_DIR}/frontend/dashboard"
@@ -598,12 +607,12 @@ info "Building production bundle..."
 sudo -u "${REAL_USER}" bash -c "cd '${FRONTEND_DIR}' && npm run build"
 ok "Frontend built to ${FRONTEND_DIR}/dist"
 
-# ── 13. TLS (self-signed CA + server certificate) ─────────────────────────────
+# ── 14. TLS (self-signed CA + server certificate) ─────────────────────────────
 
 hdr "TLS certificates"
 bash "${REPO_DIR}/scripts/setup-tls.sh"
 
-# ── 14. nginx (HTTPS — setup-tls.sh already updated the config) ───────────────
+# ── 15. nginx ─────────────────────────────────────────────────────────────────
 
 hdr "nginx"
 
@@ -614,17 +623,15 @@ chmod o+x "${REAL_HOME}" \
           "${FRONTEND_DIR}" \
           "${FRONTEND_DIR}/dist"
 
-# setup-tls.sh already wrote the HTTPS nginx config and reloaded nginx.
-# If TLS setup was skipped (certs existed), reload now to pick up any changes.
 nginx -t && systemctl reload nginx
 ok "nginx running with HTTPS"
 
-# ── 15. WireGuard hub (wg0) ───────────────────────────────────────────────────
+# ── 16. WireGuard hub (wg0) ───────────────────────────────────────────────────
 
 hdr "WireGuard hub"
 bash "${REPO_DIR}/scripts/setup-wireguard.sh"
 
-# ── 16. API systemd unit ──────────────────────────────────────────────────────
+# ── 17. API systemd unit ──────────────────────────────────────────────────────
 
 hdr "Anthrimon API"
 
@@ -668,14 +675,15 @@ systemctl enable anthrimon-api
 systemctl restart anthrimon-api
 ok "anthrimon-api service running"
 
-# Seed base_url and platform settings
+# Seed platform settings (base_url; abuseipdb_api_key left blank — set in UI)
 info "Setting platform base_url to ${BASE_URL}..."
 pg_su -d "${DB_NAME}" -c "
     INSERT INTO system_settings (key, value)
-    VALUES ('platform', jsonb_build_object('base_url', '${BASE_URL}'))
+    VALUES ('platform', jsonb_build_object('base_url', '${BASE_URL}', 'abuseipdb_api_key', ''))
     ON CONFLICT (key) DO UPDATE
-        SET value = system_settings.value || jsonb_build_object('base_url', '${BASE_URL}');
-" 2>/dev/null && ok "Platform base_url set" || warn "Could not set platform base_url (run manually later)"
+        SET value = system_settings.value
+                    || jsonb_build_object('base_url', '${BASE_URL}');
+" 2>/dev/null && ok "Platform base_url set" || warn "Could not set base_url (set it in UI → Settings → Platform)"
 
 # ── Summary ───────────────────────────────────────────────────────────────────
 
@@ -695,14 +703,7 @@ echo -e "    Interface  ${CYAN}wg0 @ 10.100.0.1/24${RESET}"
 echo -e "    Pubkey     ${CYAN}${HUB_PUBKEY}${RESET}"
 echo -e "    Ensure UDP ${BOLD}51820${RESET} is open inbound for remote collectors"
 echo ""
-echo -e "  Remote collector binary: ${BOLD}/usr/local/bin/anthrimon-collector${RESET}"
-echo -e "  To deploy at a remote site:"
-echo -e "    1. Copy binary + CA cert to the remote host"
-echo -e "    2. Register in UI → Configuration → Collectors → New"
-echo -e "    3. Set ANTHRIMON_TOKEN in /etc/anthrimon/collector.env"
-echo -e "    4. ${BOLD}systemctl enable --now anthrimon-collector${RESET}"
-echo ""
-echo -e "  Services:"
+echo -e "  Services managed by systemd:"
 echo -e "    ${BOLD}systemctl status anthrimon-api${RESET}"
 echo -e "    ${BOLD}systemctl status snmp-collector${RESET}"
 echo -e "    ${BOLD}systemctl status flow-collector${RESET}"
@@ -713,19 +714,21 @@ echo -e "    ${BOLD}systemctl status clickhouse-server${RESET}"
 echo -e "    ${BOLD}systemctl status postgresql${RESET}"
 echo -e "    ${BOLD}systemctl status wg-quick@wg0${RESET}"
 echo ""
-echo -e "  Flow export targets:"
+echo -e "  Flow / syslog export targets:"
 echo -e "    NetFlow / IPFIX  ${BOLD}${IP}:${NETFLOW_PORT}${RESET} (UDP)"
 echo -e "    sFlow            ${BOLD}${IP}:${SFLOW_PORT}${RESET} (UDP)"
 echo -e "    Syslog           ${BOLD}${IP}:514${RESET} (UDP/TCP)"
 echo ""
-echo -e "  Secrets stored in /etc/systemd/system/anthrimon-api.service"
+echo -e "  Remote collector:"
+echo -e "    Binary  ${BOLD}/usr/local/bin/anthrimon-collector${RESET}"
+echo -e "    To deploy at a remote site:"
+echo -e "      1. Register in UI → Configuration → Collectors → New"
+echo -e "      2. Set ANTHRIMON_TOKEN in /etc/anthrimon/collector.env"
+echo -e "      3. ${BOLD}systemctl enable --now anthrimon-collector${RESET}"
 echo ""
-<<<<<<< HEAD
-echo -e "  Flow export targets:"
-echo -e "    NetFlow / IPFIX  ${BOLD}${IP}:${NETFLOW_PORT}${RESET} (UDP)"
-echo -e "    sFlow            ${BOLD}${IP}:${SFLOW_PORT}${RESET} (UDP)"
+echo -e "  Threat intelligence (optional):"
+echo -e "    Add AbuseIPDB API key in UI → Settings → Platform"
+echo -e "    Free key at ${CYAN}https://www.abuseipdb.com/register${RESET}"
 echo ""
-echo -e "  Encryption key stored in /etc/systemd/system/anthrimon-api.service"
+echo -e "  Secrets: ${BOLD}/etc/systemd/system/anthrimon-api.service${RESET}"
 echo ""
-=======
->>>>>>> origin/main
