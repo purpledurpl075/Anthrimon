@@ -695,13 +695,24 @@ visudo -cf "${SUDOERS_DST}" && ok "sudoers rule written: ${SUDOERS_DST}" \
 
 hdr "Anthrimon API"
 
-# Preserve or generate secrets
+# Preserve or generate secrets.
+# The service file stores them as:  Environment="KEY=value"
+# Strip everything up to and including the = sign, then strip any surrounding quotes.
+_extract_env() { grep -oP "(?<=${1}=)[^\"]+" /etc/systemd/system/anthrimon-api.service 2>/dev/null || true; }
+
 if grep -q "ANTHRIMON_ENCRYPTION_KEY" /etc/systemd/system/anthrimon-api.service 2>/dev/null; then
-    ENCRYPTION_KEY=$(grep ANTHRIMON_ENCRYPTION_KEY /etc/systemd/system/anthrimon-api.service \
-        | sed 's/.*ANTHRIMON_ENCRYPTION_KEY=//')
-    JWT_SECRET=$(grep JWT_SECRET_KEY /etc/systemd/system/anthrimon-api.service 2>/dev/null \
-        | sed 's/.*JWT_SECRET_KEY=//' || openssl rand -hex 32)
-    ok "Reusing existing secrets"
+    ENCRYPTION_KEY=$(_extract_env ANTHRIMON_ENCRYPTION_KEY)
+    JWT_SECRET=$(_extract_env JWT_SECRET_KEY)
+    # Fall back to fresh generation if either value is empty or wrong length
+    if [[ ${#ENCRYPTION_KEY} -ne 64 ]]; then
+        ENCRYPTION_KEY=$(openssl rand -hex 32)
+        warn "Encryption key was missing or malformed — regenerated (existing credentials will need re-saving)"
+    fi
+    if [[ ${#JWT_SECRET} -lt 32 ]]; then
+        JWT_SECRET=$(openssl rand -hex 32)
+        warn "JWT secret was missing or too short — regenerated (all sessions will be invalidated)"
+    fi
+    ok "Secrets preserved (or regenerated where invalid)"
 else
     ENCRYPTION_KEY=$(openssl rand -hex 32)
     JWT_SECRET=$(openssl rand -hex 32)

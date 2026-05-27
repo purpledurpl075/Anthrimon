@@ -72,13 +72,59 @@ def _device_filter(device_ids: list[str], alias: str = "") -> str:
     return f"{col} IN ({ids})"
 
 
-def _quote_ip(ip: str) -> str:
-    """Validate and return a quoted IP string safe for ClickHouse queries."""
+def _ip_version(ip: str) -> int:
+    """Return 4 or 6, or raise 400 for invalid input."""
     try:
-        ipaddress.ip_address(ip)
+        return ipaddress.ip_address(ip).version
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Invalid IP address: {ip}")
-    return f"toIPv4('{ip}')"
+
+
+def _ip_filter(prefix: str, ip: str) -> str:
+    """Return a WHERE clause fragment filtering on src or dst IP (v4 or v6).
+
+    prefix must be 'src' or 'dst'.
+    """
+    ver = _ip_version(ip)
+    if ver == 4:
+        return f"{prefix}_ip = toIPv4('{ip}')"
+    return f"{prefix}_ip6 = toIPv6('{ip}')"
+
+
+def _ip_display(v4_col: str, v6_col: str) -> str:
+    """ClickHouse expression: return IPv6 string when present, else IPv4 string."""
+    return f"if({v6_col} != '::', IPv6NumToString({v6_col}), IPv4NumToString({v4_col}))"
+
+
+# IPv4 and IPv6 private / non-routable ranges used by direction_summary.
+_PRIVATE_RANGES_V4 = [
+    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+    "127.0.0.0/8", "169.254.0.0/16", "100.64.0.0/10",
+]
+_PRIVATE_RANGES_V6 = [
+    "::1/128",     # loopback
+    "fe80::/10",   # link-local
+    "fc00::/7",    # unique local (ULA)
+    "ff00::/8",    # multicast
+]
+
+
+def _private_clause(v4_col: str, v6_col: str | None = None) -> str:
+    """Return a ClickHouse expression that is true when the address is private/internal.
+
+    Handles both the IPv4 column and, when a v6_col is supplied, the IPv6 column.
+    """
+    v4_parts = " OR ".join(
+        f"isIPAddressInRange(IPv4NumToString({v4_col}), '{r}')"
+        for r in _PRIVATE_RANGES_V4
+    )
+    if v6_col is None:
+        return f"({v4_parts})"
+    v6_parts = " OR ".join(
+        f"isIPAddressInRange(IPv6NumToString({v6_col}), '{r}')"
+        for r in _PRIVATE_RANGES_V6
+    )
+    return f"(({v4_parts}) OR ({v6_parts}))"
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -102,15 +148,29 @@ async def flow_summary(
 
     rows = await _ch(f"""
         SELECT
-            sum(bytes_total)   AS bytes_total,
-            sum(packets_total) AS packets_total,
-            sum(flow_count)    AS flows_total,
-            uniq(src_ip)            AS unique_src_ips,
-            uniq(dst_ip)            AS unique_dst_ips,
+            sum(bytes_total)          AS bytes_total,
+            sum(packets_total)        AS packets_total,
+            sum(flow_count)           AS flows_total,
+            uniq(src_addr)            AS unique_src_ips,
+            uniq(dst_addr)            AS unique_dst_ips,
             uniq(collector_device_id) AS active_exporters
-        FROM flow_agg_1min
-        WHERE {_device_filter(device_ids)}
-          AND minute >= now() - INTERVAL {minutes} MINUTE
+        FROM (
+            SELECT collector_device_id,
+                   IPv4NumToString(src_ip) AS src_addr,
+                   IPv4NumToString(dst_ip) AS dst_addr,
+                   bytes_total, packets_total, flow_count
+            FROM flow_agg_1min
+            WHERE {_device_filter(device_ids)}
+              AND minute >= now() - INTERVAL {minutes} MINUTE
+            UNION ALL
+            SELECT collector_device_id,
+                   IPv6NumToString(src_ip6) AS src_addr,
+                   IPv6NumToString(dst_ip6) AS dst_addr,
+                   bytes_total, packets_total, flow_count
+            FROM flow_agg6_1min
+            WHERE {_device_filter(device_ids)}
+              AND minute >= now() - INTERVAL {minutes} MINUTE
+        )
     """)
     if not rows:
         return {"bytes_total": 0, "packets_total": 0, "flows_total": 0,
@@ -145,20 +205,34 @@ async def top_talkers(
         return []
 
     proto_clause = f"AND ip_protocol = {protocol}" if protocol is not None else ""
+    dev_filter   = _device_filter(device_ids)
 
     rows = await _ch(f"""
         SELECT
-            IPv4NumToString(src_ip)  AS src_ip,
-            IPv4NumToString(dst_ip)  AS dst_ip,
+            src_addr        AS src_ip,
+            dst_addr        AS dst_ip,
             ip_protocol,
-            sum(bytes_total)    AS bytes_total,
-            sum(packets_total)  AS packets_total,
-            sum(flow_count)     AS flow_count
-        FROM flow_agg_1min
-        WHERE {_device_filter(device_ids)}
-          AND minute >= now() - INTERVAL {minutes} MINUTE
-          {proto_clause}
-        GROUP BY src_ip, dst_ip, ip_protocol
+            sum(bytes_total)   AS bytes_total,
+            sum(packets_total) AS packets_total,
+            sum(flow_count)    AS flow_count
+        FROM (
+            SELECT IPv4NumToString(src_ip) AS src_addr,
+                   IPv4NumToString(dst_ip) AS dst_addr,
+                   ip_protocol, bytes_total, packets_total, flow_count
+            FROM flow_agg_1min
+            WHERE {dev_filter}
+              AND minute >= now() - INTERVAL {minutes} MINUTE
+              {proto_clause}
+            UNION ALL
+            SELECT IPv6NumToString(src_ip6) AS src_addr,
+                   IPv6NumToString(dst_ip6) AS dst_addr,
+                   ip_protocol, bytes_total, packets_total, flow_count
+            FROM flow_agg6_1min
+            WHERE {dev_filter}
+              AND minute >= now() - INTERVAL {minutes} MINUTE
+              {proto_clause}
+        )
+        GROUP BY src_addr, dst_addr, ip_protocol
         ORDER BY bytes_total DESC
         LIMIT {limit}
     """)
@@ -381,8 +455,8 @@ async def search_flows(
         _device_filter(device_ids),
         f"flow_start >= now() - INTERVAL {minutes} MINUTE",
     ]
-    if src_ip:    clauses.append(f"src_ip = {_quote_ip(src_ip)}")
-    if dst_ip:    clauses.append(f"dst_ip = {_quote_ip(dst_ip)}")
+    if src_ip:              clauses.append(_ip_filter("src", src_ip))
+    if dst_ip:              clauses.append(_ip_filter("dst", dst_ip))
     if protocol is not None: clauses.append(f"ip_protocol = {protocol}")
     if src_port is not None: clauses.append(f"src_port = {src_port}")
     if dst_port is not None: clauses.append(f"dst_port = {dst_port}")
@@ -391,13 +465,13 @@ async def search_flows(
 
     rows = await _ch(f"""
         SELECT
-            toString(collector_device_id)    AS device_uuid,
-            IPv4NumToString(exporter_ip)     AS exporter_ip,
+            toString(collector_device_id)                       AS device_uuid,
+            IPv4NumToString(exporter_ip)                        AS exporter_ip,
             flow_type,
-            toUnixTimestamp(flow_start) * 1000 AS flow_start_ms,
-            toUnixTimestamp(flow_end)   * 1000 AS flow_end_ms,
-            IPv4NumToString(src_ip)          AS src_ip,
-            IPv4NumToString(dst_ip)          AS dst_ip,
+            toUnixTimestamp(flow_start) * 1000                  AS flow_start_ms,
+            toUnixTimestamp(flow_end)   * 1000                  AS flow_end_ms,
+            {_ip_display('src_ip', 'src_ip6')}                  AS src_ip,
+            {_ip_display('dst_ip', 'dst_ip6')}                  AS dst_ip,
             src_port,
             dst_port,
             ip_protocol,
@@ -459,13 +533,17 @@ async def flow_timeseries(
     if not device_ids:
         return []
 
-    clauses = [
-        _device_filter(device_ids),
-        f"minute >= now() - INTERVAL {minutes} MINUTE",
-    ]
-    if src_ip: clauses.append(f"src_ip = {_quote_ip(src_ip)}")
-    if dst_ip: clauses.append(f"dst_ip = {_quote_ip(dst_ip)}")
-    where = " AND ".join(clauses)
+    dev_filter = _device_filter(device_ids)
+    time_clause = f"minute >= now() - INTERVAL {minutes} MINUTE"
+
+    # Build optional IP filters for each address family.
+    v4_extra = v6_extra = ""
+    if src_ip:
+        v4_extra += f" AND {_ip_filter('src', src_ip)}" if _ip_version(src_ip) == 4 else " AND 1=0"
+        v6_extra += f" AND {_ip_filter('src', src_ip)}" if _ip_version(src_ip) == 6 else " AND 1=0"
+    if dst_ip:
+        v4_extra += f" AND {_ip_filter('dst', dst_ip)}" if _ip_version(dst_ip) == 4 else " AND 1=0"
+        v6_extra += f" AND {_ip_filter('dst', dst_ip)}" if _ip_version(dst_ip) == 6 else " AND 1=0"
 
     rows = await _ch(f"""
         SELECT
@@ -473,8 +551,15 @@ async def flow_timeseries(
             sum(bytes_total)           AS bytes_total,
             sum(packets_total)         AS packets_total,
             sum(flow_count)            AS flow_count
-        FROM flow_agg_1min
-        WHERE {where}
+        FROM (
+            SELECT minute, bytes_total, packets_total, flow_count
+            FROM flow_agg_1min
+            WHERE {dev_filter} AND {time_clause} {v4_extra}
+            UNION ALL
+            SELECT minute, bytes_total, packets_total, flow_count
+            FROM flow_agg6_1min
+            WHERE {dev_filter} AND {time_clause} {v6_extra}
+        )
         GROUP BY minute
         ORDER BY minute ASC
     """)
@@ -540,8 +625,8 @@ async def interface_top_talkers(
 
     rows = await _ch(f"""
         SELECT
-            IPv4NumToString(src_ip)  AS src_ip,
-            IPv4NumToString(dst_ip)  AS dst_ip,
+            {_ip_display('src_ip', 'src_ip6')}  AS src_ip,
+            {_ip_display('dst_ip', 'dst_ip6')}  AS dst_ip,
             ip_protocol,
             sum(bytes)               AS bytes_total,
             sum(packets)             AS packets_total,
@@ -550,7 +635,7 @@ async def interface_top_talkers(
         WHERE collector_device_id = toUUID('{device_id}')
           AND (input_if_index = {if_index} OR output_if_index = {if_index})
           AND flow_start >= now() - INTERVAL {minutes} MINUTE
-        GROUP BY src_ip, dst_ip, ip_protocol
+        GROUP BY src_ip, src_ip6, dst_ip, dst_ip6, ip_protocol
         ORDER BY bytes_total DESC
         LIMIT {limit}
     """)
@@ -577,7 +662,7 @@ async def ip_detail(
     current_user:   User          = Depends(get_current_user),
     db:             AsyncSession  = Depends(get_db),
 ) -> dict:
-    _quote_ip(ip)  # validate
+    ver = _ip_version(ip)  # validate and get address family
 
     if device_id:
         await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
@@ -588,58 +673,73 @@ async def ip_detail(
     if not device_ids:
         return {}
 
-    dev_clause = _device_filter(device_ids)
-    qip = f"toIPv4('{ip}')"
-    time_clause  = f"minute >= now() - INTERVAL {minutes} MINUTE"
-    time_clause_r = f"flow_start >= now() - INTERVAL {minutes} MINUTE"
+    dev_clause  = _device_filter(device_ids)
+    src_filt    = _ip_filter("src", ip)
+    dst_filt    = _ip_filter("dst", ip)
+    time_agg    = f"minute >= now() - INTERVAL {minutes} MINUTE"
+    time_raw    = f"flow_start >= now() - INTERVAL {minutes} MINUTE"
+
+    # Choose the right aggregate table and display expression.
+    if ver == 4:
+        agg_table   = "flow_agg_1min"
+        ip_col_s    = "src_ip"
+        ip_col_d    = "dst_ip"
+        qip         = f"toIPv4('{ip}')"
+        disp_dst    = "IPv4NumToString(dst_ip)"
+        disp_src    = "IPv4NumToString(src_ip)"
+    else:
+        agg_table   = "flow_agg6_1min"
+        ip_col_s    = "src_ip6"
+        ip_col_d    = "dst_ip6"
+        qip         = f"toIPv6('{ip}')"
+        disp_dst    = "IPv6NumToString(dst_ip6)"
+        disp_src    = "IPv6NumToString(src_ip6)"
 
     # ── Totals + connection profile ───────────────────────────────────────────
     totals = await _ch(f"""
         SELECT
-            sum(if(src_ip = {qip}, bytes_total,   0)) AS bytes_as_src,
-            sum(if(dst_ip = {qip}, bytes_total,   0)) AS bytes_as_dst,
-            sum(if(src_ip = {qip}, packets_total, 0)) AS pkts_as_src,
-            sum(if(dst_ip = {qip}, packets_total, 0)) AS pkts_as_dst,
-            sum(flow_count)                            AS flows_total,
-            uniqIf(dst_ip, src_ip = {qip})            AS unique_destinations,
-            uniqIf(src_ip, dst_ip = {qip})            AS unique_sources
-        FROM flow_agg_1min
+            sum(if({ip_col_s} = {qip}, bytes_total,   0)) AS bytes_as_src,
+            sum(if({ip_col_d} = {qip}, bytes_total,   0)) AS bytes_as_dst,
+            sum(if({ip_col_s} = {qip}, packets_total, 0)) AS pkts_as_src,
+            sum(if({ip_col_d} = {qip}, packets_total, 0)) AS pkts_as_dst,
+            sum(flow_count)                                AS flows_total,
+            uniqIf({ip_col_d}, {ip_col_s} = {qip})        AS unique_destinations,
+            uniqIf({ip_col_s}, {ip_col_d} = {qip})        AS unique_sources
+        FROM {agg_table}
         WHERE {dev_clause}
-          AND (src_ip = {qip} OR dst_ip = {qip})
-          AND {time_clause}
+          AND ({ip_col_s} = {qip} OR {ip_col_d} = {qip})
+          AND {time_agg}
     """)
 
     # ── Connection profile from raw records ───────────────────────────────────
     profile = await _ch(f"""
         SELECT
-            avg(dateDiff('second', flow_start, flow_end))   AS avg_duration_s,
-            avg(bytes)                                       AS avg_bytes_per_flow,
-            avg(bytes / greatest(packets, 1))                AS avg_bytes_per_packet,
-            max(bytes * sampling_rate)                       AS max_flow_bytes,
-            countIf(ip_protocol = 6)                        AS tcp_flows,
-            countIf(ip_protocol = 17)                       AS udp_flows,
-            countIf(ip_protocol = 1)                        AS icmp_flows,
-            uniqIf(dst_port, src_ip = {qip} AND ip_protocol IN (6,17)) AS unique_dst_ports,
-            uniqIf(src_port, dst_ip = {qip} AND ip_protocol IN (6,17)) AS unique_src_ports,
-            count()                                          AS total_raw_flows
+            avg(dateDiff('second', flow_start, flow_end))       AS avg_duration_s,
+            avg(bytes)                                           AS avg_bytes_per_flow,
+            avg(bytes / greatest(packets, 1))                    AS avg_bytes_per_packet,
+            max(bytes * sampling_rate)                           AS max_flow_bytes,
+            countIf(ip_protocol = 6)                            AS tcp_flows,
+            countIf(ip_protocol = 17)                           AS udp_flows,
+            countIf(ip_protocol = 1)                            AS icmp_flows,
+            uniqIf(dst_port, {src_filt} AND ip_protocol IN (6,17)) AS unique_dst_ports,
+            uniqIf(src_port, {dst_filt} AND ip_protocol IN (6,17)) AS unique_src_ports,
+            count()                                              AS total_raw_flows
         FROM flow_records
-        WHERE {_device_filter(device_ids)}
-          AND (src_ip = {qip} OR dst_ip = {qip})
-          AND {time_clause_r}
+        WHERE {dev_clause}
+          AND ({src_filt} OR {dst_filt})
+          AND {time_raw}
     """)
 
     # ── Top peers ─────────────────────────────────────────────────────────────
     peers = await _ch(f"""
         SELECT
-            if(src_ip = {qip},
-               IPv4NumToString(dst_ip),
-               IPv4NumToString(src_ip))            AS peer_ip,
-            sum(if(src_ip = {qip}, bytes_total, 0)) AS bytes_sent,
-            sum(if(dst_ip = {qip}, bytes_total, 0)) AS bytes_received
-        FROM flow_agg_1min
+            if({ip_col_s} = {qip}, {disp_dst}, {disp_src})     AS peer_ip,
+            sum(if({ip_col_s} = {qip}, bytes_total, 0))         AS bytes_sent,
+            sum(if({ip_col_d} = {qip}, bytes_total, 0))         AS bytes_received
+        FROM {agg_table}
         WHERE {dev_clause}
-          AND (src_ip = {qip} OR dst_ip = {qip})
-          AND {time_clause}
+          AND ({ip_col_s} = {qip} OR {ip_col_d} = {qip})
+          AND {time_agg}
         GROUP BY peer_ip
         ORDER BY bytes_sent + bytes_received DESC
         LIMIT 15
@@ -654,9 +754,9 @@ async def ip_detail(
             sum(packets) AS packets_total,
             count()      AS flow_count
         FROM flow_records
-        WHERE {_device_filter(device_ids)}
-          AND src_ip = {qip}
-          AND flow_start >= now() - INTERVAL {minutes} MINUTE
+        WHERE {dev_clause}
+          AND {src_filt}
+          AND {time_raw}
           AND dst_port > 0
           AND ip_protocol IN (6, 17)
         GROUP BY dst_port, ip_protocol
@@ -667,13 +767,13 @@ async def ip_detail(
     # ── Per-minute time series (both directions) ──────────────────────────────
     ts = await _ch(f"""
         SELECT
-            toUnixTimestamp(minute) * 1000           AS ts_ms,
-            sum(if(src_ip = {qip}, bytes_total, 0))  AS bytes_out,
-            sum(if(dst_ip = {qip}, bytes_total, 0))  AS bytes_in
-        FROM flow_agg_1min
+            toUnixTimestamp(minute) * 1000                      AS ts_ms,
+            sum(if({ip_col_s} = {qip}, bytes_total, 0))         AS bytes_out,
+            sum(if({ip_col_d} = {qip}, bytes_total, 0))         AS bytes_in
+        FROM {agg_table}
         WHERE {dev_clause}
-          AND (src_ip = {qip} OR dst_ip = {qip})
-          AND {time_clause}
+          AND ({ip_col_s} = {qip} OR {ip_col_d} = {qip})
+          AND {time_agg}
         GROUP BY minute
         ORDER BY minute ASC
     """)
@@ -770,18 +870,6 @@ _SERVICE_CATEGORY: dict[str, str] = {
     "BitTorrent": "P2P", "WoW": "Gaming",    "Minecraft": "Gaming",
 }
 
-_PRIVATE_RANGES = [
-    "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
-    "127.0.0.0/8", "169.254.0.0/16", "100.64.0.0/10",
-]
-
-def _private_clause(col: str) -> str:
-    return " OR ".join(
-        f"isIPAddressInRange(IPv4NumToString({col}), '{r}')"
-        for r in _PRIVATE_RANGES
-    )
-
-
 # ── Deep analytics endpoints ───────────────────────────────────────────────────
 
 @router.get("/asn-summary", summary="Traffic volume by Autonomous System")
@@ -853,16 +941,23 @@ async def asn_summary(
         ]
 
     # --- Fallback: derive ASN from ip_intel GeoIP cache ---
-    # Get top IPs by bytes, then group by their ASN from the intel table.
+    # Get top IPs by bytes from both v4 and v6 aggregates.
+    v4_col  = "src_ip"  if direction != "dst" else "dst_ip"
+    v6_col  = "src_ip6" if direction != "dst" else "dst_ip6"
     top_ips = await _ch(f"""
-        SELECT
-            IPv4NumToString({ip_col}) AS ip,
-            sum(bytes_total)          AS bytes_total,
-            sum(flow_count)           AS flow_count
-        FROM flow_agg_1min
-        WHERE {dev_filter}
-          AND minute >= now() - INTERVAL {minutes} MINUTE
-        GROUP BY {ip_col}
+        SELECT ip, sum(bytes_total) AS bytes_total, sum(flow_count) AS flow_count
+        FROM (
+            SELECT IPv4NumToString({v4_col}) AS ip, bytes_total, flow_count
+            FROM flow_agg_1min
+            WHERE {dev_filter}
+              AND minute >= now() - INTERVAL {minutes} MINUTE
+            UNION ALL
+            SELECT IPv6NumToString({v6_col}) AS ip, bytes_total, flow_count
+            FROM flow_agg6_1min
+            WHERE {dev_filter}
+              AND minute >= now() - INTERVAL {minutes} MINUTE
+        )
+        GROUP BY ip
         ORDER BY bytes_total DESC
         LIMIT 500
     """)
@@ -999,8 +1094,10 @@ async def direction_summary(
     if not device_ids:
         return {}
 
-    priv_src = _private_clause("src_ip")
-    priv_dst = _private_clause("dst_ip")
+    priv_src = _private_clause("src_ip", "src_ip6")
+    priv_dst = _private_clause("dst_ip", "dst_ip6")
+    dev_filter = _device_filter(device_ids)
+    time_clause = f"flow_start >= now() - INTERVAL {minutes} MINUTE"
 
     rows = await _ch(f"""
         SELECT
@@ -1009,15 +1106,15 @@ async def direction_summary(
                 ({priv_src}) AND NOT ({priv_dst}), 'outbound',
                 NOT ({priv_src}) AND ({priv_dst}), 'inbound',
                 'transit'
-            )                           AS direction,
-            sum(bytes * sampling_rate)  AS bytes_total,
-            sum(packets)                AS packets_total,
-            count()                     AS flow_count,
-            uniq(src_ip)                AS unique_src,
-            uniq(dst_ip)                AS unique_dst
+            )                                               AS direction,
+            sum(bytes * sampling_rate)                      AS bytes_total,
+            sum(packets)                                    AS packets_total,
+            count()                                         AS flow_count,
+            uniq({_ip_display('src_ip', 'src_ip6')})        AS unique_src,
+            uniq({_ip_display('dst_ip', 'dst_ip6')})        AS unique_dst
         FROM flow_records
-        WHERE {_device_filter(device_ids)}
-          AND flow_start >= now() - INTERVAL {minutes} MINUTE
+        WHERE {dev_filter}
+          AND {time_clause}
         GROUP BY direction
     """)
 
@@ -1045,15 +1142,15 @@ async def direction_summary(
     # Top inbound sources (external IPs sending the most to internal)
     inbound_top = await _ch(f"""
         SELECT
-            IPv4NumToString(src_ip)     AS ip,
-            sum(bytes * sampling_rate)  AS bytes_total,
-            count()                     AS flow_count
+            {_ip_display('src_ip', 'src_ip6')}  AS ip,
+            sum(bytes * sampling_rate)           AS bytes_total,
+            count()                              AS flow_count
         FROM flow_records
-        WHERE {_device_filter(device_ids)}
-          AND flow_start >= now() - INTERVAL {minutes} MINUTE
+        WHERE {dev_filter}
+          AND {time_clause}
           AND NOT ({priv_src})
           AND ({priv_dst})
-        GROUP BY src_ip
+        GROUP BY src_ip, src_ip6
         ORDER BY bytes_total DESC
         LIMIT 10
     """)
@@ -1061,15 +1158,15 @@ async def direction_summary(
     # Top outbound destinations (internal IPs sending to external)
     outbound_top = await _ch(f"""
         SELECT
-            IPv4NumToString(dst_ip)     AS ip,
-            sum(bytes * sampling_rate)  AS bytes_total,
-            count()                     AS flow_count
+            {_ip_display('dst_ip', 'dst_ip6')}  AS ip,
+            sum(bytes * sampling_rate)           AS bytes_total,
+            count()                              AS flow_count
         FROM flow_records
-        WHERE {_device_filter(device_ids)}
-          AND flow_start >= now() - INTERVAL {minutes} MINUTE
+        WHERE {dev_filter}
+          AND {time_clause}
           AND ({priv_src})
           AND NOT ({priv_dst})
-        GROUP BY dst_ip
+        GROUP BY dst_ip, dst_ip6
         ORDER BY bytes_total DESC
         LIMIT 10
     """)
@@ -1107,8 +1204,8 @@ async def elephant_flows(
             toUnixTimestamp(flow_start) * 1000              AS start_ms,
             toUnixTimestamp(flow_end)   * 1000              AS end_ms,
             dateDiff('second', flow_start, flow_end)        AS duration_s,
-            IPv4NumToString(src_ip)                         AS src_ip,
-            IPv4NumToString(dst_ip)                         AS dst_ip,
+            {_ip_display('src_ip', 'src_ip6')}               AS src_ip,
+            {_ip_display('dst_ip', 'dst_ip6')}               AS dst_ip,
             src_port,
             dst_port,
             ip_protocol,
@@ -1247,16 +1344,16 @@ async def tcp_flags_summary(
     # Top RST sources (most connection resets — indicates problems or scans)
     rst_top = await _ch(f"""
         SELECT
-            IPv4NumToString(src_ip)  AS src_ip,
-            count()                  AS rst_count,
-            uniq(dst_ip)             AS unique_targets,
-            uniq(dst_port)           AS unique_ports
+            {_ip_display('src_ip', 'src_ip6')}  AS src_ip,
+            count()                              AS rst_count,
+            uniq({_ip_display('dst_ip', 'dst_ip6')}) AS unique_targets,
+            uniq(dst_port)                       AS unique_ports
         FROM flow_records
         WHERE {_device_filter(device_ids)}
           AND flow_start >= now() - INTERVAL {minutes} MINUTE
           AND ip_protocol = 6
           AND bitAnd(tcp_flags, 4) > 0
-        GROUP BY src_ip
+        GROUP BY src_ip, src_ip6
         ORDER BY rst_count DESC
         LIMIT 10
     """)
@@ -1264,17 +1361,17 @@ async def tcp_flags_summary(
     # SYN-only top sources (scanner candidates)
     syn_top = await _ch(f"""
         SELECT
-            IPv4NumToString(src_ip)  AS src_ip,
-            count()                  AS syn_count,
-            uniq(dst_ip)             AS unique_targets,
-            uniq(dst_port)           AS unique_ports
+            {_ip_display('src_ip', 'src_ip6')}  AS src_ip,
+            count()                              AS syn_count,
+            uniq({_ip_display('dst_ip', 'dst_ip6')}) AS unique_targets,
+            uniq(dst_port)                       AS unique_ports
         FROM flow_records
         WHERE {_device_filter(device_ids)}
           AND flow_start >= now() - INTERVAL {minutes} MINUTE
           AND ip_protocol = 6
           AND bitAnd(tcp_flags, 2) > 0
           AND bitAnd(tcp_flags, 16) = 0
-        GROUP BY src_ip
+        GROUP BY src_ip, src_ip6
         HAVING unique_ports > 3 OR unique_targets > 3
         ORDER BY syn_count DESC
         LIMIT 10
@@ -1348,13 +1445,24 @@ async def geo_summary(
     if not device_ids:
         return []
 
-    # Pull top source IPs by bytes
+    # Pull top source IPs by bytes (both v4 and v6)
+    dev_filter = _device_filter(device_ids)
     rows = await _ch(f"""
-        SELECT IPv4NumToString(src_ip) AS ip, sum(bytes_total) AS bytes_total
-        FROM flow_agg_1min
-        WHERE {_device_filter(device_ids)}
-          AND minute >= now() - INTERVAL {minutes} MINUTE
-        GROUP BY src_ip ORDER BY bytes_total DESC LIMIT 500
+        SELECT ip, sum(bytes_total) AS bytes_total
+        FROM (
+            SELECT IPv4NumToString(src_ip) AS ip, bytes_total
+            FROM flow_agg_1min
+            WHERE {dev_filter}
+              AND minute >= now() - INTERVAL {minutes} MINUTE
+            UNION ALL
+            SELECT IPv6NumToString(src_ip6) AS ip, bytes_total
+            FROM flow_agg6_1min
+            WHERE {dev_filter}
+              AND minute >= now() - INTERVAL {minutes} MINUTE
+        )
+        GROUP BY ip
+        ORDER BY bytes_total DESC
+        LIMIT 500
     """)
 
     if not rows:
@@ -1404,16 +1512,29 @@ async def flow_threats(
 
     abuseipdb_key = await _get_abuseipdb_key(db)
 
+    dev_filter = _device_filter(device_ids)
     rows = await _ch(f"""
-        SELECT
-            IPv4NumToString(src_ip) AS ip,
-            sum(bytes_total)        AS bytes_total,
-            sum(flow_count)         AS flow_count,
-            uniq(dst_ip)            AS unique_destinations
-        FROM flow_agg_1min
-        WHERE {_device_filter(device_ids)}
-          AND minute >= now() - INTERVAL {minutes} MINUTE
-        GROUP BY src_ip ORDER BY bytes_total DESC LIMIT 200
+        SELECT ip, sum(bytes_total) AS bytes_total,
+               sum(flow_count) AS flow_count,
+               uniq(dst_addr) AS unique_destinations
+        FROM (
+            SELECT IPv4NumToString(src_ip) AS ip,
+                   IPv4NumToString(dst_ip) AS dst_addr,
+                   bytes_total, flow_count
+            FROM flow_agg_1min
+            WHERE {dev_filter}
+              AND minute >= now() - INTERVAL {minutes} MINUTE
+            UNION ALL
+            SELECT IPv6NumToString(src_ip6) AS ip,
+                   IPv6NumToString(dst_ip6) AS dst_addr,
+                   bytes_total, flow_count
+            FROM flow_agg6_1min
+            WHERE {dev_filter}
+              AND minute >= now() - INTERVAL {minutes} MINUTE
+        )
+        GROUP BY ip
+        ORDER BY bytes_total DESC
+        LIMIT 200
     """)
 
     if not rows:

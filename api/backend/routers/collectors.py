@@ -470,8 +470,14 @@ async def collector_config(
             if cred_data.get("password") and _crypto.is_configured():
                 try:
                     cred_data = {**cred_data, "password": _crypto.decrypt(cred_data["password"])}
-                except Exception:
-                    pass
+                except Exception as _dec_exc:
+                    logger.error(
+                        "credential_decrypt_failed",
+                        device_id=str(dev.id),
+                        credential_type=cred.type,
+                        error=str(_dec_exc),
+                    )
+                    continue  # skip this credential — sending ciphertext would break the collector
             cred_list.append({
                 "type":     cred.type,
                 "priority": dc.priority,
@@ -1135,6 +1141,40 @@ async def ingest_metrics(
     return {"written": lines}
 
 
+def _split_ip(addr: str) -> tuple[str, str]:
+    """Return (ipv4, ipv6) pair for a ClickHouse TabSeparated row.
+
+    IPv4 address  → ('x.x.x.x',  '::')
+    IPv6 address  → ('0.0.0.0', 'x:x:…')
+    Empty/invalid → ('0.0.0.0',  '::')
+    """
+    if not addr:
+        return "0.0.0.0", "::"
+    try:
+        obj = ipaddress.ip_address(addr)
+        if isinstance(obj, ipaddress.IPv4Address):
+            return str(obj), "::"
+        return "0.0.0.0", str(obj)
+    except ValueError:
+        return "0.0.0.0", "::"
+
+
+def _tsv_escape(s: str) -> str:
+    """Escape special characters for ClickHouse TabSeparated format.
+
+    Backslash must be escaped first to avoid double-escaping.  Tab and
+    newline characters in message bodies (common in ArubaOS-CX RFC 5424
+    syslog) would otherwise break the column delimiter and row delimiter.
+    """
+    return (
+        s
+        .replace("\\", "\\\\")
+        .replace("\t",  "\\t")
+        .replace("\n",  "\\n")
+        .replace("\r",  "\\r")
+    )
+
+
 def _fix_ts(ts: str) -> str:
     """Normalise an RFC3339/ISO8601 timestamp to ClickHouse DateTime64 format.
 
@@ -1177,15 +1217,17 @@ async def ingest_flows(
 
     rows = []
     for r in records:
+        src4, src6 = _split_ip(r.get("src_ip", "") or "")
+        dst4, dst6 = _split_ip(r.get("dst_ip", "") or "")
+        exp4, _    = _split_ip(r.get("exporter_ip", "") or "")
         rows.append(
             f"{r.get('collector_device_id','') or '00000000-0000-0000-0000-000000000000'}\t"
-            f"{r.get('exporter_ip','') or '0.0.0.0'}\t"
+            f"{exp4}\t"
             f"{r.get('flow_type','unknown')}\t"
             f"{_fix_ts(r.get('flow_start','1970-01-01 00:00:00'))}\t"
             f"{_fix_ts(r.get('flow_end','1970-01-01 00:00:00'))}\t"
-            f"{r.get('src_ip','0.0.0.0') or '0.0.0.0'}\t"
-            f"{r.get('dst_ip','0.0.0.0') or '0.0.0.0'}\t"
-            f"::\t::\t"                                        # src_ip6, dst_ip6
+            f"{src4}\t{dst4}\t"                                # src_ip, dst_ip  (IPv4 only)
+            f"{src6}\t{dst6}\t"                                # src_ip6, dst_ip6 (IPv6 only)
             f"0.0.0.0\t"                                       # next_hop
             f"{r.get('src_port',0)}\t{r.get('dst_port',0)}\t"
             f"{r.get('ip_protocol',0)}\t{r.get('tcp_flags',0)}\t"
@@ -1225,8 +1267,11 @@ async def ingest_syslog(
             f"{r.get('device_ip','') or '0.0.0.0'}\t"
             f"{r.get('facility',0)}\t{r.get('severity',6)}\t"
             f"{_fix_ts(r.get('ts','1970-01-01 00:00:00'))}\t"
-            f"{r.get('hostname','')}\t{r.get('program','')}\t"
-            f"{r.get('pid','')}\t{r.get('message','')}\t{r.get('raw','')}"
+            f"{_tsv_escape(str(r.get('hostname','') or ''))}\t"
+            f"{_tsv_escape(str(r.get('program','') or ''))}\t"
+            f"{_tsv_escape(str(r.get('pid','') or ''))}\t"
+            f"{_tsv_escape(str(r.get('message','') or ''))}\t"
+            f"{_tsv_escape(str(r.get('raw','') or ''))}"
         )
 
     async with httpx.AsyncClient(timeout=15) as client:

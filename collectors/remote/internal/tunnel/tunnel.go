@@ -5,8 +5,6 @@ package tunnel
 
 import (
 	"fmt"
-	"math/rand"
-	"os"
 	"os/exec"
 	"strings"
 
@@ -22,14 +20,8 @@ func Setup(st *state.State) error {
 	// 1. Create the interface (ignore EEXIST).
 	_ = runCmd("ip", "link", "add", wgInterface, "type", "wireguard")
 
-	// 2. Write private key to a temp file with mode 0600.
-	tmpPath, err := writeTempPrivKey(st.WGPrivateKey)
-	if err != nil {
-		return fmt.Errorf("write wg private key: %w", err)
-	}
-	defer os.Remove(tmpPath)
-
-	if err := runCmd("wg", "set", wgInterface, "private-key", tmpPath); err != nil {
+	// 2. Set private key via stdin — no temp file, key never touches disk.
+	if err := setWGPrivateKey(wgInterface, st.WGPrivateKey); err != nil {
 		return fmt.Errorf("wg set private-key: %w", err)
 	}
 
@@ -74,14 +66,18 @@ func IsUp() bool {
 	return strings.Contains(string(out), "UP")
 }
 
-// writeTempPrivKey writes privKey to a temporary file with mode 0600 and
-// returns the path.  The caller is responsible for deleting the file.
-func writeTempPrivKey(privKey string) (string, error) {
-	name := fmt.Sprintf("/tmp/wg-priv-%08x", rand.Uint32())
-	if err := os.WriteFile(name, []byte(privKey+"\n"), 0600); err != nil {
-		return "", err
+// setWGPrivateKey configures the WireGuard private key for iface without
+// writing it to disk.  The key is passed through the process's stdin using
+// /proc/self/fd/0 so wg reads it directly — no temp file, no race window.
+func setWGPrivateKey(iface, privKey string) error {
+	cmd := exec.Command("wg", "set", iface, "private-key", "/proc/self/fd/0")
+	cmd.Stdin = strings.NewReader(privKey + "\n")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("wg set %s private-key: %w — %s",
+			iface, err, strings.TrimSpace(string(out)))
 	}
-	return name, nil
+	return nil
 }
 
 // runCmd executes a command and returns a combined-output error on failure.

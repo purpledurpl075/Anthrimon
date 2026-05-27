@@ -456,7 +456,33 @@ async def store_config_backup(
             backup_id=str(backup.id),
         )
 
+    # Run compliance against the new backup — covers both the first snapshot
+    # and every subsequent change.  Errors are caught so a bad policy regex
+    # never prevents the backup from being stored.
+    await _run_compliance(device_id, dev.hostname, db)
+
     return True
+
+
+async def _run_compliance(device_id: str, hostname: str, db: AsyncSession) -> None:
+    """Evaluate all enabled compliance policies against the device's latest backup.
+
+    Called automatically after every new backup write.  Never raises — compliance
+    failures are logged but must not interrupt the backup storage path.
+    """
+    try:
+        from .compliance import run_compliance_for_device
+        results = await run_compliance_for_device(device_id, db)
+        if results:
+            fail_count = sum(1 for r in results if r.status == "fail")
+            logger.info(
+                "compliance_auto_run",
+                device=hostname,
+                policies=len(results),
+                failed=fail_count,
+            )
+    except Exception as exc:
+        logger.warning("compliance_auto_run_failed", device=hostname, error=str(exc))
 
 
 async def collect_device(device_id: str, db: AsyncSession) -> Optional[ConfigBackup]:

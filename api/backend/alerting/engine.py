@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import math
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import structlog
@@ -30,6 +30,11 @@ from .evaluators import (
 logger = structlog.get_logger(__name__)
 
 EVAL_INTERVAL = 15  # seconds
+
+# How long to keep an fp in the in-memory state dicts after it was last active.
+# Must exceed any realistic duration_seconds + stable_for_seconds to avoid
+# clearing a pending duration gate early.  4 h is a safe upper bound.
+_STATE_TTL = timedelta(hours=4)
 
 
 def _safe_context(ctx: dict) -> dict:
@@ -138,6 +143,10 @@ class AlertEngine:
         # fps manually resolved by a user while condition was still active;
         # suppressed until the condition actually clears so we don't spam
         self._suppress_until_clear: set[str] = set()
+        # fp → last time it was touched by any state operation.
+        # Housekeeping prunes any fp that hasn't been seen within _STATE_TTL,
+        # which reclaims memory for deleted devices and retired rules.
+        self._fp_last_seen: dict[str, datetime] = {}
 
     async def run(self) -> None:
         logger.info("alert_engine_starting", interval_s=EVAL_INTERVAL)
@@ -176,26 +185,45 @@ class AlertEngine:
                 logger.error("alert_engine_error", error=str(exc), exc_info=True)
 
     async def _housekeeping(self, platform: dict) -> None:
-        """Periodic cleanup: auto-close stale alerts."""
+        """Periodic cleanup: auto-close stale alerts + prune state dicts."""
+        # ── Auto-close stale open alerts ─────────────────────────────────────
         auto_close_days = int(platform.get("auto_close_stale_days", 0))
-        if auto_close_days <= 0:
-            return
-        try:
-            async with AsyncSessionLocal() as db:
-                cutoff = f"now() - interval '{auto_close_days} days'"
-                result = await db.execute(text(f"""
-                    UPDATE alerts
-                    SET status = 'resolved', resolved_at = now()
-                    WHERE status IN ('open','acknowledged')
-                      AND triggered_at < {cutoff}
-                    RETURNING id
-                """))
-                closed = result.rowcount
-                if closed:
-                    logger.info("auto_closed_stale_alerts", count=closed, days=auto_close_days)
-                await db.commit()
-        except Exception as exc:
-            logger.error("housekeeping_error", error=str(exc))
+        if auto_close_days > 0:
+            try:
+                async with AsyncSessionLocal() as db:
+                    cutoff = f"now() - interval '{auto_close_days} days'"
+                    result = await db.execute(text(f"""
+                        UPDATE alerts
+                        SET status = 'resolved', resolved_at = now()
+                        WHERE status IN ('open','acknowledged')
+                          AND triggered_at < {cutoff}
+                        RETURNING id
+                    """))
+                    closed = result.rowcount
+                    if closed:
+                        logger.info("auto_closed_stale_alerts", count=closed, days=auto_close_days)
+                    await db.commit()
+            except Exception as exc:
+                logger.error("housekeeping_error", error=str(exc))
+
+        # ── Prune in-memory state for deleted devices / retired rules ─────────
+        # Any fingerprint not touched within _STATE_TTL is for a condition that
+        # is no longer being evaluated (device deleted, rule disabled, interface
+        # removed).  Remove it from all four state structures so memory stays
+        # bounded regardless of how many devices have come and gone.
+        now = datetime.now(timezone.utc)
+        stale = {fp for fp, ts in self._fp_last_seen.items()
+                 if (now - ts) > _STATE_TTL}
+        if stale:
+            for fp in stale:
+                self._breach_since.pop(fp, None)
+                self._clear_since.pop(fp, None)
+                self._last_clear.pop(fp, None)
+                self._suppress_until_clear.discard(fp)
+                del self._fp_last_seen[fp]
+            logger.info("alert_state_pruned",
+                        stale_fps=len(stale),
+                        remaining_fps=len(self._fp_last_seen))
 
     async def _evaluate_all(self, db: AsyncSession, platform: dict | None = None) -> list[_PendingNotif]:
         rules = (await db.execute(
@@ -376,11 +404,17 @@ class AlertEngine:
 
             firing_fps.add(fp)
 
+        # Refresh last-seen for every actively breaching fp so the state TTL
+        # clock resets as long as the condition is genuinely firing.
+        for fp in breaching_fps:
+            self._fp_last_seen[fp] = now
+
         # Expire manual-resolve suppression for any fp whose condition has now cleared
         for fp in list(self._suppress_until_clear):
             if fp not in breaching_fps:
                 self._suppress_until_clear.discard(fp)
                 self._last_clear[fp] = now
+                self._fp_last_seen[fp] = now  # keep alive: suppress history still useful
 
         # ── Correlated suppression: build set of devices whose parent is down ──
         suppressed_device_ids: set[str] = set()
@@ -509,6 +543,10 @@ class AlertEngine:
 
         for alert in open_alerts:
             fp = alert.fingerprint or ""
+            # Keep the state clock alive while the alert still exists in the DB,
+            # whether it's currently breaching or in a stability countdown.
+            if fp:
+                self._fp_last_seen[fp] = now
             if fp in breaching_fps:
                 # Still breaching — check re-notify interval
                 if rule.renotify_seconds > 0 and alert.last_notified_at is not None:
@@ -536,6 +574,7 @@ class AlertEngine:
             self._breach_since.pop(fp, None)
             self._clear_since.pop(fp, None)
             self._last_clear[fp] = now
+            self._fp_last_seen[fp] = now   # suppress history still useful post-resolve
             self._suppress_until_clear.discard(fp)
 
             if rule.metric == "device_down" and alert.device_id:

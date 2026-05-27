@@ -164,7 +164,7 @@ func (c *SNMPCollector) pollDevice(ctx context.Context, dev hub.Device) ([]strin
 	}
 
 	// Interface counters + oper status
-	ifLines, err := pollInterfaces(g, dev, ts)
+	ifLines, err := pollInterfaces(g, dev, ts, c.log)
 	if err == nil {
 		lines = append(lines, ifLines...)
 	}
@@ -200,7 +200,7 @@ func getSysUpTime(g *gosnmp.GoSNMP) (uint32, error) {
 	}
 }
 
-func pollInterfaces(g *gosnmp.GoSNMP, dev hub.Device, ts int64) ([]string, error) {
+func pollInterfaces(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logger) ([]string, error) {
 	// Walk ifDescr, ifOperStatus, ifInOctets, ifOutOctets.
 	type ifData struct {
 		descr      string
@@ -228,18 +228,32 @@ func pollInterfaces(g *gosnmp.GoSNMP, dev hub.Device, ts int64) ([]string, error
 		})
 	}
 
-	_ = walkAndApply(oidIfDescr, func(idx int, pdu gosnmp.SnmpPDU) {
+	// Non-critical walks: log on failure but continue — interface names and
+	// oper-status are useful but missing them doesn't corrupt counter data.
+	if err := walkAndApply(oidIfDescr, func(idx int, pdu gosnmp.SnmpPDU) {
 		ensure(idx).descr = pduString(pdu)
-	})
-	_ = walkAndApply(oidIfOperStatus, func(idx int, pdu gosnmp.SnmpPDU) {
+	}); err != nil {
+		log.Warn().Err(err).Str("device", dev.Hostname).Msg("ifDescr walk failed")
+	}
+	if err := walkAndApply(oidIfOperStatus, func(idx int, pdu gosnmp.SnmpPDU) {
 		ensure(idx).operStatus = pduInt(pdu)
-	})
-	_ = walkAndApply(oidIfInOctets, func(idx int, pdu gosnmp.SnmpPDU) {
+	}); err != nil {
+		log.Warn().Err(err).Str("device", dev.Hostname).Msg("ifOperStatus walk failed")
+	}
+
+	// Critical counter walks: return error on failure so the caller skips
+	// metric emission entirely — emitting zeros would look like traffic stopped
+	// and can trigger false bandwidth alerts.
+	if err := walkAndApply(oidIfInOctets, func(idx int, pdu gosnmp.SnmpPDU) {
 		ensure(idx).inOctets = pduUint64(pdu)
-	})
-	_ = walkAndApply(oidIfOutOctets, func(idx int, pdu gosnmp.SnmpPDU) {
+	}); err != nil {
+		return nil, fmt.Errorf("ifInOctets walk: %w", err)
+	}
+	if err := walkAndApply(oidIfOutOctets, func(idx int, pdu gosnmp.SnmpPDU) {
 		ensure(idx).outOctets = pduUint64(pdu)
-	})
+	}); err != nil {
+		return nil, fmt.Errorf("ifOutOctets walk: %w", err)
+	}
 
 	var lines []string
 	for ifIdx, r := range rows {

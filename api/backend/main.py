@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import binascii
 import datetime
+import os
+import sys
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
@@ -38,9 +41,71 @@ configure_logging()
 logger = structlog.get_logger(__name__)
 _settings = get_settings()
 
+# ── Startup secret validation ──────────────────────────────────────────────────
+
+# Values that prove the operator has NOT set a real JWT secret.
+_INSECURE_JWT_DEFAULTS = frozenset({
+    "CHANGE_ME_IN_PRODUCTION",
+    "changeme",
+    "secret",
+    "password",
+    "jwt_secret",
+    "",
+})
+
+
+def _validate_startup_secrets() -> None:
+    """Abort the process if JWT secret or encryption key are missing / default.
+
+    Called inside the lifespan so the structured logger is ready, but before
+    any background tasks start.  Using sys.exit() rather than raise so that
+    uvicorn prints our message to stderr and exits with status 1 cleanly.
+    """
+    errors: list[str] = []
+
+    # ── JWT secret ────────────────────────────────────────────────────────────
+    jwt_key = _settings.jwt_secret_key
+    if jwt_key in _INSECURE_JWT_DEFAULTS or len(jwt_key) < 32:
+        errors.append(
+            "jwt_secret_key is missing, a known default, or shorter than 32 characters. "
+            "Set jwt_secret_key in /etc/anthrimon/api.env to a long random string "
+            "(e.g.  python3 -c \"import secrets; print(secrets.token_hex(32))\")."
+        )
+
+    # ── Encryption key ────────────────────────────────────────────────────────
+    enc_hex = os.environ.get("ANTHRIMON_ENCRYPTION_KEY", "").strip()
+    if not enc_hex:
+        errors.append(
+            "ANTHRIMON_ENCRYPTION_KEY is not set. "
+            "Generate one with: python3 -c \"import secrets; print(secrets.token_hex(32))\""
+        )
+    else:
+        try:
+            raw = binascii.unhexlify(enc_hex)
+        except binascii.Error:
+            raw = b""
+            errors.append(
+                "ANTHRIMON_ENCRYPTION_KEY contains non-hexadecimal characters. "
+                "It must be exactly 64 lowercase hex digits (32 bytes)."
+            )
+        if raw and len(raw) != 32:
+            errors.append(
+                f"ANTHRIMON_ENCRYPTION_KEY must be 64 hex chars (32 bytes); "
+                f"got {2 * len(raw)} chars ({len(raw)} bytes)."
+            )
+
+    if errors:
+        for msg in errors:
+            logger.critical("startup_aborted_insecure_secret", detail=msg)
+        sys.exit(
+            "API startup aborted: one or more secrets are missing or insecure. "
+            "Check the structured logs above for details."
+        )
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    _validate_startup_secrets()
     logger.info("anthrimon_api_starting", version="0.1.0")
     engine_task      = await start_alert_engine()
     topology_task    = await start_topology_refresh_loop(interval_seconds=300)

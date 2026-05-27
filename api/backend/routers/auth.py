@@ -140,7 +140,7 @@ async def update_me(
     if body.new_password:
         if not body.current_password:
             raise HTTPException(status_code=400, detail="current_password required to set a new password")
-        if not _pwd_ctx.verify(body.current_password, current_user.password_hash):
+        if not _verify_password(body.current_password, current_user.password_hash):
             raise HTTPException(status_code=400, detail="Current password is incorrect")
         if len(body.new_password) < 8:
             raise HTTPException(status_code=400, detail="New password must be at least 8 characters")

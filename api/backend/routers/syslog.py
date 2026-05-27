@@ -58,6 +58,19 @@ async def _ch(query: str) -> list[dict]:
         raise HTTPException(status_code=503, detail="Syslog data unavailable") from exc
 
 
+async def _assert_device_in_tenant(device_id: str, tenant_id, db: AsyncSession) -> None:
+    """Raise 404 if device_id does not belong to this tenant."""
+    dev = (await db.execute(
+        select(Device).where(
+            Device.id == device_id,
+            Device.tenant_id == tenant_id,
+            Device.is_active == True,  # noqa: E712
+        )
+    )).scalar_one_or_none()
+    if dev is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+
 async def _tenant_device_ids(tenant_id, db: AsyncSession) -> list[str]:
     rows = (await db.execute(
         select(Device.id).where(Device.tenant_id == tenant_id, Device.is_active == True)  # noqa: E712
@@ -85,6 +98,7 @@ async def syslog_summary(
     db:           AsyncSession  = Depends(get_db),
 ) -> dict:
     if device_id:
+        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
         device_ids = [device_id]
     else:
         device_ids = await _tenant_device_ids(current_user.tenant_id, db)
@@ -134,6 +148,7 @@ async def syslog_messages(
     db:           AsyncSession  = Depends(get_db),
 ) -> dict:
     if device_id:
+        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
         device_ids = [device_id]
     else:
         device_ids = await _tenant_device_ids(current_user.tenant_id, db)
@@ -213,6 +228,7 @@ async def syslog_rate(
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
+        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
         device_ids = [device_id]
     else:
         device_ids = await _tenant_device_ids(current_user.tenant_id, db)
@@ -251,6 +267,7 @@ async def top_programs(
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
+        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
         device_ids = [device_id]
     else:
         device_ids = await _tenant_device_ids(current_user.tenant_id, db)

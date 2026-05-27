@@ -134,7 +134,7 @@ async def _upsert(
     )
 
 
-# ── Interface-ID lookup cache ─────────────────────────────────────────────────
+# ── Interface-ID and device lookup caches ────────────────────────────────────
 
 async def _load_interface_map(db: AsyncSession) -> dict[tuple[str, str], str]:
     """Return {(device_id, if_name): interface_id} for all active interfaces."""
@@ -149,9 +149,15 @@ async def _load_interface_map(db: AsyncSession) -> dict[tuple[str, str], str]:
     return {(r[0], r[1]): r[2] for r in rows}
 
 
+async def _load_active_device_ids(db: AsyncSession) -> set[str]:
+    """Return the set of active device UUID strings."""
+    rows = await db.execute(text("SELECT id::text FROM devices WHERE is_active = TRUE"))
+    return {r[0] for r in rows}
+
+
 # ── Per-metric baseline computations ─────────────────────────────────────────
 
-async def _compute_interface_down(db: AsyncSession, iface_map: dict) -> int:
+async def _compute_interface_down(db: AsyncSession, iface_map: dict, valid_devs: set[str]) -> int:
     """Compute normal_up_pct per interface from anthrimon_if_oper_status.
 
     oper_status is written as 1=up, 0=down.  avg_over_time gives the
@@ -182,7 +188,7 @@ async def _compute_interface_down(db: AsyncSession, iface_map: dict) -> int:
     return count
 
 
-async def _compute_interface_errors(db: AsyncSession, iface_map: dict) -> int:
+async def _compute_interface_errors(db: AsyncSession, iface_map: dict, valid_devs: set[str]) -> int:
     """Compute mean + stddev of combined in+out error rate per interface."""
     metric = (
         f"avg_over_time("
@@ -233,7 +239,7 @@ async def _compute_interface_errors(db: AsyncSession, iface_map: dict) -> int:
     return count
 
 
-async def _compute_cpu(db: AsyncSession) -> int:
+async def _compute_cpu(db: AsyncSession, valid_devs: set[str]) -> int:
     """Compute mean + stddev of max CPU util per device."""
     # Take the max across cpu_index so we get the worst-case core.
     avg_rows, std_rows = await asyncio.gather(
@@ -254,7 +260,7 @@ async def _compute_cpu(db: AsyncSession) -> int:
     count = 0
     for r in avg_rows:
         device_id = r["metric"].get("device_id", "")
-        if not device_id:
+        if not device_id or device_id not in valid_devs:
             continue
         mean   = _safe_float(r)
         stddev = std_map.get(device_id, 0.0)
@@ -266,7 +272,7 @@ async def _compute_cpu(db: AsyncSession) -> int:
     return count
 
 
-async def _compute_memory(db: AsyncSession) -> int:
+async def _compute_memory(db: AsyncSession, valid_devs: set[str]) -> int:
     """Compute mean + stddev of memory utilisation % per device.
 
     VM stores raw bytes; we compute used/total*100 via a PromQL binary op.
@@ -294,7 +300,7 @@ async def _compute_memory(db: AsyncSession) -> int:
     count = 0
     for r in avg_rows:
         device_id = r["metric"].get("device_id", "")
-        if not device_id:
+        if not device_id or device_id not in valid_devs:
             continue
         mean   = _safe_float(r)
         stddev = std_map.get(device_id, 0.0)
@@ -306,7 +312,7 @@ async def _compute_memory(db: AsyncSession) -> int:
     return count
 
 
-async def _compute_interface_util(db: AsyncSession, iface_map: dict) -> int:
+async def _compute_interface_util(db: AsyncSession, iface_map: dict, valid_devs: set[str]) -> int:
     """Compute mean + stddev of interface utilisation % per interface."""
     speed_filter = "anthrimon_if_speed_bps > 0"
     util_expr = (
@@ -349,7 +355,7 @@ async def _compute_interface_util(db: AsyncSession, iface_map: dict) -> int:
     return count
 
 
-async def _compute_dom_rx_power(db: AsyncSession, iface_map: dict) -> int:
+async def _compute_dom_rx_power(db: AsyncSession, iface_map: dict, valid_devs: set[str]) -> int:
     """Compute mean + stddev of DOM Rx power per interface."""
     avg_rows, std_rows = await asyncio.gather(
         _vm_query(f"avg_over_time(anthrimon_if_dom_rx_power_dbm[{_WINDOW}:{_STEP}])"),
@@ -381,7 +387,7 @@ async def _compute_dom_rx_power(db: AsyncSession, iface_map: dict) -> int:
     return count
 
 
-async def _compute_syslog_rate(db: AsyncSession) -> int:
+async def _compute_syslog_rate(db: AsyncSession, valid_devs: set[str]) -> int:
     """Compute mean + stddev of hourly syslog message rate per device from ClickHouse."""
     rows = await _ch_query("""
         SELECT
@@ -397,6 +403,8 @@ async def _compute_syslog_rate(db: AsyncSession) -> int:
     for r in rows:
         device_id = str(r.get("device_id", ""))
         if not device_id or device_id == "00000000-0000-0000-0000-000000000000":
+            continue
+        if device_id not in valid_devs:
             continue
         try:
             mean   = float(r["mean"])
@@ -442,41 +450,55 @@ async def _compute_bgp_prefix_count(db: AsyncSession) -> int:
 # ── Main compute loop ─────────────────────────────────────────────────────────
 
 async def _run_once() -> None:
+    # Load shared read-only data with a short-lived session.
     async with AsyncSessionLocal() as db:
-        # Load interface UUID map once, shared by all per-interface metrics.
-        iface_map = await _load_interface_map(db)
+        iface_map   = await _load_interface_map(db)
+        valid_devs  = await _load_active_device_ids(db)
 
-        results = await asyncio.gather(
-            _compute_interface_down(db, iface_map),
-            _compute_interface_errors(db, iface_map),
-            _compute_cpu(db),
-            _compute_memory(db),
-            _compute_interface_util(db, iface_map),
-            _compute_dom_rx_power(db, iface_map),
-            _compute_syslog_rate(db),
-            _compute_bgp_prefix_count(db),
-            return_exceptions=True,
-        )
+    # Each compute gets its own session so a FK violation or transaction error
+    # in one metric cannot abort the others.
+    async def _run(fn, *args):
+        async with AsyncSessionLocal() as sess:
+            result = await fn(sess, *args)
+            await sess.commit()
+            return result
 
-        totals = {}
-        metrics = [
-            "interface_down", "interface_errors", "cpu_util_pct",
-            "mem_util_pct", "interface_util_pct", "dom_rx_power",
-            "syslog_rate", "bgp_prefix_count",
-        ]
-        for metric, result in zip(metrics, results):
-            if isinstance(result, BaseException):
-                logger.warning("baseline_metric_failed", metric=metric, error=str(result))
-                totals[metric] = "error"
-            else:
-                totals[metric] = result
+    results = await asyncio.gather(
+        _run(_compute_interface_down,  iface_map, valid_devs),
+        _run(_compute_interface_errors, iface_map, valid_devs),
+        _run(_compute_cpu,             valid_devs),
+        _run(_compute_memory,          valid_devs),
+        _run(_compute_interface_util,  iface_map, valid_devs),
+        _run(_compute_dom_rx_power,    iface_map, valid_devs),
+        _run(_compute_syslog_rate,     valid_devs),
+        _run(_compute_bgp_prefix_count),
+        return_exceptions=True,
+    )
 
-        await db.commit()
-        logger.info("baselines_computed", **totals)
+    totals = {}
+    metrics = [
+        "interface_down", "interface_errors", "cpu_util_pct",
+        "mem_util_pct", "interface_util_pct", "dom_rx_power",
+        "syslog_rate", "bgp_prefix_count",
+    ]
+    for metric, result in zip(metrics, results):
+        if isinstance(result, BaseException):
+            logger.warning("baseline_metric_failed", metric=metric, error=str(result))
+            totals[metric] = "error"
+        else:
+            totals[metric] = result
+
+    logger.info("baselines_computed", **totals)
+
+
+_STARTUP_DELAY_S = 60  # wait for ClickHouse/VM to be ready before first run
 
 
 async def _baseline_loop(interval_s: int = 3600) -> None:
     logger.info("baseline_task_started", interval_s=interval_s)
+    # Give ClickHouse and VictoriaMetrics time to finish starting up before
+    # the first compute — they may still be initialising when the API starts.
+    await asyncio.sleep(_STARTUP_DELAY_S)
     while True:
         try:
             await _run_once()

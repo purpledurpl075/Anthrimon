@@ -163,7 +163,7 @@ func (c *SyslogCollector) ingest(raw, srcIP string) {
 	c.mu.Unlock()
 
 	loc := loadLocation(tz)
-	record := parseRFC3164(raw, srcIP, loc)
+	record := parseMessage(raw, srcIP, loc)
 	record["device_id"] = deviceID
 	record["device_ip"] = srcIP
 
@@ -190,12 +190,14 @@ func loadLocation(name string) *time.Location {
 	return loc
 }
 
-// parseRFC3164 parses a syslog message in RFC 3164 format:
+// parseMessage dispatches to RFC 5424 or RFC 3164 parsing based on the
+// version byte that follows the priority field.
 //
-//	<PRI>TIMESTAMP HOSTNAME PROGRAM[PID]: MESSAGE
+// RFC 5424:  <PRI>1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG
+// RFC 3164:  <PRI>TIMESTAMP HOSTNAME PROGRAM[PID]: MESSAGE
 //
-// loc is the timezone used to interpret the RFC 3164 timestamp.
-func parseRFC3164(raw, srcIP string, loc *time.Location) map[string]any {
+// loc is used only for RFC 3164 timestamps (which carry no timezone).
+func parseMessage(raw, srcIP string, loc *time.Location) map[string]any {
 	record := map[string]any{
 		"facility": 0,
 		"severity": 0,
@@ -216,6 +218,13 @@ func parseRFC3164(raw, srcIP string, loc *time.Location) map[string]any {
 		s = rest
 	}
 
+	// RFC 5424 version byte "1 " immediately follows the priority.
+	if len(s) >= 2 && s[0] == '1' && s[1] == ' ' {
+		parse5424(s[2:], record)
+		return record
+	}
+
+	// RFC 3164 fallback.
 	ts, rest2, ok2 := parseTimestamp(s, loc)
 	if ok2 {
 		record["ts"] = ts
@@ -237,6 +246,104 @@ func parseRFC3164(raw, srcIP string, loc *time.Location) map[string]any {
 	}
 
 	return record
+}
+
+// parse5424 fills record with the fields parsed from the body of an RFC 5424
+// message — the portion after "<PRI>1 " has already been stripped.
+//
+// Grammar (per RFC 5424 §6):
+//
+//	TIMESTAMP SP HOSTNAME SP APP-NAME SP PROCID SP MSGID SP STRUCTURED-DATA [SP MSG]
+//
+// Any field may be the nil value "-".
+func parse5424(body string, record map[string]any) {
+	s := body
+
+	// next returns the next SP-delimited token and advances s past it.
+	next := func() string {
+		if i := strings.IndexByte(s, ' '); i >= 0 {
+			tok := s[:i]
+			s = s[i+1:]
+			return tok
+		}
+		tok := s
+		s = ""
+		return tok
+	}
+
+	nilOrStr := func(tok string) string {
+		if tok == "-" {
+			return ""
+		}
+		return tok
+	}
+
+	// TIMESTAMP — RFC 3339 with sub-second precision and timezone offset.
+	tsTok := next()
+	if tsTok != "-" {
+		for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+			if t, err := time.Parse(layout, tsTok); err == nil {
+				record["ts"] = t.UTC().Format(time.RFC3339)
+				break
+			}
+		}
+	}
+
+	record["hostname"] = nilOrStr(next()) // HOSTNAME
+	record["program"] = nilOrStr(next())  // APP-NAME
+	record["pid"] = nilOrStr(next())      // PROCID
+	next()                                // MSGID — not stored
+
+	// STRUCTURED-DATA: either "-" or one or more "[ID KEY="VAL" ...]" blocks.
+	s = skipSD(s)
+
+	// MSG (optional): strip leading UTF-8 BOM that some implementations add.
+	msg := strings.TrimPrefix(s, "\xef\xbb\xbf")
+	if msg != "" {
+		record["message"] = msg
+	}
+}
+
+// skipSD advances past all structured-data elements in an RFC 5424 message
+// and returns the remaining string (the message body, or "").
+func skipSD(s string) string {
+	if len(s) == 0 {
+		return ""
+	}
+	// Nil SD.
+	if s[0] == '-' {
+		s = s[1:]
+		if len(s) > 0 && s[0] == ' ' {
+			s = s[1:]
+		}
+		return s
+	}
+	// One or more "[…]" SD elements.
+	for len(s) > 0 && s[0] == '[' {
+		depth, i := 0, 0
+		for i < len(s) {
+			switch s[i] {
+			case '[':
+				depth++
+			case ']':
+				depth--
+				if depth == 0 {
+					i++
+					s = s[i:]
+					if len(s) > 0 && s[0] == ' ' {
+						s = s[1:]
+					}
+					goto nextElement
+				}
+			case '\\':
+				i++ // skip escaped character inside param-value
+			}
+			i++
+		}
+		return "" // unterminated SD element — discard rest
+	nextElement:
+	}
+	return s
 }
 
 func parsePriority(s string) (facility, severity int, rest string, ok bool) {

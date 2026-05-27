@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import crypto as _crypto
 from ..dependencies import get_current_user, get_db, require_role
 from ..models.credential import Credential
 from ..models.tenant import User
@@ -17,6 +18,45 @@ router = APIRouter(prefix="/credentials", tags=["credentials"])
 
 _SNMP_TYPES = ("snmp_v2c", "snmp_v3")
 _ALL_TYPES   = ("snmp_v2c", "snmp_v3", "gnmi_tls", "ssh", "api_token", "netconf")
+
+# Fields that are encrypted at rest.  All other fields (username, port, …)
+# are stored and returned as-is.
+_SENSITIVE = ("password", "passphrase", "private_key")
+_REDACTED  = "***"
+
+
+def _encrypt_data(data: dict) -> dict:
+    """Return a copy of data with sensitive fields encrypted."""
+    if not _crypto.is_configured():
+        return data
+    out = dict(data)
+    for field in _SENSITIVE:
+        val = out.get(field)
+        if val and val != _REDACTED:
+            out[field] = _crypto.encrypt(str(val))
+    return out
+
+
+def _redact_data(data: dict) -> dict:
+    """Return a copy of data with sensitive fields replaced by '***'."""
+    out = dict(data)
+    for field in _SENSITIVE:
+        if out.get(field):
+            out[field] = _REDACTED
+    return out
+
+
+def _cred_read(cred: Credential) -> CredentialRead:
+    """Build a CredentialRead response with sensitive fields redacted."""
+    raw = cred.data if isinstance(cred.data, dict) else {}
+    return CredentialRead(
+        id=cred.id,
+        name=cred.name,
+        type=cred.type,
+        data=_redact_data(raw),
+        created_at=cred.created_at,
+        updated_at=cred.updated_at,
+    )
 
 
 def _type_filter(types: tuple[str, ...]):
@@ -37,7 +77,7 @@ async def list_credentials(
         .where(Credential.tenant_id == current_user.tenant_id, _type_filter(types))
         .order_by(Credential.name)
     )
-    return [CredentialRead.model_validate(c) for c in result.scalars().all()]
+    return [_cred_read(c) for c in result.scalars().all()]
 
 
 @router.post("", response_model=CredentialRead, status_code=status.HTTP_201_CREATED,
@@ -49,12 +89,17 @@ async def create_credential(
 ) -> CredentialRead:
     if body.type not in _ALL_TYPES:
         raise HTTPException(status_code=400, detail=f"Unknown credential type '{body.type}'")
-    cred = Credential(tenant_id=current_user.tenant_id, name=body.name, type=body.type, data=body.data)
+    cred = Credential(
+        tenant_id=current_user.tenant_id,
+        name=body.name,
+        type=body.type,
+        data=_encrypt_data(body.data),
+    )
     db.add(cred)
     await db.commit()
     await db.refresh(cred)
     logger.info("credential_created", id=str(cred.id), name=cred.name, type=cred.type)
-    return CredentialRead.model_validate(cred)
+    return _cred_read(cred)
 
 
 @router.get("/{cred_id}", response_model=CredentialRead, summary="Get a credential")
@@ -64,7 +109,7 @@ async def get_credential(
     db: AsyncSession = Depends(get_db),
 ) -> CredentialRead:
     cred = await _get(cred_id, current_user.tenant_id, db)
-    return CredentialRead.model_validate(cred)
+    return _cred_read(cred)
 
 
 @router.patch("/{cred_id}", response_model=CredentialRead, summary="Update a credential")
@@ -78,11 +123,21 @@ async def update_credential(
     if body.name is not None:
         cred.name = body.name
     if body.data is not None:
-        cred.data = body.data
+        new_data = dict(body.data)
+        existing = cred.data if isinstance(cred.data, dict) else {}
+        # If a sensitive field is the redacted placeholder "***", the user
+        # didn't change it — preserve the currently stored (encrypted) value.
+        for field in _SENSITIVE:
+            if new_data.get(field) == _REDACTED:
+                if existing.get(field):
+                    new_data[field] = existing[field]  # keep encrypted blob
+                else:
+                    del new_data[field]
+        cred.data = _encrypt_data(new_data)
     await db.commit()
     await db.refresh(cred)
     logger.info("credential_updated", id=str(cred_id))
-    return CredentialRead.model_validate(cred)
+    return _cred_read(cred)
 
 
 @router.delete("/{cred_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None,

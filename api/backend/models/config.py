@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Text, func
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ENUM as PgEnum, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..database import Base
@@ -47,7 +47,11 @@ class CompliancePolicy(Base):
     is_enabled:      Mapped[bool]              = mapped_column(Boolean, nullable=False, default=True)
     device_selector: Mapped[Optional[dict]]    = mapped_column(JSONB)
     rules:           Mapped[list]              = mapped_column(JSONB, nullable=False, default=list)
-    severity:        Mapped[str]               = mapped_column(Text, nullable=False, default="warning")
+    severity:        Mapped[str]               = mapped_column(
+        PgEnum("critical", "major", "minor", "warning", "info",
+               name="alert_severity", create_type=False),
+        nullable=False, default="warning",
+    )
     created_at:      Mapped[datetime]          = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at:      Mapped[datetime]          = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
