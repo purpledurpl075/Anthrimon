@@ -74,11 +74,12 @@ async def get_backup(
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     b = (await db.execute(
-        select(ConfigBackup).where(ConfigBackup.id == backup_id)
+        select(ConfigBackup)
+        .join(Device, ConfigBackup.device_id == Device.id)
+        .where(ConfigBackup.id == backup_id, Device.tenant_id == current_user.tenant_id)
     )).scalar_one_or_none()
     if b is None:
         raise HTTPException(status_code=404, detail="Backup not found")
-    await _assert_device(str(b.device_id), current_user.tenant_id, db)
     return {
         "id":                str(b.id),
         "device_id":         str(b.device_id),
@@ -125,11 +126,12 @@ async def get_diff(
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     d = (await db.execute(
-        select(ConfigDiff).where(ConfigDiff.id == diff_id)
+        select(ConfigDiff)
+        .join(Device, ConfigDiff.device_id == Device.id)
+        .where(ConfigDiff.id == diff_id, Device.tenant_id == current_user.tenant_id)
     )).scalar_one_or_none()
     if d is None:
         raise HTTPException(status_code=404, detail="Diff not found")
-    await _assert_device(str(d.device_id), current_user.tenant_id, db)
     return {
         "id":             str(d.id),
         "device_id":      str(d.device_id),
@@ -351,14 +353,19 @@ async def run_policy(
         )
     )).scalars().all()
 
+    # Batch-fetch all latest backups in one query instead of N+1.
+    device_ids = [dev.id for dev in devices]
+    backup_rows = (await db.execute(
+        select(ConfigBackup).where(
+            ConfigBackup.device_id.in_(device_ids),
+            ConfigBackup.is_latest == True,  # noqa: E712
+        )
+    )).scalars().all()
+    backup_by_device = {b.device_id: b for b in backup_rows}
+
     results = {"pass": 0, "fail": 0, "error": 0, "skip": 0}
     for dev in devices:
-        backup = (await db.execute(
-            select(ConfigBackup).where(
-                ConfigBackup.device_id == dev.id,
-                ConfigBackup.is_latest == True,  # noqa: E712
-            )
-        )).scalar_one_or_none()
+        backup = backup_by_device.get(dev.id)
         if backup is None:
             results["skip"] += 1
             continue

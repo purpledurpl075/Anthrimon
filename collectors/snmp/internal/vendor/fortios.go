@@ -31,5 +31,7 @@ func init() {
 		TempOIDs: &OIDSet{
 			Walk: []string{oid.FgHwSensorTable},
 		},
+
+		SkipDOM: true, // FortiGate firewalls do not expose DOM via ENTITY-SENSOR-MIB
 	})
 }

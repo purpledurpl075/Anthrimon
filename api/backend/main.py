@@ -74,6 +74,11 @@ def _validate_startup_secrets() -> None:
             "(e.g.  python3 -c \"import secrets; print(secrets.token_hex(32))\")."
         )
 
+    # ── Database password ─────────────────────────────────────────────────────
+    if _settings.db_password in ("changeme", "", "password", "postgres"):
+        logger.warning("insecure_db_password",
+                       detail="db_password is a known insecure default — consider changing it")
+
     # ── Encryption key ────────────────────────────────────────────────────────
     enc_hex = os.environ.get("ANTHRIMON_ENCRYPTION_KEY", "").strip()
     if not enc_hex:

@@ -39,6 +39,7 @@ type Device struct {
 	Credentials           []Credential `json:"credentials"`
 	RestCollectionEnabled bool         `json:"rest_collection_enabled"`
 	EapiEnabled           bool         `json:"eapi_enabled"`
+	EapiAllowHTTP         bool         `json:"eapi_allow_http"`
 	ConfigIntervalS       int          `json:"config_interval_s"`
 }
 
@@ -216,7 +217,7 @@ func (c *Client) DownloadBinary(ctx context.Context, arch string) ([]byte, strin
 			resp.StatusCode, string(body))
 	}
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 64<<20))
 	if err != nil {
 		return nil, "", fmt.Errorf("read binary body: %w", err)
 	}

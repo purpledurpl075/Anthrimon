@@ -23,7 +23,7 @@ from .evaluators import (
     eval_uptime, eval_temperature, eval_interface_errors, eval_interface_util,
     eval_custom_oid, eval_ospf_state, eval_route_missing, eval_flow_bandwidth,
     eval_syslog_match, eval_bgp_session_down, eval_bgp_session_flapping,
-    eval_bgp_prefix_drop, fetch_syslog_context,
+    eval_bgp_prefix_drop, eval_device_latency, fetch_syslog_context,
     resolve_devices,
 )
 
@@ -122,6 +122,11 @@ def _build_title(rule: AlertRule, breach: Breach) -> str:
         "bgp_session_down":    f"BGP peer {breach.extra.get('peer_ip','?')} (AS{breach.extra.get('peer_asn','?')}) {breach.extra.get('session_state','down')}",
         "bgp_session_flapping":f"BGP peer {breach.extra.get('peer_ip','?')} (AS{breach.extra.get('peer_asn','?')}) flapped {breach.extra.get('flap_count',0)}× in {breach.extra.get('window_minutes',60)}m",
         "bgp_prefix_drop":     f"BGP peer {breach.extra.get('peer_ip','?')} (AS{breach.extra.get('peer_asn','?')}) prefix count dropped {breach.extra.get('drop_pct',0):.1f}% ({breach.extra.get('prefixes_now','?')} vs avg {breach.extra.get('prefixes_avg','?')})",
+        "device_latency": (
+            f"high RTT {breach.value:.1f} ms (threshold {breach.extra.get('threshold_ms','?')} ms)"
+            if breach.extra.get("metric") == "rtt_ms"
+            else f"packet loss {breach.value:.1f}% (threshold {breach.extra.get('threshold_pct','?')}%)"
+        ),
     }
     return f"{base}: {metric_labels.get(rule.metric, rule.metric)}"
 
@@ -276,9 +281,11 @@ class AlertEngine:
             await db.delete(w)
 
     async def _evaluate_rule(self, db: AsyncSession, rule: AlertRule,
-                              peer_rules: list[AlertRule] = [],
-                              active_windows: list = [],
+                              peer_rules: Optional[list[AlertRule]] = None,
+                              active_windows: Optional[list] = None,
                               platform: dict | None = None) -> list[_PendingNotif]:
+        peer_rules = peer_rules or []
+        active_windows = active_windows or []
         tenant_id = str(rule.tenant_id)
         devices = await resolve_devices(db, tenant_id, rule.device_selector)
         if not devices:
@@ -367,6 +374,11 @@ class AlertEngine:
                     rule.duration_seconds or 300,
                 )
                 if b: breaches.append(b)
+            elif rule.metric == "device_latency":
+                rtt_thresh  = float(rule.threshold)       if rule.threshold        else 100.0
+                loss_thresh = float(rule.extra_conditions[0].get("threshold", 10.0)) \
+                              if rule.extra_conditions else 10.0
+                breaches.extend(await eval_device_latency(device, rtt_thresh, loss_thresh))
 
             # Extra conditions — ALL must also be true (AND logic)
             if len(breaches) > pre_breach_count and rule.extra_conditions:
@@ -430,9 +442,20 @@ class AlertEngine:
                 {"pid": str(rule.parent_device_id)},
             )).first()
             if parent_alert:
-                suppressed_device_ids = {d["id"] for d in devices}
+                # Only suppress devices that are OSPF neighbors of the parent —
+                # not the entire rule scope, which could silence the whole tenant.
+                neighbor_rows = (await db.execute(
+                    text("""
+                        SELECT d.id::text FROM devices d
+                        JOIN ospf_neighbors n ON d.mgmt_ip = n.neighbor_ip
+                        WHERE n.device_id = :pid
+                    """),
+                    {"pid": str(rule.parent_device_id)},
+                )).fetchall()
+                suppressed_device_ids = {r[0] for r in neighbor_rows}
 
         # ── Fire / suppress alerts ─────────────────────────────────────────────
+        _storm_counts: dict[str, int] = {}  # device_id → recent alert count, cached per cycle
         for breach in breaches:
             fp = _fingerprint(str(rule.id), breach.device_id, breach.interface_id)
             if fp not in firing_fps:
@@ -472,12 +495,13 @@ class AlertEngine:
                 # ── Storm protection ────────────────────────────────────────────
                 storm_limit = int((platform or {}).get("max_alerts_per_device_per_hour", 0))
                 if storm_limit > 0 and breach.device_id:
-                    recent_count = (await db.execute(text(
-                        "SELECT count(*) FROM alerts "
-                        "WHERE device_id = :did::uuid "
-                        "  AND triggered_at > now() - interval '1 hour'"
-                    ), {"did": breach.device_id})).scalar_one()
-                    if recent_count >= storm_limit:
+                    if breach.device_id not in _storm_counts:
+                        _storm_counts[breach.device_id] = (await db.execute(text(
+                            "SELECT count(*) FROM alerts "
+                            "WHERE device_id = :did::uuid "
+                            "  AND triggered_at > now() - interval '1 hour'"
+                        ), {"did": breach.device_id})).scalar_one()
+                    if _storm_counts[breach.device_id] >= storm_limit:
                         logger.warning("storm_protection_triggered",
                                        device=breach.device_id, limit=storm_limit)
                         continue
@@ -524,20 +548,24 @@ class AlertEngine:
                     Alert.rule_id == rule.id,
                     Alert.status == "open",
                     Alert.severity == rule.severity,
+                    Alert.triggered_at >= now - timedelta(days=90),
                 )
             )).scalars().all()
             for alert in open_alerts:
                 age = (now - alert.triggered_at).total_seconds()
                 if age >= rule.escalation_seconds:
                     alert.severity = rule.escalation_severity
+                    alert.last_notified_at = now
                     logger.info("alert_escalated", alert_id=str(alert.id),
                                 to=rule.escalation_severity, rule=rule.name)
+                    pending.append((alert, rule, False))
 
         # ── Auto-resolve with flap suppression ─────────────────────────────────
         open_alerts = (await db.execute(
             select(Alert).where(
                 Alert.rule_id == rule.id,
                 Alert.status.in_(["open", "acknowledged"]),
+                Alert.triggered_at >= now - timedelta(days=90),
             )
         )).scalars().all()
 

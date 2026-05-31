@@ -474,6 +474,48 @@ async def get_device_health_history(
     }
 
 
+@router.get("/{device_id}/latency", summary="ICMP RTT and packet-loss history from VictoriaMetrics")
+async def get_device_latency(
+    device_id: uuid.UUID,
+    hours: float = Query(default=1.0, ge=0.1, le=720.0),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    await _assert_device_visible(device_id, current_user, db)
+    did   = str(device_id)
+    now   = int(time.time())
+    start = now - int(hours * 3600)
+    # Probes fire every 30 s; use 60 s step for ≤1 h, 300 s for longer ranges.
+    step  = 60 if hours <= 1 else 300 if hours <= 6 else 900
+
+    async def vm_range(query: str) -> list:
+        try:
+            async with httpx.AsyncClient(timeout=10) as client:
+                r = await client.get(f"{_VM_URL}/api/v1/query_range",
+                    params={"query": query, "start": start, "end": now, "step": step})
+                r.raise_for_status()
+                results = r.json().get("data", {}).get("result", [])
+                if results:
+                    return [[int(v[0]), float(v[1])] for v in results[0].get("values", [])]
+        except Exception:
+            pass
+        return []
+
+    rtt_avg, rtt_min, rtt_max, loss_pct = await asyncio.gather(
+        vm_range(f'anthrimon_device_rtt_ms{{device_id="{did}",stat="avg"}}'),
+        vm_range(f'anthrimon_device_rtt_ms{{device_id="{did}",stat="min"}}'),
+        vm_range(f'anthrimon_device_rtt_ms{{device_id="{did}",stat="max"}}'),
+        vm_range(f'anthrimon_device_loss_pct{{device_id="{did}"}}'),
+    )
+
+    return {
+        "rtt_avg_ms":  rtt_avg,
+        "rtt_min_ms":  rtt_min,
+        "rtt_max_ms":  rtt_max,
+        "loss_pct":    loss_pct,
+    }
+
+
 @router.get("/{device_id}/alerts", response_model=List[AlertRead], summary="Active alerts for a device")
 async def get_device_alerts(
     device_id: uuid.UUID,
@@ -564,8 +606,9 @@ async def link_device_credential(
     db.add(link)
     try:
         await db.commit()
-    except Exception:
+    except Exception as exc:
         await db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Credential already linked to this device") from exc
 
 
 @router.delete("/{device_id}/credentials/{credential_id}",
@@ -823,14 +866,16 @@ async def get_ospf_neighbors(
     # To find the peer's OSPF-facing IP, look in THIS device's ARP table for
     # an entry whose MAC matches the peer's known interfaces.
     # Fall back to the peer's mgmt_ip if not found.
-    peer_macs = {}
-    for _, peer_device in inferred:
-        iface_macs = (await db.execute(
-            select(Interface.mac_address)
-            .where(Interface.device_id == peer_device.id,
+    peer_device_ids = [peer_device.id for _, peer_device in inferred]
+    peer_macs: dict[str, set[str]] = {}
+    if peer_device_ids:
+        mac_rows = (await db.execute(
+            select(Interface.device_id, Interface.mac_address)
+            .where(Interface.device_id.in_(peer_device_ids),
                    Interface.mac_address.isnot(None))
-        )).scalars().all()
-        peer_macs[str(peer_device.id)] = {str(m) for m in iface_macs}
+        )).all()
+        for dev_id, mac in mac_rows:
+            peer_macs.setdefault(str(dev_id), set()).add(str(mac))
 
     local_arp = (await db.execute(
         select(ARPEntry).where(ARPEntry.device_id == device_id)

@@ -41,14 +41,14 @@ class UserRead(BaseModel):
 
 class UserCreate(BaseModel):
     username:   str
-    email:      str
+    email:      EmailStr
     password:   str
     full_name:  Optional[str] = None
     role:       str = "readonly"
 
 
 class UserUpdate(BaseModel):
-    email:      Optional[str]  = None
+    email:      Optional[EmailStr] = None
     full_name:  Optional[str]  = None
     role:       Optional[str]  = None
     is_active:  Optional[bool] = None

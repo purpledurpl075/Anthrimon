@@ -10,7 +10,7 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 import bcrypt as _bcrypt
 import jwt as _jwt
-from pydantic import BaseModel
+from pydantic import BaseModel, EmailStr
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -71,7 +71,7 @@ class MeResponse(BaseModel):
 
 class UpdateMeRequest(BaseModel):
     full_name: Optional[str] = None
-    email: Optional[str] = None
+    email: Optional[EmailStr] = None
     current_password: Optional[str] = None
     new_password: Optional[str] = None
 
@@ -101,8 +101,12 @@ async def login(
     )
     user = result.scalar_one_or_none()
 
-    if user is None or not _verify_password(body.password, user.password_hash):
-        logger.warning("login_failed", username=body.username, ip=request.client.host)
+    _DUMMY_HASH = "$2b$12$GfPd1zRSGE8TbB0ZuBBuDuN6Gu4qMnvRFDJ1D1nLSdKCMJfVDlui2"
+    candidate_hash = user.password_hash if user is not None else _DUMMY_HASH
+    password_ok = _verify_password(body.password, candidate_hash)
+
+    if user is None or not password_ok:
+        logger.warning("login_failed", username=body.username, ip=request.client.host if request.client else "unknown")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
     token, expire = _create_jwt(user.id)

@@ -167,6 +167,19 @@ func (w *VMWriter) encode(result *poller.PollResult) []string {
 		}
 	}
 
+	// ── Probe (ICMP RTT / loss) ───────────────────────────────────────────────
+	if result.ProbeResult != nil {
+		pr := result.ProbeResult
+		ts := pr.PollTime.UnixMilli()
+		baseLbls := fmt.Sprintf(`device_id="%s"`, deviceID)
+		line(`anthrimon_device_loss_pct{%s} %.1f %d`, baseLbls, pr.LossPct, ts)
+		if pr.RttMin >= 0 {
+			line(`anthrimon_device_rtt_ms{%s,stat="min"} %.3f %d`, baseLbls, pr.RttMin, ts)
+			line(`anthrimon_device_rtt_ms{%s,stat="avg"} %.3f %d`, baseLbls, pr.RttAvg, ts)
+			line(`anthrimon_device_rtt_ms{%s,stat="max"} %.3f %d`, baseLbls, pr.RttMax, ts)
+		}
+	}
+
 	return lines
 }
 

@@ -32,12 +32,21 @@ def is_window_active(window: "MaintenanceWindow", now: datetime) -> bool:
 async def load_active_windows(db: AsyncSession, tenant_id: str) -> list["MaintenanceWindow"]:
     """Load all currently active maintenance windows for a tenant."""
     from ..models.alert import MaintenanceWindow
-
-    rows = (await db.execute(
-        select(MaintenanceWindow).where(MaintenanceWindow.tenant_id == tenant_id)
-    )).scalars().all()
+    from sqlalchemy import text as _text, or_ as _or
 
     now = datetime.now(timezone.utc)
+    # Push non-recurring window time filter to SQL to avoid loading expired rows.
+    # Recurring windows must still be checked in Python (is_window_active handles cron logic).
+    rows = (await db.execute(
+        select(MaintenanceWindow).where(
+            MaintenanceWindow.tenant_id == tenant_id,
+            _or(
+                MaintenanceWindow.is_recurring == True,  # noqa: E712
+                (MaintenanceWindow.starts_at <= now) & (MaintenanceWindow.ends_at >= now),
+            ),
+        )
+    )).scalars().all()
+
     return [w for w in rows if is_window_active(w, now)]
 
 

@@ -224,6 +224,18 @@ type ISISAdjacency struct {
 	UptimeSeconds int64  // seconds since adjacency last entered Up, 0 if down
 }
 
+// ProbeResult holds ICMP RTT and packet-loss statistics for one device.
+// RttMin == -1 signals all packets were lost (or ICMP is filtered).
+// This data feeds latency/loss alerting only — it does NOT imply device_down.
+type ProbeResult struct {
+	DeviceID uuid.UUID
+	PollTime time.Time
+	RttMin   float64 // ms; -1 when all probes lost
+	RttAvg   float64 // ms
+	RttMax   float64 // ms
+	LossPct  float64 // 0.0 – 100.0
+}
+
 // STPPortResult is the STP state for one bridge port.
 // IfIndex is resolved to interface_id by the writer.
 type STPPortResult struct {

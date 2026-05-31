@@ -116,9 +116,8 @@ func Bootstrap(cfg *config.Config, hostname, version string) (*state.State, erro
 
 	// Persist the hub-provided CA cert if returned.
 	if bResp.CACert != "" && cfg.CACert != "" {
-		if err := os.WriteFile(cfg.CACert, []byte(bResp.CACert), 0644); err != nil {
-			// Non-fatal — log would happen in the caller.
-			_ = err
+		if err := os.WriteFile(cfg.CACert, []byte(bResp.CACert), 0640); err != nil {
+			return nil, fmt.Errorf("write CA cert to %s: %w", cfg.CACert, err)
 		}
 	}
 

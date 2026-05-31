@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@plugin "@tailwindcss/typography";
 
 /* Enable class-based dark mode for Tailwind dark: utilities */
 @variant dark (&:where(.dark, .dark *));
@@ -53,7 +54,17 @@ body {
 .dark .bg-green-100  { background-color: rgba(22,163,74,0.15) !important; }
 .dark .bg-purple-100 { background-color: rgba(147,51,234,0.15) !important; }
 
+/* Light pastel backgrounds — wiki category colours + prose */
+.dark .bg-violet-50  { background-color: rgba(124,58,237,0.12) !important; }
+.dark .bg-blue-50    { background-color: rgba(37,99,235,0.10) !important; }
+.dark .bg-emerald-50 { background-color: rgba(16,185,129,0.10) !important; }
+.dark .bg-teal-50    { background-color: rgba(20,184,166,0.10) !important; }
+.dark .bg-cyan-50    { background-color: rgba(6,182,212,0.10) !important; }
+.dark .bg-indigo-50  { background-color: rgba(99,102,241,0.12) !important; }
+.dark .bg-orange-50  { background-color: rgba(234,88,12,0.10) !important; }
+
 .dark .text-red-700    { color: #f87171 !important; }
+.dark .text-orange-600 { color: #fb923c !important; }
 .dark .text-orange-700 { color: #fb923c !important; }
 .dark .text-yellow-700 { color: #fbbf24 !important; }
 .dark .text-blue-700   { color: #60a5fa !important; }
@@ -61,10 +72,26 @@ body {
 .dark .text-cyan-600   { color: #22d3ee !important; }
 .dark .text-amber-500  { color: #fbbf24 !important; }
 
+/* Category & accent text — brighten for dark backgrounds */
+.dark .text-violet-600  { color: #a78bfa !important; }
+.dark .text-emerald-600 { color: #34d399 !important; }
+.dark .text-teal-600    { color: #2dd4bf !important; }
+.dark .text-indigo-600  { color: #818cf8 !important; }
+.dark .text-indigo-700  { color: #a5b4fc !important; }
+.dark .text-slate-500   { color: #94a3b8 !important; }
+
 .dark .border-red-200    { border-color: rgba(220,38,38,0.25) !important; }
 .dark .border-orange-200 { border-color: rgba(234,88,12,0.25) !important; }
 .dark .border-yellow-200 { border-color: rgba(217,119,6,0.25) !important; }
 .dark .border-blue-200   { border-color: rgba(37,99,235,0.25) !important; }
+
+/* Wiki category coloured borders */
+.dark .border-violet-200  { border-color: rgba(124,58,237,0.25) !important; }
+.dark .border-emerald-200 { border-color: rgba(16,185,129,0.25) !important; }
+.dark .border-teal-200    { border-color: rgba(20,184,166,0.25) !important; }
+.dark .border-cyan-200    { border-color: rgba(6,182,212,0.25) !important; }
+.dark .border-indigo-100  { border-color: rgba(99,102,241,0.20) !important; }
+.dark .border-indigo-200  { border-color: rgba(99,102,241,0.25) !important; }
 
 /* Forms */
 .dark input:not([type="checkbox"]):not([type="radio"]),
@@ -81,6 +108,29 @@ body {
 /* Tables */
 .dark tbody tr:hover td { background-color: rgba(51,65,85,0.4) !important; }
 .dark thead tr           { background-color: #1e293b !important; }
+
+/* Prose dark mode — wiki article body */
+.dark .prose :where(a):not(:where(pre, pre *)) {
+  color: #818cf8 !important; /* indigo-400 */
+}
+.dark .prose :where(code):not(:where(pre, pre *)) {
+  background-color: rgba(99,102,241,0.15) !important;
+  color: #a5b4fc !important; /* indigo-300 */
+  border-color: rgba(99,102,241,0.20) !important;
+}
+.dark .prose :where(blockquote) {
+  background-color: rgba(99,102,241,0.08) !important;
+  border-left-color: rgba(129,140,248,0.35) !important;
+}
+.dark .prose :where(h2) {
+  border-bottom-color: #1e293b !important;
+}
+.dark .prose :where(table) {
+  border-color: #334155 !important;
+}
+.dark .prose :where(td) {
+  border-bottom-color: #1e293b !important;
+}
 
 /* Scrollbars in dark mode */
 .dark ::-webkit-scrollbar-track { background: #1e293b; }

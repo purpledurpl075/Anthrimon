@@ -60,9 +60,7 @@ def _cred_read(cred: Credential) -> CredentialRead:
 
 
 def _type_filter(types: tuple[str, ...]):
-    """Build a WHERE clause for credential_type enum comparison."""
-    clauses = " OR ".join(f"credentials.type = '{t}'::credential_type" for t in types)
-    return text(f"({clauses})")
+    return Credential.type.in_(types)
 
 
 @router.get("", response_model=list[CredentialRead], summary="List credentials")

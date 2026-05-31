@@ -21,6 +21,7 @@ import secrets
 import subprocess
 import time
 import uuid
+import yaml as _yaml
 import zipfile
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -80,6 +81,17 @@ _BOOTSTRAP_MAX_TRIES   = 10    # attempts allowed per window per IP
 _bootstrap_attempts: dict[str, deque] = {}
 
 
+def _real_client_ip(request: Request) -> str:
+    """Return the real client IP, looking through X-Forwarded-For when the
+    direct connection is from a trusted local proxy (nginx on 127.0.0.1/::1)."""
+    client = request.client.host if request.client else "unknown"
+    if client in ("127.0.0.1", "::1"):
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return client
+
+
 def _check_bootstrap_rate_limit(ip: str) -> None:
     """Raise 429 before token validation if source IP is over the attempt limit."""
     now    = time.monotonic()
@@ -107,6 +119,18 @@ def _check_bootstrap_rate_limit(ip: str) -> None:
 
 def _sha256(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
+
+
+def _control_token(api_key_hash: str) -> str:
+    """Time-based HMAC-SHA256 token for hub→collector control requests.
+
+    Uses api_key_hash as the HMAC key and the current UTC minute as the message,
+    producing a token that the collector accepts within a ±1-minute window (~3-minute
+    lifetime).  This prevents indefinite replay of a captured or DB-leaked credential.
+    """
+    import hmac as _hmac
+    minute = str(int(time.time()) // 60)
+    return _hmac.new(api_key_hash.encode(), minute.encode(), hashlib.sha256).hexdigest()
 
 
 def _generate_token() -> tuple[str, str]:
@@ -323,7 +347,7 @@ async def create_collector(
         site_id          = body.site_id,
         name             = body.name,
         token_hash       = token_hash,
-        token_expires_at = datetime.utcnow() + timedelta(hours=TOKEN_TTL_HOURS),
+        token_expires_at = datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS),
         status           = "pending",
     )
     db.add(c)
@@ -598,15 +622,17 @@ async def patch_collector(
     if c is None:
         raise HTTPException(status_code=404, detail="Collector not found")
     if body.timezone is not None:
+        try:
+            import zoneinfo
+            zoneinfo.ZoneInfo(body.timezone)
+        except (KeyError, zoneinfo.ZoneInfoNotFoundError):
+            raise HTTPException(status_code=400, detail=f"Unknown timezone: {body.timezone!r}")
         c.timezone = body.timezone
     if body.name is not None:
         c.name = body.name
     await db.commit()
     await db.refresh(c)
     return _collector_out(c)
-
-
-_CH_URL = "http://localhost:8123"
 
 
 async def _ch_query(query: str) -> list[dict]:
@@ -824,12 +850,15 @@ async def trigger_collector_update(
             detail="No built binaries found — run POST /collectors/builds first",
         )
 
-    control_url = f"http://{str(c.wg_ip).split('/')[0]}:9090/update"
+    wg_ip_str = str(c.wg_ip).split("/")[0]
+    if ipaddress.ip_address(wg_ip_str) not in _WG_SUBNET:
+        raise HTTPException(status_code=409, detail="Collector WireGuard IP is outside the expected subnet")
+    control_url = f"http://{wg_ip_str}:9090/update"
     try:
         async with httpx.AsyncClient(timeout=10) as hc:
             resp = await hc.post(
                 control_url,
-                headers={"Authorization": f"Bearer {c.api_key_hash}"},
+                headers={"Authorization": f"Bearer {_control_token(c.api_key_hash)}"},
             )
         if resp.status_code == 200:
             logger.info("collector_update_triggered",
@@ -885,12 +914,15 @@ async def trigger_collector_refresh(
             detail="Collector has no WireGuard IP — bootstrap it first",
         )
 
-    control_url = f"http://{str(c.wg_ip).split('/')[0]}:9090/refresh"
+    wg_ip_str = str(c.wg_ip).split("/")[0]
+    if ipaddress.ip_address(wg_ip_str) not in _WG_SUBNET:
+        raise HTTPException(status_code=409, detail="Collector WireGuard IP is outside the expected subnet")
+    control_url = f"http://{wg_ip_str}:9090/refresh"
     try:
         async with httpx.AsyncClient(timeout=10) as hc:
             resp = await hc.post(
                 control_url,
-                headers={"Authorization": f"Bearer {c.api_key_hash}"},
+                headers={"Authorization": f"Bearer {_control_token(c.api_key_hash)}"},
             )
         if resp.status_code == 200:
             logger.info("collector_refresh_triggered",
@@ -929,7 +961,7 @@ async def regenerate_token(
         raise HTTPException(status_code=404, detail="Collector not found")
     token, token_hash = _generate_token()
     c.token_hash       = token_hash
-    c.token_expires_at = datetime.utcnow() + timedelta(hours=TOKEN_TTL_HOURS)
+    c.token_expires_at = datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)
     await db.commit()
     return {"registration_token": token, "ca_cert": _ca_cert_pem(),
             "expires_at": c.token_expires_at.isoformat()}
@@ -937,11 +969,7 @@ async def regenerate_token(
 
 # ── Deployment package download ───────────────────────────────────────────────
 
-_COLLECTOR_YAML_TEMPLATE = """\
-# Anthrimon remote collector configuration
-# Generated by hub at {hub_url}
-hub_url: "{hub_url}"
-token: "{token}"
+_COLLECTOR_YAML_STATIC = """\
 ca_cert: "/etc/anthrimon/ca.crt"
 state_file: "/etc/anthrimon/collector-state.json"
 
@@ -967,6 +995,16 @@ forward:
 log:
   level: info
 """
+
+def _build_collector_yaml(hub_url: str, token: str) -> str:
+    """Build collector.yaml using yaml.dump for user-supplied fields to prevent injection."""
+    dynamic = _yaml.dump(
+        {"hub_url": hub_url, "token": token or "REPLACE_WITH_REGISTRATION_TOKEN"},
+        default_flow_style=False,
+        allow_unicode=True,
+    )
+    return "# Anthrimon remote collector configuration\n" + dynamic + _COLLECTOR_YAML_STATIC
+
 
 _INSTALL_SH_TEMPLATE = """\
 #!/usr/bin/env bash
@@ -1070,14 +1108,15 @@ async def download_collector_package(
     if c is None:
         raise HTTPException(status_code=404, detail="Collector not found")
 
+    # Validate the caller-supplied token against this collector's pending token.
+    if token and c.token_hash != _sha256(token):
+        raise HTTPException(status_code=400, detail="Token does not match this collector's pending registration token")
+
     platform = await load_platform_settings(db)
     hub_url   = (platform.get("base_url") or "").rstrip("/")
     ca_cert   = _ca_cert_pem() or ""
 
-    yaml_content = _COLLECTOR_YAML_TEMPLATE.format(
-        hub_url=hub_url,
-        token=token,
-    )
+    yaml_content = _build_collector_yaml(hub_url, token)
     install_sh = _INSTALL_SH_TEMPLATE.format(
         hub_url=hub_url,
         bin_dst="/usr/local/bin/anthrimon-collector",
@@ -1134,8 +1173,7 @@ async def bootstrap(
     db:      AsyncSession = Depends(get_db),
 ) -> dict:
     # Rate-limit before any DB work to prevent token enumeration.
-    client_ip = request.client.host if request.client else "unknown"
-    _check_bootstrap_rate_limit(client_ip)
+    _check_bootstrap_rate_limit(_real_client_ip(request))
 
     token_hash = _sha256(body.token)
     now        = datetime.now(timezone.utc)
@@ -1144,12 +1182,13 @@ async def bootstrap(
         select(RemoteCollector).where(RemoteCollector.token_hash == token_hash)
     )).scalar_one_or_none()
 
+    _invalid = HTTPException(status_code=401, detail="Invalid or expired registration token")
     if c is None:
-        raise HTTPException(status_code=401, detail="Invalid registration token")
+        raise _invalid
     if c.status == "revoked":
-        raise HTTPException(status_code=401, detail="Collector has been revoked")
+        raise _invalid
     if c.token_expires_at and now > c.token_expires_at.replace(tzinfo=timezone.utc):
-        raise HTTPException(status_code=401, detail="Registration token has expired")
+        raise _invalid
 
     # Check WireGuard is available on the hub
     hub_pubkey = _wg_hub_pubkey()
@@ -1183,6 +1222,9 @@ async def bootstrap(
 
     # Generate API key
     api_key, api_key_hash = _generate_token()
+
+    if not re.fullmatch(r"[A-Za-z0-9+/]{43}=", body.wg_public_key):
+        raise HTTPException(status_code=400, detail="Invalid WireGuard public key format")
 
     # Update collector record
     c.wg_public_key  = body.wg_public_key
@@ -1329,17 +1371,29 @@ async def ingest_metrics(
         logger.warning("collector_metrics_ingest_failed",
                        collector=collector.name, status=resp.status_code)
 
-    # Stamp last_polled + status='up' for every device_id seen in the payload.
+    # Load allowed device IDs for this collector to prevent cross-collector writes.
+    allowed_device_ids: set[str] = {
+        str(did) for (did,) in (await db.execute(
+            select(Device.id).where(
+                Device.collector_id == collector.id,
+                Device.is_active == True,  # noqa: E712
+            )
+        )).all()
+    }
+
+    # Stamp last_polled + status='up' for devices actually assigned to this collector.
     device_ids = {m.group(1).decode() for m in _DEVICE_ID_RE.finditer(body)}
     valid_ids: list[uuid.UUID] = []
     for did in device_ids:
+        if did not in allowed_device_ids:
+            continue
         try:
             valid_ids.append(uuid.UUID(did))
         except ValueError:
             pass
 
     if valid_ids:
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         await db.execute(
             update(Device)
             .where(
@@ -1354,8 +1408,10 @@ async def ingest_metrics(
     # go via this endpoint because they have no direct DB access.
     health_data = _parse_health_from_metrics(body)
     if health_data:
-        now_health = datetime.utcnow()
+        now_health = datetime.now(timezone.utc).replace(tzinfo=None)
         for did_str, h in health_data.items():
+            if did_str not in allowed_device_ids:
+                continue
             samples = h["cpu_samples"]
             cpu_pct = round(sum(samples) / len(samples), 2) if samples else None
             mem_used  = h["mem_used"]
@@ -1468,28 +1524,44 @@ async def ingest_flows(
     if not records:
         return {"written": 0}
 
+    allowed_ids = {
+        str(did) for (did,) in (await db.execute(
+            select(Device.id).where(
+                Device.collector_id == collector.id,
+                Device.is_active == True,  # noqa: E712
+            )
+        )).all()
+    }
+
     rows = []
     for r in records:
+        did = r.get("collector_device_id") or ""
+        if did and did not in allowed_ids:
+            continue
+        collector_device_id = did or "00000000-0000-0000-0000-000000000000"
         src4, src6 = _split_ip(r.get("src_ip", "") or "")
         dst4, dst6 = _split_ip(r.get("dst_ip", "") or "")
         exp4, _    = _split_ip(r.get("exporter_ip", "") or "")
-        rows.append(
-            f"{r.get('collector_device_id','') or '00000000-0000-0000-0000-000000000000'}\t"
-            f"{exp4}\t"
-            f"{r.get('flow_type','unknown')}\t"
-            f"{_fix_ts(r.get('flow_start','1970-01-01 00:00:00'))}\t"
-            f"{_fix_ts(r.get('flow_end','1970-01-01 00:00:00'))}\t"
-            f"{src4}\t{dst4}\t"                                # src_ip, dst_ip  (IPv4 only)
-            f"{src6}\t{dst6}\t"                                # src_ip6, dst_ip6 (IPv6 only)
-            f"0.0.0.0\t"                                       # next_hop
-            f"{r.get('src_port',0)}\t{r.get('dst_port',0)}\t"
-            f"{r.get('ip_protocol',0)}\t{r.get('tcp_flags',0)}\t"
-            f"{r.get('bytes',0)}\t{r.get('packets',0)}\t"
-            f"{r.get('input_if_index',0)}\t{r.get('output_if_index',0)}\t"
-            f"0\t0\t0\t0\t"                                    # src_asn, dst_asn, src_prefix_len, dst_prefix_len
-            f"{r.get('tos',0)}\t{r.get('dscp',0)}\t"
-            f"{r.get('sampling_rate',1)}"
-        )
+        try:
+            rows.append(
+                f"{collector_device_id}\t"
+                f"{exp4}\t"
+                f"{_tsv_escape(str(r.get('flow_type', 'unknown') or 'unknown'))}\t"
+                f"{_fix_ts(r.get('flow_start','1970-01-01 00:00:00'))}\t"
+                f"{_fix_ts(r.get('flow_end','1970-01-01 00:00:00'))}\t"
+                f"{src4}\t{dst4}\t"                                # src_ip, dst_ip  (IPv4 only)
+                f"{src6}\t{dst6}\t"                                # src_ip6, dst_ip6 (IPv6 only)
+                f"0.0.0.0\t"                                       # next_hop
+                f"{int(r.get('src_port',0) or 0)}\t{int(r.get('dst_port',0) or 0)}\t"
+                f"{int(r.get('ip_protocol',0) or 0)}\t{int(r.get('tcp_flags',0) or 0)}\t"
+                f"{int(r.get('bytes',0) or 0)}\t{int(r.get('packets',0) or 0)}\t"
+                f"{int(r.get('input_if_index',0) or 0)}\t{int(r.get('output_if_index',0) or 0)}\t"
+                f"0\t0\t0\t0\t"                                    # src_asn, dst_asn, src_prefix_len, dst_prefix_len
+                f"{int(r.get('tos',0) or 0)}\t{int(r.get('dscp',0) or 0)}\t"
+                f"{int(r.get('sampling_rate',1) or 1)}"
+            )
+        except (ValueError, TypeError):
+            continue
 
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
@@ -1513,12 +1585,26 @@ async def ingest_syslog(
     if not records:
         return {"written": 0}
 
+    allowed_ids = {
+        str(did) for (did,) in (await db.execute(
+            select(Device.id).where(
+                Device.collector_id == collector.id,
+                Device.is_active == True,  # noqa: E712
+            )
+        )).all()
+    }
+
     rows = []
     for r in records:
+        did = r.get('device_id') or ''
+        if did and did not in allowed_ids:
+            continue
+        device_id = did or '00000000-0000-0000-0000-000000000000'
+        device_ip4, _ = _split_ip(r.get('device_ip', '') or '')
         rows.append(
-            f"{r.get('device_id','') or '00000000-0000-0000-0000-000000000000'}\t"
-            f"{r.get('device_ip','') or '0.0.0.0'}\t"
-            f"{r.get('facility',0)}\t{r.get('severity',6)}\t"
+            f"{device_id}\t"
+            f"{device_ip4}\t"
+            f"{int(r.get('facility', 0) or 0)}\t{int(r.get('severity', 6) or 6)}\t"
             f"{_fix_ts(r.get('ts','1970-01-01 00:00:00'))}\t"
             f"{_tsv_escape(str(r.get('hostname','') or ''))}\t"
             f"{_tsv_escape(str(r.get('program','') or ''))}\t"

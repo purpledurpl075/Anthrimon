@@ -409,6 +409,7 @@ async def _probe_sweep() -> None:
             JOIN devices d ON d.id = dam.device_id
             WHERE dam.method != 'snmp'
               AND d.is_active = true
+              AND d.collector_id IS NULL
         """))).all()
 
     if not rows:

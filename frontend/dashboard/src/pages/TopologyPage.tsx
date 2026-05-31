@@ -360,6 +360,7 @@ type EdgeData = {
   source_hostname?: string
   target_hostname?: string
   source_iface_id?: string | null
+  target_iface_id?: string | null
   util_pct?: number | null
   util_in_pct?: number | null
   util_out_pct?: number | null
@@ -656,17 +657,26 @@ function LinkPanel({
   const src = nodesById[edge.source]
   const tgt = nodesById[edge.target]
 
+  // Prefer source interface; fall back to target (in/out swapped relative to source)
+  const ifaceId  = edge.source_iface_id ?? edge.target_iface_id
+  const swapped  = !edge.source_iface_id && !!edge.target_iface_id
+
   const { data: util, isLoading } = useQuery<LinkUtilisation>({
-    queryKey:        ['link-util', edge.source_iface_id],
-    queryFn:         () => fetchLinkUtil(edge.source_iface_id!),
-    enabled:         !!edge.source_iface_id,
+    queryKey:        ['link-util', ifaceId],
+    queryFn:         () => fetchLinkUtil(ifaceId!),
+    enabled:         !!ifaceId,
     staleTime:       30_000,
     refetchInterval: 60_000,
   })
 
   const speed   = util?.speed_bps ?? edge.source_speed_bps
-  const inLast  = util?.in_bps?.at(-1)?.[1]  ?? null
-  const outLast = util?.out_bps?.at(-1)?.[1]  ?? null
+  // When using target's interface, in/out are from the target's perspective → swap for display
+  const rawIn   = util?.in_bps  ?? []
+  const rawOut  = util?.out_bps ?? []
+  const inSeries  = (swapped ? rawOut : rawIn)  as [number, number][]
+  const outSeries = (swapped ? rawIn  : rawOut) as [number, number][]
+  const inLast  = inSeries.at(-1)?.[1]  ?? null
+  const outLast = outSeries.at(-1)?.[1] ?? null
   const inPct   = speed && inLast  != null ? inLast  / speed * 100 : null
   const outPct  = speed && outLast != null ? outLast / speed * 100 : null
 
@@ -732,7 +742,7 @@ function LinkPanel({
           </div>
         )}
 
-        {edge.source_iface_id ? (
+        {ifaceId ? (
           <div className="px-3 pt-2.5 pb-3">
             <div className="flex items-center justify-between mb-1.5">
               <span className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide">Bandwidth — 30 min</span>
@@ -747,11 +757,7 @@ function LinkPanel({
             ) : util ? (
               <>
                 <div className="rounded-xl bg-slate-50 px-1 py-1.5 mb-2.5">
-                  <Sparkline
-                    inSeries={util.in_bps as [number, number][]}
-                    outSeries={util.out_bps as [number, number][]}
-                    w={248} h={64}
-                  />
+                  <Sparkline inSeries={inSeries} outSeries={outSeries} w={248} h={64} />
                 </div>
 
                 <div className="space-y-1.5">
@@ -775,11 +781,11 @@ function LinkPanel({
                 </div>
               </>
             ) : (
-              <div className="text-[10px] text-slate-400 py-1">No utilisation data</div>
+              <div className="text-[10px] text-slate-400 py-1">No utilisation data available yet</div>
             )}
           </div>
         ) : (
-          <div className="px-3 py-2 text-[10px] text-slate-400">No interface metrics available</div>
+          <div className="px-3 py-2 text-[10px] text-slate-400">Interface not matched — SNMP name may differ from LLDP port name</div>
         )}
       </div>
     </div>
@@ -901,10 +907,14 @@ function TopologyPageInner() {
   }, [alertsData])
 
   // ── Batch util query (all topology edges) ─────────────────────────────
-  const ifaceIds = useMemo(
-    () => [...new Set((data?.edges ?? []).map(e => e.source_iface_id).filter(Boolean) as string[])],
-    [data?.edges],
-  )
+  const ifaceIds = useMemo(() => {
+    const ids = new Set<string>()
+    for (const e of data?.edges ?? []) {
+      if (e.source_iface_id) ids.add(e.source_iface_id)
+      if (e.target_iface_id) ids.add(e.target_iface_id)
+    }
+    return [...ids]
+  }, [data?.edges])
 
   const { data: utilBatch } = useQuery({
     queryKey:        ['topo-util', ifaceIds.slice().sort().join(',')],
@@ -1034,11 +1044,15 @@ function TopologyPageInner() {
         let utilPct: number | null = null
         let utilInPct: number | null = null
         let utilOutPct: number | null = null
-        if (e.source_iface_id && utilBatch?.[e.source_iface_id]) {
-          const snap = utilBatch[e.source_iface_id]
+        const snapId = e.source_iface_id ?? e.target_iface_id
+        if (snapId && utilBatch?.[snapId]) {
+          const snap = utilBatch[snapId]
           if (snap.speed_bps && snap.speed_bps > 0) {
-            utilInPct  = (snap.in_bps  / snap.speed_bps) * 100
-            utilOutPct = (snap.out_bps / snap.speed_bps) * 100
+            const inPct  = (snap.in_bps  / snap.speed_bps) * 100
+            const outPct = (snap.out_bps / snap.speed_bps) * 100
+            // If we're reading from the target's interface, in/out are reversed
+            utilInPct  = e.source_iface_id ? inPct  : outPct
+            utilOutPct = e.source_iface_id ? outPct : inPct
             utilPct    = Math.max(utilInPct, utilOutPct)
           }
         }
@@ -1060,6 +1074,7 @@ function TopologyPageInner() {
             source_hostname: nodesById[e.source]?.hostname,
             target_hostname: nodesById[e.target]?.hostname,
             source_iface_id: e.source_iface_id,
+            target_iface_id: e.target_iface_id,
             util_pct:        utilPct,
             util_in_pct:     utilInPct,
             util_out_pct:    utilOutPct,

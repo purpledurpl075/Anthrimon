@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import uuid
 from typing import Optional
 
 import httpx
@@ -79,7 +80,7 @@ async def list_all_sessions(
 
 @router.get("/devices/{device_id}/sessions", summary="BGP sessions for a device")
 async def device_sessions(
-    device_id:    str,
+    device_id:    uuid.UUID,
     current_user: User         = Depends(get_current_user),
     db:           AsyncSession = Depends(get_db),
 ) -> list[dict]:
@@ -218,7 +219,7 @@ async def bgp_prefix_totals(
 
 @router.get("/devices/{device_id}/prefix-history", summary="Prefix count + update rate time-series for all BGP peers on a device")
 async def bgp_prefix_history(
-    device_id:    str,
+    device_id:    uuid.UUID,
     hours:        int  = Query(default=24, ge=1, le=168),
     current_user: User = Depends(get_current_user),
     db:           AsyncSession = Depends(get_db),

@@ -202,6 +202,16 @@ export interface DeviceBaselines {
 export const fetchDeviceBaselines = (id: string) =>
   api.get<DeviceBaselines>(`/devices/${id}/baselines`).then(r => r.data)
 
+export interface LatencyHistory {
+  rtt_avg_ms: [number, number][]
+  rtt_min_ms: [number, number][]
+  rtt_max_ms: [number, number][]
+  loss_pct:   [number, number][]
+}
+
+export const fetchDeviceLatency = (id: string, hours: number) =>
+  api.get<LatencyHistory>(`/devices/${id}/latency`, { params: { hours } }).then(r => r.data)
+
 export const overrideBaseline = (
   deviceId: string,
   metricType: string,

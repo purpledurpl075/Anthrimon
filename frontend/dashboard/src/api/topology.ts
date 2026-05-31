@@ -19,6 +19,8 @@ export interface TopologyEdge {
   source_iface_id: string | null
   source_speed_bps: number | null
   source_if_index: number | null
+  target_iface_id: string | null
+  target_speed_bps: number | null
   protocol: 'lldp' | 'cdp'
 }
 

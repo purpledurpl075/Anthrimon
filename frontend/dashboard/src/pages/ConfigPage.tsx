@@ -72,6 +72,108 @@ function getSnippets(vendors: string[]) {
   return VENDOR_SNIPPETS.generic
 }
 
+// ── Compliance rule templates ─────────────────────────────────────────────────
+
+interface RuleTemplate {
+  label: string
+  category: string
+  rule: ComplianceRule
+  example?: string
+}
+
+const TEMPLATE_VENDORS: { key: string; label: string }[] = [
+  { key: 'all',          label: 'All platforms' },
+  { key: 'cisco_ios',    label: 'IOS / IOS-XE'  },
+  { key: 'cisco_xr',     label: 'IOS-XR'         },
+  { key: 'arista_eos',   label: 'Arista EOS'     },
+  { key: 'aruba_cx',     label: 'Aruba CX'       },
+  { key: 'aruba_switch', label: 'Aruba Switch'   },
+  { key: 'junos',        label: 'JunOS'          },
+]
+
+const COMPLIANCE_TEMPLATES: Record<string, RuleTemplate[]> = {
+  all: [
+    { label: 'NTP server',       category: 'Time',       rule: { type: 'regex_present', pattern: 'ntp server',                  description: 'NTP server must be configured' },              example: 'ntp server 10.0.0.1' },
+    { label: 'Syslog server',    category: 'Logging',    rule: { type: 'regex_present', pattern: 'logging (host|server|\\d+\\.)', description: 'Remote syslog must be configured' },          example: 'logging host 10.0.0.5' },
+    { label: 'Login banner',     category: 'Security',   rule: { type: 'regex_present', pattern: 'banner (login|motd)',          description: 'Login banner must be configured' } },
+    { label: 'SNMP configured',  category: 'Monitoring', rule: { type: 'regex_present', pattern: 'snmp-server',                 description: 'SNMP must be configured' } },
+    { label: 'RADIUS server',    category: 'Auth',       rule: { type: 'regex_present', pattern: 'radius-server host',          description: 'RADIUS authentication server must be configured' } },
+    { label: 'Spanning tree',    category: 'Protocols',  rule: { type: 'regex_present', pattern: 'spanning-tree mode',          description: 'STP mode must be explicitly set' } },
+  ],
+  cisco_ios: [
+    { label: 'SSH v2 only',          category: 'Security',   rule: { type: 'contains',     pattern: 'ip ssh version 2',                  description: 'SSH version 2 must be enforced' },                  example: 'ip ssh version 2' },
+    { label: 'No telnet on VTY',     category: 'Security',   rule: { type: 'regex_absent', pattern: 'transport input telnet',             description: 'Telnet must not be allowed on VTY lines' } },
+    { label: 'Password encryption',  category: 'Security',   rule: { type: 'contains',     pattern: 'service password-encryption',        description: 'Service password-encryption must be enabled' },     example: 'service password-encryption' },
+    { label: 'No HTTP server',       category: 'Security',   rule: { type: 'regex_absent', pattern: '^ip http server$',                   description: 'HTTP management server must be disabled' } },
+    { label: 'Login banner',         category: 'Security',   rule: { type: 'regex_present', pattern: 'banner (login|exec|motd)',           description: 'Login banner must be set' } },
+    { label: 'No SNMP v2c write',    category: 'Monitoring', rule: { type: 'regex_absent', pattern: 'snmp-server community \\S+ RW',      description: 'SNMP read-write community must not be configured' } },
+    { label: 'AAA new-model',        category: 'Auth',       rule: { type: 'contains',     pattern: 'aaa new-model',                      description: 'AAA new-model must be enabled' },                   example: 'aaa new-model' },
+    { label: 'TACACS+ server',       category: 'Auth',       rule: { type: 'regex_present', pattern: 'tacacs-server host|tacacs server',  description: 'TACACS+ server must be configured' } },
+    { label: 'NTP configured',       category: 'Time',       rule: { type: 'regex_present', pattern: 'ntp server \\S+',                   description: 'NTP server must be configured' },                   example: 'ntp server 10.0.0.1' },
+    { label: 'Syslog host',          category: 'Logging',    rule: { type: 'regex_present', pattern: 'logging \\d+\\.\\d+\\.\\d+\\.\\d+', description: 'Remote syslog host must be configured' },          example: 'logging 10.0.0.5' },
+    { label: 'CDP disabled',         category: 'Protocols',  rule: { type: 'contains',     pattern: 'no cdp run',                         description: 'CDP must be disabled globally' },                   example: 'no cdp run' },
+    { label: 'STP mode set',         category: 'Protocols',  rule: { type: 'regex_present', pattern: 'spanning-tree mode',                description: 'STP mode must be explicitly configured' },          example: 'spanning-tree mode rapid-pvst' },
+    { label: 'Domain name set',      category: 'Identity',   rule: { type: 'regex_present', pattern: 'ip domain.name \\S+',               description: 'IP domain name must be configured' },               example: 'ip domain-name corp.example.com' },
+  ],
+  cisco_xr: [
+    { label: 'SSH v2 only',      category: 'Security',   rule: { type: 'contains',      pattern: 'ssh server v2',                       description: 'SSH v2 must be enforced' },                            example: 'ssh server v2' },
+    { label: 'No telnet',        category: 'Security',   rule: { type: 'regex_absent',  pattern: 'service telnet',                      description: 'Telnet service must be disabled' } },
+    { label: 'No HTTP mgmt',     category: 'Security',   rule: { type: 'regex_absent',  pattern: 'http server',                         description: 'HTTP management must be disabled' } },
+    { label: 'Login banner',     category: 'Security',   rule: { type: 'regex_present', pattern: 'banner (login|motd)',                  description: 'Login banner must be configured' } },
+    { label: 'NTP server',       category: 'Time',       rule: { type: 'regex_present', pattern: 'ntp\\s+server\\s+\\S+',               description: 'NTP server must be configured' },                      example: 'ntp server 10.0.0.1' },
+    { label: 'Syslog host',      category: 'Logging',    rule: { type: 'regex_present', pattern: 'logging \\S+ (vrf|port)',             description: 'Remote syslog host must be configured' },              example: 'logging 10.0.0.5 vrf default severity info' },
+    { label: 'AAA configured',   category: 'Auth',       rule: { type: 'regex_present', pattern: 'aaa (authentication|authorization)',  description: 'AAA authentication/authorization must be configured' } },
+    { label: 'TACACS+ server',   category: 'Auth',       rule: { type: 'regex_present', pattern: 'tacacs-server host|tacacs server',   description: 'TACACS+ server must be configured' } },
+    { label: 'Domain name',      category: 'Identity',   rule: { type: 'regex_present', pattern: 'domain name \\S+',                   description: 'Domain name must be set' },                            example: 'domain name corp.example.com' },
+  ],
+  arista_eos: [
+    { label: 'SSH management',       category: 'Security',   rule: { type: 'regex_present', pattern: 'management ssh',                    description: 'SSH management must be configured' },                  example: 'management ssh\n   idle-timeout 120' },
+    { label: 'No telnet mgmt',       category: 'Security',   rule: { type: 'regex_absent',  pattern: 'management telnet',                 description: 'Telnet management must not be configured' } },
+    { label: 'Login banner',         category: 'Security',   rule: { type: 'regex_present', pattern: 'banner login',                      description: 'Login banner must be set' } },
+    { label: 'No SNMP v2c write',    category: 'Monitoring', rule: { type: 'regex_absent',  pattern: 'snmp-server community \\S+ rw',     description: 'SNMP read-write community must not be configured' } },
+    { label: 'AAA authentication',   category: 'Auth',       rule: { type: 'regex_present', pattern: 'aaa authentication',                description: 'AAA authentication must be configured' } },
+    { label: 'RADIUS server',        category: 'Auth',       rule: { type: 'regex_present', pattern: 'radius-server host|radius server', description: 'RADIUS server must be configured' } },
+    { label: 'NTP server',           category: 'Time',       rule: { type: 'regex_present', pattern: 'ntp server \\S+',                  description: 'NTP server must be configured' },                      example: 'ntp server 10.0.0.1' },
+    { label: 'Syslog host',          category: 'Logging',    rule: { type: 'regex_present', pattern: 'logging host \\S+',                description: 'Remote syslog host must be configured' },              example: 'logging host 10.0.0.5' },
+    { label: 'STP mode set',         category: 'Protocols',  rule: { type: 'regex_present', pattern: 'spanning-tree mode',               description: 'STP mode must be configured' },                        example: 'spanning-tree mode mstp' },
+    { label: 'Domain name',          category: 'Identity',   rule: { type: 'regex_present', pattern: 'ip domain-name \\S+',              description: 'IP domain name must be set' } },
+  ],
+  aruba_cx: [
+    { label: 'SSH server',           category: 'Security',   rule: { type: 'regex_present', pattern: 'ssh server vrf',                   description: 'SSH server must be enabled on management VRF' },       example: 'ssh server vrf mgmt' },
+    { label: 'No telnet',            category: 'Security',   rule: { type: 'regex_absent',  pattern: 'telnet server',                    description: 'Telnet server must not be enabled' } },
+    { label: 'HTTPS only',           category: 'Security',   rule: { type: 'regex_absent',  pattern: 'web-ui http$',                     description: 'HTTP web UI must be disabled (use HTTPS)' } },
+    { label: 'Login banner',         category: 'Security',   rule: { type: 'regex_present', pattern: 'banner motd',                      description: 'MOTD banner must be configured' } },
+    { label: 'RADIUS server',        category: 'Auth',       rule: { type: 'regex_present', pattern: 'radius-server host',               description: 'RADIUS server must be configured' } },
+    { label: 'Password complexity',  category: 'Auth',       rule: { type: 'regex_present', pattern: 'password (complexity|minimum-length)', description: 'Password complexity policy must be set' } },
+    { label: 'NTP server',           category: 'Time',       rule: { type: 'regex_present', pattern: 'ntp server \\S+',                  description: 'NTP server must be configured' },                      example: 'ntp server 10.0.0.1 prefer' },
+    { label: 'Syslog remote',        category: 'Logging',    rule: { type: 'regex_present', pattern: 'logging \\S+ vrf',                 description: 'Remote syslog must be configured' },                   example: 'logging 10.0.0.5 vrf mgmt' },
+    { label: 'SNMP configured',      category: 'Monitoring', rule: { type: 'regex_present', pattern: 'snmp-server',                      description: 'SNMP must be configured' } },
+  ],
+  aruba_switch: [
+    { label: 'NTP sync enabled',     category: 'Time',       rule: { type: 'contains',      pattern: 'timesync ntp',                     description: 'NTP time synchronization must be enabled' },           example: 'timesync ntp' },
+    { label: 'NTP server',           category: 'Time',       rule: { type: 'regex_present', pattern: 'ntp server \\S+',                  description: 'NTP server address must be configured' },              example: 'ntp server priority 1 10.0.0.1' },
+    { label: 'SSH crypto keys',      category: 'Security',   rule: { type: 'regex_present', pattern: 'crypto key generate',              description: 'SSH RSA crypto keys must be generated' },              example: 'crypto key generate ssh rsa bits 2048' },
+    { label: 'Telnet disabled',      category: 'Security',   rule: { type: 'regex_present', pattern: 'no telnet-server',                 description: 'Telnet server must be explicitly disabled' },          example: 'no telnet-server' },
+    { label: 'Auth mgmt IPs',        category: 'Security',   rule: { type: 'regex_present', pattern: 'ip authorized-managers',           description: 'Management access must be restricted to authorized IPs' } },
+    { label: 'Login banner',         category: 'Security',   rule: { type: 'regex_present', pattern: 'banner motd',                      description: 'MOTD banner must be configured' } },
+    { label: 'RADIUS server',        category: 'Auth',       rule: { type: 'regex_present', pattern: 'radius-server host',               description: 'RADIUS authentication server must be configured' } },
+    { label: 'Password min-length',  category: 'Auth',       rule: { type: 'regex_present', pattern: 'password minimum-length',          description: 'Minimum password length must be enforced' } },
+    { label: 'Syslog server',        category: 'Logging',    rule: { type: 'regex_present', pattern: 'logging \\d+\\.\\d+\\.\\d+\\.\\d+', description: 'Remote syslog server must be configured' },          example: 'logging 10.0.0.5' },
+    { label: 'SNMP community',       category: 'Monitoring', rule: { type: 'regex_present', pattern: 'snmp-server community',            description: 'SNMP community must be configured' } },
+  ],
+  junos: [
+    { label: 'SSH service',          category: 'Security',   rule: { type: 'contains',      pattern: 'set system services ssh',          description: 'SSH management service must be enabled' },             example: 'set system services ssh' },
+    { label: 'No telnet service',    category: 'Security',   rule: { type: 'regex_absent',  pattern: 'set system services telnet',       description: 'Telnet service must not be configured' } },
+    { label: 'No HTTP mgmt',         category: 'Security',   rule: { type: 'regex_absent',  pattern: 'set system services web-management http', description: 'HTTP management must not be configured (use HTTPS)' } },
+    { label: 'Login message',        category: 'Security',   rule: { type: 'regex_present', pattern: 'set system login message',         description: 'Login message (banner) must be configured' } },
+    { label: 'RADIUS server',        category: 'Auth',       rule: { type: 'regex_present', pattern: 'set system radius-server \\S+',   description: 'RADIUS server must be configured' } },
+    { label: 'NTP server',           category: 'Time',       rule: { type: 'regex_present', pattern: 'set system ntp server \\S+',      description: 'NTP server must be configured' },                      example: 'set system ntp server 10.0.0.1' },
+    { label: 'Syslog host',          category: 'Logging',    rule: { type: 'regex_present', pattern: 'set system syslog host \\S+',     description: 'Remote syslog host must be configured' },              example: 'set system syslog host 10.0.0.5 any any' },
+    { label: 'SNMP community',       category: 'Monitoring', rule: { type: 'regex_present', pattern: 'set snmp community \\S+',         description: 'SNMP community must be configured' } },
+    { label: 'Domain name',          category: 'Identity',   rule: { type: 'regex_present', pattern: 'set system domain-name \\S+',     description: 'Domain name must be set' } },
+  ],
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 const SEV_STYLE: Record<string, string> = {
@@ -148,20 +250,10 @@ function ResultRow({ result }: { result: ReturnType<typeof useQuery<any>>['data'
 // ── Policy form ───────────────────────────────────────────────────────────────
 
 const RULE_TYPES = [
-  { value: 'regex_present',  label: 'Must match (regex)' },
-  { value: 'regex_absent',   label: 'Must not match (regex)' },
-  { value: 'contains',       label: 'Must contain (literal)' },
-  { value: 'not_contains',   label: 'Must not contain (literal)' },
-]
-
-const EXAMPLE_RULES: { label: string; rule: ComplianceRule }[] = [
-  { label: 'NTP configured',        rule: { type: 'regex_present', pattern: 'ntp server', description: 'NTP server must be configured' } },
-  { label: 'Password encryption',   rule: { type: 'regex_absent', pattern: 'no service password-encryption', description: 'Password encryption must be enabled' } },
-  { label: 'SSH enabled',           rule: { type: 'regex_present', pattern: 'ip ssh version 2|management ssh', description: 'SSH v2 must be enabled' } },
-  { label: 'Telnet disabled',       rule: { type: 'regex_absent', pattern: 'transport input telnet', description: 'Telnet must not be allowed' } },
-  { label: 'Banner set',            rule: { type: 'regex_present', pattern: 'banner (login|motd)', description: 'Login banner must be configured' } },
-  { label: 'Logging configured',    rule: { type: 'regex_present', pattern: 'logging host|logging server', description: 'Remote syslog must be configured' } },
-  { label: 'Spanning tree',         rule: { type: 'regex_present', pattern: 'spanning-tree mode', description: 'STP mode must be explicitly set' } },
+  { value: 'regex_present', label: 'Must match (regex)'         },
+  { value: 'regex_absent',  label: 'Must not match (regex)'     },
+  { value: 'contains',      label: 'Must contain (literal)'     },
+  { value: 'not_contains',  label: 'Must not contain (literal)' },
 ]
 
 interface PolicyFormProps {
@@ -172,24 +264,48 @@ interface PolicyFormProps {
 }
 
 function PolicyForm({ initial, onSave, onCancel, saving }: PolicyFormProps) {
-  const [name,        setName]        = useState(initial?.name ?? '')
-  const [description, setDescription] = useState(initial?.description ?? '')
-  const [severity,    setSeverity]    = useState(initial?.severity ?? 'warning')
-  const [rules,       setRules]       = useState<ComplianceRule[]>(initial?.rules ?? [])
+  const [name,           setName]           = useState(initial?.name ?? '')
+  const [description,    setDescription]    = useState(initial?.description ?? '')
+  const [severity,       setSeverity]       = useState(initial?.severity ?? 'warning')
+  const [rules,          setRules]          = useState<ComplianceRule[]>(initial?.rules ?? [])
+  const [targetVendors,  setTargetVendors]  = useState<string[]>((initial?.device_selector as any)?.vendors ?? [])
+  const [templateVendor, setTemplateVendor] = useState('all')
 
-  const addRule = () => setRules(r => [...r, { type: 'regex_present', pattern: '', description: '' }])
+  const { data: devicesResp } = useQuery({ queryKey: ['devices-all'], queryFn: () => fetchDevices({ limit: 500 }) })
+  const fleetVendors = useMemo(() =>
+    [...new Set(((devicesResp as any)?.items ?? devicesResp ?? []).map((d: any) => d.vendor).filter(Boolean) as string[])].sort()
+  , [devicesResp])
+
+  const toggleTargetVendor = (v: string) =>
+    setTargetVendors(vs => vs.includes(v) ? vs.filter(x => x !== v) : [...vs, v])
+
+  const addRule    = () => setRules(r => [...r, { type: 'regex_present', pattern: '', description: '' }])
   const removeRule = (i: number) => setRules(r => r.filter((_, j) => j !== i))
   const updateRule = (i: number, field: keyof ComplianceRule, value: string) =>
     setRules(r => r.map((rule, j) => j === i ? { ...rule, [field]: value } : rule))
 
+  const isAbsent = (type: string) => type === 'regex_absent' || type === 'not_contains'
+
+  const validatePattern = (pattern: string, type: string): boolean | null => {
+    if (!pattern || type === 'contains' || type === 'not_contains') return null
+    try { new RegExp(pattern, 'im'); return true }
+    catch { return false }
+  }
+
+  const currentTemplates = COMPLIANCE_TEMPLATES[templateVendor] ?? COMPLIANCE_TEMPLATES.all
+  const grouped = currentTemplates.reduce<Record<string, RuleTemplate[]>>((acc, t) => {
+    (acc[t.category] ??= []).push(t); return acc
+  }, {})
+
   const inputCls = "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-5">
+      {/* Name + Severity */}
       <div className="grid grid-cols-2 gap-3">
         <div>
           <label className="block text-xs font-medium text-slate-600 mb-1">Policy name *</label>
-          <input value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="NTP Compliance" />
+          <input value={name} onChange={e => setName(e.target.value)} className={inputCls} placeholder="IOS Security Baseline" />
         </div>
         <div>
           <label className="block text-xs font-medium text-slate-600 mb-1">Severity</label>
@@ -204,56 +320,157 @@ function PolicyForm({ initial, onSave, onCancel, saving }: PolicyFormProps) {
         <input value={description} onChange={e => setDescription(e.target.value)} className={inputCls} placeholder="Optional description" />
       </div>
 
-      {/* Quick-add examples */}
-      <div>
-        <label className="block text-xs font-medium text-slate-600 mb-2">Quick add rule</label>
-        <div className="flex flex-wrap gap-1.5">
-          {EXAMPLE_RULES.map(ex => (
-            <button key={ex.label} type="button" onClick={() => setRules(r => [...r, { ...ex.rule }])}
-              className="px-2 py-0.5 rounded-md text-[11px] border border-slate-200 bg-slate-50 text-slate-600 hover:border-blue-400 hover:text-blue-600 transition-colors">
-              + {ex.label}
+      {/* Applies to */}
+      {fleetVendors.length > 0 && (
+        <div>
+          <label className="block text-xs font-medium text-slate-600 mb-1.5">Applies to</label>
+          <div className="flex flex-wrap gap-1.5">
+            <button type="button" onClick={() => setTargetVendors([])}
+              className={`px-2.5 py-1 rounded-lg text-xs border transition-colors ${
+                targetVendors.length === 0
+                  ? 'bg-slate-800 text-white border-slate-800'
+                  : 'border-slate-200 text-slate-500 hover:border-slate-400 hover:text-slate-700'
+              }`}>
+              All devices
             </button>
+            {fleetVendors.map(v => (
+              <button key={v} type="button" onClick={() => toggleTargetVendor(v)}
+                className={`px-2.5 py-1 rounded-lg text-xs border capitalize transition-colors ${
+                  targetVendors.includes(v)
+                    ? 'bg-slate-800 text-white border-slate-800'
+                    : 'border-slate-200 text-slate-500 hover:border-slate-400 hover:text-slate-700'
+                }`}>
+                {v}
+              </button>
+            ))}
+          </div>
+          {targetVendors.length > 0 && (
+            <p className="text-[10px] text-slate-400 mt-1">Only evaluated against {targetVendors.join(', ')} devices</p>
+          )}
+        </div>
+      )}
+
+      {/* Template library */}
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <label className="text-xs font-medium text-slate-600">Add rule from template</label>
+          <span className="text-[10px] text-slate-400 flex items-center gap-2">
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-2.5 h-2.5 rounded-sm bg-emerald-100 border border-emerald-300" />must have
+            </span>
+            <span className="flex items-center gap-1">
+              <span className="inline-block w-2.5 h-2.5 rounded-sm bg-rose-100 border border-rose-300" />must not have
+            </span>
+          </span>
+        </div>
+
+        {/* Vendor tabs */}
+        <div className="flex gap-1 mb-3 overflow-x-auto pb-0.5 scrollbar-none">
+          {TEMPLATE_VENDORS.map(v => (
+            <button key={v.key} type="button" onClick={() => setTemplateVendor(v.key)}
+              className={`px-2.5 py-1 rounded-md text-[11px] whitespace-nowrap border transition-colors shrink-0 ${
+                templateVendor === v.key
+                  ? 'bg-blue-600 text-white border-blue-600'
+                  : 'border-slate-200 text-slate-500 bg-white hover:border-slate-400 hover:text-slate-700'
+              }`}>
+              {v.label}
+            </button>
+          ))}
+        </div>
+
+        {/* Categorized chips */}
+        <div className="space-y-2.5 rounded-xl border border-slate-100 bg-slate-50/60 p-3">
+          {Object.entries(grouped).map(([category, templates]) => (
+            <div key={category}>
+              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest mb-1.5">{category}</p>
+              <div className="flex flex-wrap gap-1.5">
+                {templates.map(t => {
+                  const absent = isAbsent(t.rule.type)
+                  return (
+                    <button key={t.label} type="button"
+                      title={t.example ? `e.g. ${t.example}` : t.rule.description}
+                      onClick={() => setRules(r => [...r, { ...t.rule }])}
+                      className={`px-2 py-0.5 rounded-md text-[11px] border transition-colors ${
+                        absent
+                          ? 'border-rose-200 bg-rose-50 text-rose-700 hover:bg-rose-100 hover:border-rose-400'
+                          : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 hover:border-emerald-400'
+                      }`}>
+                      + {t.label}
+                    </button>
+                  )
+                })}
+              </div>
+            </div>
           ))}
         </div>
       </div>
 
-      {/* Rules */}
+      {/* Rules list */}
       <div>
         <div className="flex items-center justify-between mb-2">
           <label className="text-xs font-medium text-slate-600">Rules ({rules.length})</label>
-          <button onClick={addRule} className="text-xs text-blue-600 hover:underline">+ Add rule</button>
+          <button onClick={addRule} className="text-xs text-blue-600 hover:underline">+ Blank rule</button>
         </div>
         <div className="space-y-2">
-          {rules.map((rule, i) => (
-            <div key={i} className="border border-slate-200 rounded-lg p-3 space-y-2 bg-slate-50">
-              <div className="flex items-center gap-2">
-                <select value={rule.type} onChange={e => updateRule(i, 'type', e.target.value)}
-                  className="border border-slate-200 rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 flex-1">
-                  {RULE_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
-                </select>
-                <button onClick={() => removeRule(i)} className="text-slate-300 hover:text-red-500 transition-colors shrink-0">
-                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M6 18 18 6M6 6l12 12"/></svg>
-                </button>
+          {rules.map((rule, i) => {
+            const absent   = isAbsent(rule.type)
+            const patValid = validatePattern(rule.pattern, rule.type)
+            return (
+              <div key={i} className={`border rounded-lg bg-white relative overflow-hidden ${absent ? 'border-rose-200' : 'border-emerald-200'}`}>
+                <div className={`absolute left-0 top-0 bottom-0 w-1 ${absent ? 'bg-rose-400' : 'bg-emerald-400'}`} />
+                <div className="pl-3 pr-3 pt-2.5 pb-2.5 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <select value={rule.type} onChange={e => updateRule(i, 'type', e.target.value)}
+                      className={`border rounded-lg px-2 py-1.5 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 flex-1 ${
+                        absent ? 'border-rose-200 text-rose-700' : 'border-emerald-200 text-emerald-700'
+                      }`}>
+                      {RULE_TYPES.map(t => <option key={t.value} value={t.value}>{t.label}</option>)}
+                    </select>
+                    <button onClick={() => removeRule(i)} className="text-slate-300 hover:text-red-500 transition-colors shrink-0">
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M6 18 18 6M6 6l12 12"/></svg>
+                    </button>
+                  </div>
+                  <div className="relative">
+                    <input value={rule.pattern} onChange={e => updateRule(i, 'pattern', e.target.value)}
+                      placeholder={
+                        rule.type === 'contains' || rule.type === 'not_contains'
+                          ? 'Exact text to match'
+                          : 'Regex pattern — multiline, case-insensitive'
+                      }
+                      className={`w-full border rounded-lg px-3 py-1.5 text-xs font-mono bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500 pr-7 ${
+                        patValid === false ? 'border-red-300 bg-red-50' : 'border-slate-200'
+                      }`} />
+                    {patValid !== null && (
+                      <span className={`absolute right-2.5 top-1/2 -translate-y-1/2 text-xs font-bold ${patValid ? 'text-emerald-500' : 'text-red-500'}`}>
+                        {patValid ? '✓' : '✗'}
+                      </span>
+                    )}
+                  </div>
+                  <input value={rule.description ?? ''} onChange={e => updateRule(i, 'description', e.target.value)}
+                    placeholder="Description shown in compliance report"
+                    className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-xs bg-slate-50 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                  {patValid === false && (
+                    <p className="text-[10px] text-red-500">Invalid regular expression</p>
+                  )}
+                </div>
               </div>
-              <input value={rule.pattern} onChange={e => updateRule(i, 'pattern', e.target.value)}
-                placeholder="Pattern / text to match"
-                className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-xs font-mono bg-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
-              <input value={rule.description ?? ''} onChange={e => updateRule(i, 'description', e.target.value)}
-                placeholder="Description (shown in compliance report)"
-                className="w-full border border-slate-200 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500" />
-            </div>
-          ))}
+            )
+          })}
           {rules.length === 0 && (
-            <p className="text-xs text-slate-400 text-center py-4 border border-dashed border-slate-200 rounded-lg">
-              No rules yet — add one above or use a quick-add example
+            <p className="text-xs text-slate-400 text-center py-5 border border-dashed border-slate-200 rounded-lg">
+              No rules yet — pick from templates above or use <span className="font-medium">+ Blank rule</span>
             </p>
           )}
         </div>
       </div>
 
-      <div className="flex justify-end gap-2 pt-2">
+      <div className="flex justify-end gap-2 pt-1">
         <button onClick={onCancel} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 rounded-xl transition-colors">Cancel</button>
-        <button onClick={() => onSave({ name, description: description || undefined, severity, rules, is_enabled: true })}
+        <button
+          onClick={() => {
+            const device_selector = targetVendors.length > 0 ? { vendors: targetVendors } : null
+            onSave({ name, description: description || undefined, severity, rules, is_enabled: true, device_selector })
+          }}
           disabled={saving || !name}
           className="px-4 py-2 text-sm font-medium bg-slate-800 text-white rounded-xl hover:bg-slate-700 transition-colors disabled:opacity-50">
           {saving ? 'Saving…' : 'Save policy'}
@@ -513,7 +730,15 @@ export default function ConfigPage() {
                             <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded capitalize ${SEV_STYLE[p.severity] ?? SEV_STYLE.warning}`}>{p.severity}</span>
                             {!p.is_enabled && <span className="text-[10px] text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">disabled</span>}
                           </div>
-                          <p className="text-xs text-slate-400 mt-0.5">{p.rules.length} rule{p.rules.length !== 1 ? 's' : ''}{p.description ? ` · ${p.description}` : ''}</p>
+                          <p className="text-xs text-slate-400 mt-0.5">
+                            {p.rules.length} rule{p.rules.length !== 1 ? 's' : ''}
+                            {(p.device_selector as any)?.vendors?.length > 0 && (
+                              <span className="ml-1.5 text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded capitalize">
+                                {(p.device_selector as any).vendors.join(', ')}
+                              </span>
+                            )}
+                            {p.description ? ` · ${p.description}` : ''}
+                          </p>
                         </div>
                         {canEdit && (
                           <div className="flex items-center gap-1 shrink-0">

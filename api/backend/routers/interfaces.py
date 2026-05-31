@@ -165,19 +165,57 @@ async def interface_live_stream(
 ) -> StreamingResponse:
     from ..models.device import Device
     from ..models.credential import Credential, DeviceCredential
+    from ..models.site import RemoteCollector
+
+    iface = await _get_interface_for_tenant(interface_id, current_user.tenant_id, db)
+
+    device = (await db.execute(
+        select(Device).where(Device.id == iface.device_id, Device.tenant_id == current_user.tenant_id)
+    )).scalar_one_or_none()
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+
+    # ── Remote-collector proxy path ───────────────────────────────────────────
+    if device.collector_id is not None:
+        rc = (await db.execute(
+            select(RemoteCollector).where(
+                RemoteCollector.id == device.collector_id,
+                RemoteCollector.tenant_id == current_user.tenant_id,
+            )
+        )).scalar_one_or_none()
+        if rc is None or not rc.wg_ip:
+            raise HTTPException(status_code=503, detail="Remote collector not reachable")
+
+        wg_ip      = str(rc.wg_ip).split("/")[0]
+        auth_token = rc.api_key_hash
+        device_id  = str(device.id)
+        if_index   = iface.if_index
+        speed_bps  = iface.speed_bps
+        if_name    = iface.name
+        vendor_str = device.vendor or ""
+        vm_labels  = (
+            f'device_id="{device.id}",'
+            f'if_index="{if_index}",'
+            f'if_name="{_escape_label(if_name)}",'
+            f'vendor="{_escape_label(vendor_str)}"'
+        )
+
+        return StreamingResponse(
+            _stream_proxy(wg_ip, auth_token, device_id, if_index, speed_bps, vm_labels),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control":     "no-cache",
+                "X-Accel-Buffering": "no",
+                "Connection":        "keep-alive",
+            },
+        )
+
+    # ── Direct SNMP path (hub-managed devices) ────────────────────────────────
     import pysnmp.hlapi.v3arch.asyncio as hlapi
     from pysnmp.hlapi.v3arch.asyncio import (
         CommunityData, ContextData, ObjectIdentity, ObjectType,
         SnmpEngine, UdpTransportTarget, UsmUserData, get_cmd,
     )
-
-    iface = await _get_interface_for_tenant(interface_id, current_user.tenant_id, db)
-
-    device = (await db.execute(
-        select(Device).where(Device.id == iface.device_id)
-    )).scalar_one_or_none()
-    if device is None:
-        raise HTTPException(status_code=404, detail="Device not found")
 
     cred_row = (await db.execute(
         select(DeviceCredential, Credential)
@@ -327,6 +365,112 @@ async def interface_live_stream(
             "Connection":        "keep-alive",
         },
     )
+
+
+async def _stream_proxy(
+    wg_ip:      str,
+    auth_token: str,
+    device_id:  str,
+    if_index:   int,
+    speed_bps:  int | None,
+    vm_labels:  str,
+):
+    """Proxy live SSE from a remote collector's /live endpoint.
+
+    The collector sends raw counter snapshots (LiveSample JSON).  This generator
+    calculates rates from consecutive samples, writes raw counters to
+    VictoriaMetrics (same as the direct SNMP path), and yields rate events to
+    the browser.
+    """
+    url = f"http://{wg_ip}:9090/live?device_id={device_id}&if_index={if_index}"
+    headers = {"Authorization": f"Bearer {auth_token}"}
+    prev: dict | None = None
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(connect=10, read=None, write=10, pool=10)) as client:
+            async with client.stream("GET", url, headers=headers) as resp:
+                if resp.status_code != 200:
+                    yield f"data: {json.dumps({'error': f'collector returned HTTP {resp.status_code}'})}\n\n"
+                    return
+
+                vm_client = httpx.AsyncClient(timeout=5)
+                try:
+                    async for line in resp.aiter_lines():
+                        if not line.startswith("data:"):
+                            continue
+                        raw = line[5:].strip()
+                        try:
+                            data = json.loads(raw)
+                        except Exception:
+                            continue
+
+                        if data.get("done"):
+                            break
+                        if "error" in data:
+                            yield f"data: {raw}\n\n"
+                            return
+
+                        ts_ms: int = data["ts"]
+                        ts = ts_ms / 1000.0
+
+                        # Write raw counters to VictoriaMetrics for historical charts.
+                        vm_lines = "\n".join([
+                            f'anthrimon_if_in_octets_total{{{vm_labels}}} {data["in_octets"]} {ts_ms}',
+                            f'anthrimon_if_out_octets_total{{{vm_labels}}} {data["out_octets"]} {ts_ms}',
+                            f'anthrimon_if_in_errors_total{{{vm_labels}}} {data["in_errors"]} {ts_ms}',
+                            f'anthrimon_if_out_errors_total{{{vm_labels}}} {data["out_errors"]} {ts_ms}',
+                            f'anthrimon_if_in_discards_total{{{vm_labels}}} {data["in_discards"]} {ts_ms}',
+                            f'anthrimon_if_out_discards_total{{{vm_labels}}} {data["out_discards"]} {ts_ms}',
+                        ]) + "\n"
+                        try:
+                            await vm_client.post(
+                                f"{_VM_URL}/api/v1/import/prometheus",
+                                content=vm_lines,
+                                headers={"Content-Type": "text/plain"},
+                            )
+                        except Exception:
+                            pass
+
+                        if prev is not None:
+                            dt = ts - prev["ts"]
+                            if dt > 0:
+                                def _rate(key: str) -> float:
+                                    return max(0.0, (data[key] - prev[key]) / dt)
+                                in_bps   = _rate("in_octets")  * 8
+                                out_bps  = _rate("out_octets") * 8
+                                event = {
+                                    "ts":            ts,
+                                    "in_bps":        in_bps,
+                                    "out_bps":       out_bps,
+                                    "in_pps":        _rate("in_pkts"),
+                                    "out_pps":       _rate("out_pkts"),
+                                    "in_errors_ps":  _rate("in_errors"),
+                                    "out_errors_ps": _rate("out_errors"),
+                                    "util_in_pct":   round(in_bps  / speed_bps * 100, 2) if speed_bps else None,
+                                    "util_out_pct":  round(out_bps / speed_bps * 100, 2) if speed_bps else None,
+                                }
+                            else:
+                                event = {"ts": ts}
+                        else:
+                            event = {
+                                "ts": ts,
+                                "in_bps": None, "out_bps": None,
+                                "in_pps": None, "out_pps": None,
+                                "in_errors_ps": None, "out_errors_ps": None,
+                                "util_in_pct": None, "util_out_pct": None,
+                            }
+
+                        prev = {**data, "ts": ts}
+                        yield f"data: {json.dumps(event)}\n\n"
+                finally:
+                    await vm_client.aclose()
+
+    except asyncio.CancelledError:
+        pass
+    except Exception as exc:
+        yield f"data: {json.dumps({'error': str(exc)})}\n\n"
+
+    yield 'data: {"done":true}\n\n'
 
 
 async def _get_interface_for_tenant(

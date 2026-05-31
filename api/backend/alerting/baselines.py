@@ -11,6 +11,7 @@ These baselines are consumed by the alert evaluators to:
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -234,6 +235,7 @@ async def _compute_interface_errors(db: AsyncSession, iface_map: dict, valid_dev
         await _upsert(
             db, device_id, "interface_errors", iface_id, label=if_name,
             mean=mean, stddev=stddev,
+            sample_count=int(_WINDOW_DAYS * 24 * 60 / 5),
         )
         count += 1
     return count
@@ -267,6 +269,7 @@ async def _compute_cpu(db: AsyncSession, valid_devs: set[str]) -> int:
         await _upsert(
             db, device_id, "cpu_util_pct", None, label=None,
             mean=mean, stddev=stddev,
+            sample_count=int(_WINDOW_DAYS * 24 * 60 / 5),
         )
         count += 1
     return count
@@ -307,6 +310,7 @@ async def _compute_memory(db: AsyncSession, valid_devs: set[str]) -> int:
         await _upsert(
             db, device_id, "mem_util_pct", None, label=None,
             mean=mean, stddev=stddev,
+            sample_count=int(_WINDOW_DAYS * 24 * 60 / 5),
         )
         count += 1
     return count
@@ -315,15 +319,15 @@ async def _compute_memory(db: AsyncSession, valid_devs: set[str]) -> int:
 async def _compute_interface_util(db: AsyncSession, iface_map: dict, valid_devs: set[str]) -> int:
     """Compute mean + stddev of interface utilisation % per interface."""
     speed_filter = "anthrimon_if_speed_bps > 0"
+    in_util  = (f"clamp_min(rate(anthrimon_if_in_octets_total[5m]) * 8"
+                f"  / on(device_id, if_index) group_left() ({speed_filter}) * 100, 0)")
+    out_util = (f"clamp_min(rate(anthrimon_if_out_octets_total[5m]) * 8"
+                f"  / on(device_id, if_index) group_left() ({speed_filter}) * 100, 0)")
     util_expr = (
-        f"clamp_min("
-        f"  max by (device_id, if_index, if_name) ("
-        f"    rate(anthrimon_if_in_octets_total[5m]) * 8"
-        f"    / on(device_id, if_index) group_left() ({speed_filter}) * 100"
-        f"  ) or max by (device_id, if_index, if_name) ("
-        f"    rate(anthrimon_if_out_octets_total[5m]) * 8"
-        f"    / on(device_id, if_index) group_left() ({speed_filter}) * 100"
-        f"  ), 0)"
+        f"max by (device_id, if_index, if_name) ("
+        f"  label_replace({in_util},  \"d\", \"i\", \"\", \"\") or "
+        f"  label_replace({out_util}, \"d\", \"o\", \"\", \"\")"
+        f")"
     )
     avg_rows, std_rows = await asyncio.gather(
         _vm_query(f"avg_over_time(({util_expr})[{_WINDOW}:{_STEP}])"),
@@ -350,6 +354,7 @@ async def _compute_interface_util(db: AsyncSession, iface_map: dict, valid_devs:
         await _upsert(
             db, device_id, "interface_util_pct", iface_id, label=if_name,
             mean=mean, stddev=stddev,
+            sample_count=int(_WINDOW_DAYS * 24 * 60 / 5),
         )
         count += 1
     return count
@@ -382,6 +387,7 @@ async def _compute_dom_rx_power(db: AsyncSession, iface_map: dict, valid_devs: s
         await _upsert(
             db, device_id, "dom_rx_power", iface_id, label=if_name,
             mean=mean, stddev=stddev,
+            sample_count=int(_WINDOW_DAYS * 24 * 60 / 5),
         )
         count += 1
     return count
@@ -421,27 +427,49 @@ async def _compute_syslog_rate(db: AsyncSession, valid_devs: set[str]) -> int:
 
 
 async def _compute_bgp_prefix_count(db: AsyncSession) -> int:
-    """Compute mean + stddev of BGP prefixes_received per peer from PostgreSQL."""
-    # We have point-in-time snapshots in bgp_sessions but no time-series;
-    # use the current value as a reference until we have historical data.
-    # Once VM starts recording bgp_prefixes_received metrics this can use VM.
-    rows = await db.execute(
+    """Accumulate an incremental mean/stddev for BGP prefix counts per peer.
+
+    Each hourly run is one new sample.  Uses Welford's online algorithm to
+    update mean and variance without storing raw values, so sample_count grows
+    toward (and eventually past) the 50-sample threshold the evaluator requires.
+    """
+    rows = (await db.execute(
         text("""
             SELECT device_id::text, peer_ip::text, prefixes_received
             FROM   bgp_sessions
             WHERE  session_state = 'established'
               AND  prefixes_received IS NOT NULL
         """)
-    )
+    )).all()
     count = 0
     for device_id, peer_ip, prefixes in rows:
         if prefixes is None:
             continue
-        # Seed the baseline with the current value; stddev=0 means any
-        # significant deviation will trigger (evaluator uses pct threshold anyway).
+        x = float(prefixes)
+        # Fetch the existing baseline so we can update incrementally.
+        existing = (await db.execute(
+            text("""
+                SELECT mean, stddev, sample_count
+                FROM   metric_baselines
+                WHERE  device_id    = :did
+                  AND  label        = :label
+                  AND  metric_type  = 'bgp_prefix_count'
+                  AND  bucket_type  = 'rolling'
+            """),
+            {"did": device_id, "label": peer_ip},
+        )).mappings().first()
+        if existing and existing["sample_count"] > 0:
+            n    = existing["sample_count"] + 1
+            old_mean = float(existing["mean"])
+            old_var  = (float(existing["stddev"]) ** 2) * existing["sample_count"]
+            new_mean = old_mean + (x - old_mean) / n
+            new_var  = (old_var + (x - old_mean) * (x - new_mean)) / n
+            new_stddev = math.sqrt(max(new_var, 0.0))
+        else:
+            n, new_mean, new_stddev = 1, x, 0.0
         await _upsert(
             db, device_id, "bgp_prefix_count", None, label=peer_ip,
-            mean=float(prefixes), stddev=0.0, sample_count=1,
+            mean=new_mean, stddev=new_stddev, sample_count=n,
         )
         count += 1
     return count

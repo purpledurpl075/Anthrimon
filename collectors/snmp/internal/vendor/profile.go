@@ -91,4 +91,9 @@ type Profile struct {
 	// SkipISIS: when true, skip ISIS-MIB (RFC 4444) polling.
 	// Set when the vendor does not implement ISIS-MIB or IS-IS is not deployed.
 	SkipISIS bool
+
+	// SkipDOM: when true, skip ENTITY-SENSOR-MIB optical power collection.
+	// Set on devices that have no optical transceivers or do not expose DOM
+	// data via standard SNMP (e.g. ProCurve switches, access points, firewalls).
+	SkipDOM bool
 }

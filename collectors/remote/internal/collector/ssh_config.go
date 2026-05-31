@@ -212,11 +212,27 @@ func (c *SSHConfigCollector) collectOne(ctx context.Context, dev hub.Device, cre
 	return nil
 }
 
+// vendorMatchOrder lists vendor keys in most-specific-first order so that
+// substrings like "cisco_ios" don't accidentally match "cisco_iosxe".
+var vendorMatchOrder = []string{
+	"cisco_iosxr",
+	"cisco_iosxe",
+	"cisco_nxos",
+	"cisco_ios",
+	"hp_procurve",
+	"aruba_cx",
+	"arista",
+	"juniper",
+	"procurve",
+	"fortios",
+	"ubiquiti",
+}
+
 // normalizeVendor maps a vendor string (from the hub config) to a key used
 // in the showRunCmd / noPagerCmd / needsEnable lookup tables.
 func normalizeVendor(v string) string {
 	v = strings.ToLower(v)
-	for k := range showRunCmd {
+	for _, k := range vendorMatchOrder {
 		if strings.Contains(v, k) {
 			return k
 		}

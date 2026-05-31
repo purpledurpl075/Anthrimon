@@ -59,5 +59,9 @@ func init() {
 		// ProVision firmware does not populate dot1qVlanStaticTable.
 		// Use HP-ICF-VLAN-MIB instead.
 		HpicfVlan: true,
+
+		// ProCurve / ProVision switches do not expose optical transceiver DOM
+		// data via SNMP — skip the ENTITY-SENSOR-MIB optical walk entirely.
+		SkipDOM: true,
 	})
 }

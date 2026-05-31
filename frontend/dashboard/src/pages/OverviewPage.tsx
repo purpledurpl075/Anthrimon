@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { ReactGridLayout as GridLayout } from 'react-grid-layout/legacy'
@@ -195,7 +195,7 @@ function AlertTrendSparkline({ series, w = 120, h = 20 }: { series: [number, num
   const sy = (v: number) => h - 1 - (v / maxV) * (h - 3)
   const pts = series.map(([t, v]) => `${sx(t).toFixed(1)},${sy(v).toFixed(1)}`).join(' ')
   const first = series[0], last = series.at(-1)!
-  const areaPath = `M ${sx(first[0])},${h} L ${pts.split(' ').map((p, i) => i === 0 ? p : p).join(' L ')} L ${sx(last[0])},${h} Z`
+  const areaPath = `M ${sx(first[0])},${h} L ${pts.split(' ').join(' L ')} L ${sx(last[0])},${h} Z`
   return (
     <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="overflow-visible">
       <path d={areaPath} fill="#dc2626" fillOpacity={0.12} />
@@ -463,6 +463,7 @@ function BGPSummaryWidget() {
     queryKey:        ['bgp-summary'],
     queryFn:         fetchBGPSummary,
     refetchInterval: 30_000,
+    staleTime:       20_000,
   })
 
   return (
@@ -759,8 +760,9 @@ function TopMemoryWidget() {
 // 4. Routing health (BGP + OSPF combined)
 function RoutingHealthWidget() {
   const { data } = useWidgetData()
-  const r = data?.routing_health
-  if (!r?.bgp || !r?.ospf) return <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex items-center justify-center text-xs text-slate-400">Loading…</div>
+  if (!data) return <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex items-center justify-center text-xs text-slate-400">Loading…</div>
+  const r = data.routing_health
+  if (!r?.bgp || !r?.ospf) return <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex items-center justify-center text-xs text-slate-400">No routing protocols</div>
   const bgpDown  = r.bgp.total  - r.bgp.established
   const ospfDown = r.ospf.total - r.ospf.full
   return (
@@ -800,7 +802,7 @@ function ConfigChangesWidget() {
       ) : (
         <div className="overflow-y-auto flex-1 divide-y divide-slate-50">
           {changes.map(c => (
-            <div key={c.device_id} className="flex items-center gap-3 px-5 py-2.5">
+            <div key={`${c.device_id}-${c.collected_at}`} className="flex items-center gap-3 px-5 py-2.5">
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium text-slate-700 truncate">{c.hostname}</p>
                 <p className="text-[10px] text-slate-400">{new Date(c.collected_at).toLocaleTimeString()}</p>
@@ -855,7 +857,7 @@ function SyslogRateWidget() {
       <p className="text-[10px] text-slate-400 mb-4">Messages in last 24 h</p>
       {isLoading ? <p className="text-xs text-slate-400">Loading…</p> : !data ? <p className="text-xs text-slate-400">No syslog data</p> : (
         <div className="grid grid-cols-3 gap-2">
-          {['critical','warning','notice','info','error','debug'].map(sev => {
+          {['critical','error','warning','notice','info','debug'].map(sev => {
             const count = (data as any)?.[sev] ?? 0
             const colors: Record<string, string> = { critical: '#dc2626', error: '#f97316', warning: '#f59e0b', notice: '#6366f1', info: '#06b6d4', debug: '#94a3b8' }
             return count > 0 ? (
@@ -1042,7 +1044,9 @@ function BGPPrefixTotalsWidget() {
               <p className="text-[10px] text-indigo-400 mt-0.5">Prefixes received</p>
             </div>
             <div className="rounded-xl bg-slate-50 border border-slate-200 px-4 py-3 text-center">
-              <p className="text-2xl font-bold text-slate-700 tabular-nums">{data.total_tx.toLocaleString()}</p>
+              <p className="text-2xl font-bold text-slate-700 tabular-nums">
+                {data.total_tx > 0 ? data.total_tx.toLocaleString() : '—'}
+              </p>
               <p className="text-[10px] text-slate-400 mt-0.5">Prefixes advertised</p>
             </div>
           </div>
@@ -1176,18 +1180,22 @@ export default function OverviewPage() {
   const [containerWidth, setContainerWidth] = useState(1200)
   const { layout, updateFromRGL, setVisible, reset } = useDashboardLayout()
 
-  const containerRef = React.useCallback((node: HTMLDivElement | null) => {
+  const containerRef = useRef<HTMLDivElement | null>(null)
+  useEffect(() => {
+    const node = containerRef.current
     if (!node) return
     const ro = new ResizeObserver(entries => {
       setContainerWidth(entries[0].contentRect.width)
     })
     ro.observe(node)
+    return () => ro.disconnect()
   }, [])
 
   const { data, isLoading, dataUpdatedAt } = useQuery({
     queryKey:        ['overview'],
     queryFn:         fetchOverview,
     refetchInterval: 30_000,
+    staleTime:       25_000,
   })
 
   const lastRefresh = dataUpdatedAt ? formatAge(new Date(dataUpdatedAt).toISOString()) : '—'

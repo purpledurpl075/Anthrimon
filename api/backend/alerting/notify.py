@@ -115,6 +115,8 @@ async def dispatch(alert: Alert, rule: AlertRule, *, resolved: bool = False) -> 
             return
         try:
             resume = datetime.fromisoformat(paused_until)
+            if resume.tzinfo is None:
+                resume = resume.replace(tzinfo=timezone.utc)
             if datetime.now(timezone.utc) < resume:
                 logger.info("notify_skipped_paused", alert_id=str(alert.id))
                 return
@@ -194,10 +196,9 @@ def _build_email(
         "device_name":    alert_ctx.get("device_name", ""),
         "value":          str(alert_ctx["value"])     if alert_ctx.get("value")     is not None else "—",
         "threshold":      str(alert_ctx["threshold"]) if alert_ctx.get("threshold") is not None else "—",
-        # Type-specific extras — empty string if not applicable
         "interface_name": alert_ctx.get("interface_name", ""),
         "prefix":         alert_ctx.get("prefix", ""),
-        "neighbor":      alert_ctx.get("neighbor", ""),
+        "neighbor":       alert_ctx.get("neighbor", ""),
         "ospf_state":     alert_ctx.get("ospf_state", ""),
         "triggered_at":   _fmt_ts(alert.triggered_at),
         "resolved_at":    _fmt_ts(alert.resolved_at),
@@ -206,27 +207,106 @@ def _build_email(
         "platform_name":  platform_name,
     }
 
+    # ── Pre-render conditional HTML blocks ────────────────────────────────────
+    # Header uses green for resolved, severity color for active alerts.
+    header_color = "#16a34a" if resolved else sev_color
+
+    # Human-readable duration for resolved alerts.
+    duration = ""
+    if resolved and alert.triggered_at and alert.resolved_at:
+        secs = int((alert.resolved_at - alert.triggered_at).total_seconds())
+        if secs < 60:      duration = f"{secs}s"
+        elif secs < 3600:  duration = f"{secs // 60}m {secs % 60}s"
+        elif secs < 86400: duration = f"{secs // 3600}h {(secs % 3600) // 60}m"
+        else:              duration = f"{secs // 86400}d {(secs % 86400) // 3600}h"
+
+    # Value/threshold card: only render when both values are present.
+    _card_cell = "padding:14px 20px;"
+    _card_lbl  = "margin:0;font-size:10px;font-weight:700;letter-spacing:1px;color:#94a3b8;text-transform:uppercase;"
+    _card_val  = "margin:4px 0 0;font-size:22px;font-weight:700;color:#0f172a;"
+    if alert_ctx.get("value") is not None and alert_ctx.get("threshold") is not None:
+        value_card = (
+            '<table width="100%" cellpadding="0" cellspacing="0"'
+            ' style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:20px;">'
+            '<tr>'
+            f'<td style="{_card_cell}border-right:1px solid #e2e8f0;width:50%;">'
+            f'<p style="{_card_lbl}">Value</p>'
+            f'<p style="{_card_val}">{ctx["value"]}</p></td>'
+            f'<td style="{_card_cell}width:50%;">'
+            f'<p style="{_card_lbl}">Threshold</p>'
+            f'<p style="{_card_val}">{ctx["threshold"]}</p></td>'
+            '</tr></table>'
+        )
+    else:
+        value_card = ""
+
+    # Extra detail rows: description + type-specific fields, only when non-empty.
+    _lbl  = 'style="font-size:13px;color:#64748b;padding:5px 0;width:110px;vertical-align:top;"'
+    _cell = 'style="font-size:13px;color:#1e293b;font-weight:500;padding:5px 0;"'
+    _mono = 'style="font-size:12px;color:#1e293b;font-weight:500;padding:5px 0;font-family:ui-monospace,monospace;"'
+    _extra: list[str] = []
+    if rule.description:
+        _extra.append(f'<tr><td {_lbl}>Note</td><td {_cell}>{rule.description}</td></tr>')
+    if alert_ctx.get("interface_name"):
+        _extra.append(f'<tr><td {_lbl}>Interface</td><td {_mono}>{ctx["interface_name"]}</td></tr>')
+    if alert_ctx.get("prefix"):
+        _extra.append(f'<tr><td {_lbl}>Prefix</td><td {_mono}>{ctx["prefix"]}</td></tr>')
+    if alert_ctx.get("neighbor"):
+        _extra.append(f'<tr><td {_lbl}>Neighbor</td><td {_mono}>{ctx["neighbor"]}</td></tr>')
+    if alert_ctx.get("ospf_state"):
+        _extra.append(f'<tr><td {_lbl}>OSPF State</td><td {_mono}>{ctx["ospf_state"]}</td></tr>')
+    extra_rows = "\n        ".join(_extra)
+
+    # Resolved row: only shown when the alert is actually resolved.
+    if resolved:
+        dur_span = (f" &nbsp;<span style='color:#94a3b8;font-size:11px;font-weight:400;'>({duration})</span>"
+                    if duration else "")
+        resolved_row = f'<tr><td {_lbl}>Resolved</td><td {_cell}>{ctx["resolved_at"]}{dur_span}</td></tr>'
+    else:
+        resolved_row = ""
+
+    ctx.update({
+        "header_color": header_color,
+        "value_card":   value_card,
+        "extra_rows":   extra_rows,
+        "resolved_row": resolved_row,
+        "duration":     duration,
+    })
+
     subject = _render(tmpl_subject or DEFAULT_SUBJECT, ctx)
     html    = _render(tmpl_html    or DEFAULT_HTML,    ctx)
 
-    # Plain-text fallback
+    # ── Plain-text fallback ────────────────────────────────────────────────────
     plain_lines = [
-        f"Alert:     {ctx['title']}",
+        f"[{tag}] {ctx['title']}",
+        f"Device:    {ctx['device_name']}" if ctx["device_name"] else "",
+        "",
+        f"Rule:      {ctx['rule_name']}",
         f"Severity:  {ctx['severity']}",
         f"Status:    {ctx['status']}",
-        f"Rule:      {ctx['rule_name']}",
+        f"Triggered: {ctx['triggered_at']}",
     ]
-    if ctx["device_name"]:
-        plain_lines.append(f"Device:    {ctx['device_name']}")
     if alert_ctx.get("value") is not None:
         plain_lines.append(f"Value:     {ctx['value']}")
     if alert_ctx.get("threshold") is not None:
         plain_lines.append(f"Threshold: {ctx['threshold']}")
-    plain_lines.append(f"Triggered: {ctx['triggered_at']}")
+    if rule.description:
+        plain_lines.append(f"Note:      {rule.description}")
+    if alert_ctx.get("interface_name"):
+        plain_lines.append(f"Interface: {ctx['interface_name']}")
+    if alert_ctx.get("prefix"):
+        plain_lines.append(f"Prefix:    {ctx['prefix']}")
+    if alert_ctx.get("neighbor"):
+        plain_lines.append(f"Neighbor:  {ctx['neighbor']}")
+    if alert_ctx.get("ospf_state"):
+        plain_lines.append(f"OSPF State:{ctx['ospf_state']}")
     if resolved:
-        plain_lines.append(f"Resolved:  {ctx['resolved_at']}")
+        dur_txt = f" ({duration})" if duration else ""
+        plain_lines.append(f"Resolved:  {ctx['resolved_at']}{dur_txt}")
+    plain_lines = [l for l in plain_lines if l is not None]
     if ctx["alert_url"]:
-        plain_lines.append(f"\nView alert: {ctx['alert_url']}")
+        plain_lines += ["", f"View alert: {ctx['alert_url']}"]
+    plain_lines.append(f"Alert ID:   {ctx['alert_id']}")
 
     return subject, "\n".join(plain_lines), html
 

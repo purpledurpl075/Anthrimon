@@ -2,7 +2,7 @@ log:
   level: info
 
 database:
-  dsn: "postgres://anthrimon:changeme@127.0.0.1/anthrimon?sslmode=disable"
+  dsn: "postgres://anthrimon:psswd123%24%25%5E@127.0.0.1/anthrimon?sslmode=disable"
   max_conns: 3
 
 clickhouse:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import math
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -10,6 +11,16 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _VM_URL = "http://localhost:8428"
+
+_snmp_engine = None  # lazy singleton — SnmpEngine is thread-safe and expensive to construct
+
+
+def _get_snmp_engine():
+    global _snmp_engine
+    if _snmp_engine is None:
+        from pysnmp.hlapi.v3arch.asyncio import SnmpEngine
+        _snmp_engine = SnmpEngine()
+    return _snmp_engine
 
 
 @dataclass
@@ -29,7 +40,8 @@ async def resolve_devices(db: AsyncSession, tenant_id: str, selector: Optional[d
     """Return rows of {id, hostname, vendor, tags, polling_interval_s} matching the selector."""
     base = """
         SELECT id::text, hostname, vendor::text, tags, polling_interval_s,
-               host(mgmt_ip) AS mgmt_ip, alert_exclusions
+               host(mgmt_ip) AS mgmt_ip, alert_exclusions,
+               collector_id::text AS collector_id
         FROM devices
         WHERE tenant_id = :tid AND is_active = true
     """
@@ -131,6 +143,16 @@ async def eval_device_down(db: AsyncSession, device: dict) -> Optional[Breach]:
         (datetime.now(timezone.utc) - last_polled).total_seconds() > stale_seconds
     )
     if status != "up" or stale:
+        # Suppress when the device's remote collector is offline — the collector-offline
+        # alert already covers this, and firing device_down on top creates alert spam
+        # during collector restarts or updates.
+        if stale and device.get("collector_id"):
+            rc_row = (await db.execute(
+                text("SELECT status FROM remote_collectors WHERE id = cast(:cid as uuid)"),
+                {"cid": device["collector_id"]},
+            )).mappings().first()
+            if rc_row and rc_row["status"] != "online":
+                return None
         return Breach(device["id"], device["hostname"], extra={"status": status, "stale": stale})
     return None
 
@@ -215,8 +237,11 @@ async def eval_temperature(db: AsyncSession, device: dict, threshold: float) -> 
         import json
         try: temps = json.loads(temps)
         except Exception: return None
-    hottest = max((t.get("celsius", 0) for t in temps), default=0)
-    if hottest > threshold:
+    readings = [t.get("celsius") for t in temps if t.get("celsius") is not None]
+    if not readings:
+        return None
+    hottest = max(readings)
+    if hottest >= threshold:
         return Breach(device["id"], device["hostname"], value=hottest,
                       extra={"threshold": threshold})
     return None
@@ -241,27 +266,29 @@ async def eval_interface_errors(db: AsyncSession, device: dict, threshold: float
     except Exception:
         return []
 
+    # Batch-fetch all interface IDs + baselines for this device in one query.
+    iface_rows = (await db.execute(
+        text("""
+            SELECT i.name, i.id::text,
+                   mb.mean, mb.stddev, mb.force_alert, mb.force_suppress
+            FROM interfaces i
+            LEFT JOIN metric_baselines mb
+                   ON mb.interface_id = i.id
+                  AND mb.metric_type  = 'interface_errors'
+                  AND mb.bucket_type  = 'rolling'
+                  AND mb.bucket_index = 0
+            WHERE i.device_id = :did
+        """),
+        {"did": device_id},
+    )).mappings().all()
+    iface_bl_map = {r["name"]: r for r in iface_rows}
+
     breaches: list[Breach] = []
     for r in results:
         val = float(r.get("value", [0, 0])[1] or 0)
         if_name = r["metric"].get("if_name", "")
 
-        # Look up the interface row for its UUID and baseline.
-        iface_row = (await db.execute(
-            text("""
-                SELECT i.id::text,
-                       mb.mean, mb.stddev, mb.force_alert, mb.force_suppress
-                FROM interfaces i
-                LEFT JOIN metric_baselines mb
-                       ON mb.interface_id = i.id
-                      AND mb.metric_type  = 'interface_errors'
-                      AND mb.bucket_type  = 'rolling'
-                      AND mb.bucket_index = 0
-                WHERE i.device_id = :did AND i.name = :name LIMIT 1
-            """),
-            {"did": device_id, "name": if_name},
-        )).mappings().first()
-
+        iface_row = iface_bl_map.get(if_name)
         iface_id = iface_row["id"] if iface_row else None
 
         # Determine effective threshold: max(static, mean + 3σ from baseline).
@@ -298,13 +325,17 @@ async def eval_interface_util(db: AsyncSession, device: dict, threshold: float) 
     # Only evaluate interfaces that have a known non-zero speed (> 0).
     # Dividing by a zero-speed interface produces Infinity which causes false positives.
     speed_filter = f'anthrimon_if_speed_bps{{device_id="{device_id}"}} > 0'
+    # label_replace adds a discriminating "d" label so in and out produce distinct
+    # label sets after the join; "or" then includes both, and "max by" takes the
+    # higher of the two directions rather than silently preferring in over out.
+    in_util  = (f'clamp_min(rate(anthrimon_if_in_octets_total{{device_id="{device_id}"}}[5m]) * 8'
+                f'  / on(if_index) group_left() ({speed_filter}) * 100, 0)')
+    out_util = (f'clamp_min(rate(anthrimon_if_out_octets_total{{device_id="{device_id}"}}[5m]) * 8'
+                f'  / on(if_index) group_left() ({speed_filter}) * 100, 0)')
     query = (
         f'max by (if_index, if_name) ('
-        f'  clamp_min(rate(anthrimon_if_in_octets_total{{device_id="{device_id}"}}[5m]) * 8'
-        f'    / on(if_index) group_left() ({speed_filter}) * 100, 0)'
-        f') or max by (if_index, if_name) ('
-        f'  clamp_min(rate(anthrimon_if_out_octets_total{{device_id="{device_id}"}}[5m]) * 8'
-        f'    / on(if_index) group_left() ({speed_filter}) * 100, 0)'
+        f'  label_replace({in_util},  "d", "i", "", "") or '
+        f'  label_replace({out_util}, "d", "o", "", "")'
         f')'
     )
     try:
@@ -314,6 +345,13 @@ async def eval_interface_util(db: AsyncSession, device: dict, threshold: float) 
             results = resp.json().get("data", {}).get("result", [])
     except Exception:
         return []
+
+    # Batch-fetch all interface IDs for this device in one query.
+    iface_id_rows = (await db.execute(
+        text("SELECT name, id::text FROM interfaces WHERE device_id = :did"),
+        {"did": device_id},
+    )).all()
+    iface_id_map = {r[0]: r[1] for r in iface_id_rows}
 
     breaches: list[Breach] = []
     seen_if_indexes: set[str] = set()
@@ -327,13 +365,9 @@ async def eval_interface_util(db: AsyncSession, device: dict, threshold: float) 
             continue
         seen_if_indexes.add(if_index)
         if_name = r["metric"].get("if_name", "")
-        iface_row = (await db.execute(
-            text("SELECT id::text FROM interfaces WHERE device_id = :did AND name = :name LIMIT 1"),
-            {"did": device_id, "name": if_name},
-        )).first()
         breaches.append(Breach(
             device_id, device["hostname"],
-            interface_id=iface_row[0] if iface_row else None,
+            interface_id=iface_id_map.get(if_name),
             interface_name=if_name,
             value=round(val, 1),
             extra={"threshold_pct": threshold},
@@ -368,9 +402,9 @@ async def eval_custom_oid(db: AsyncSession, device: dict, oid: str,
         if cred_type == "snmp_v2c":
             from pysnmp.hlapi.v3arch.asyncio import (
                 CommunityData, ContextData, ObjectIdentity, ObjectType,
-                SnmpEngine, UdpTransportTarget, get_cmd,
+                UdpTransportTarget, get_cmd,
             )
-            engine = SnmpEngine()
+            engine = _get_snmp_engine()
             transport = await UdpTransportTarget.create(
                 (device["mgmt_ip"] if "mgmt_ip" in device else device["id"], 161),
                 timeout=5, retries=0,
@@ -379,7 +413,7 @@ async def eval_custom_oid(db: AsyncSession, device: dict, oid: str,
                          transport, ContextData(), ObjectType(ObjectIdentity(oid)))
         else:
             from pysnmp.hlapi.v3arch.asyncio import (
-                ContextData, ObjectIdentity, ObjectType, SnmpEngine,
+                ContextData, ObjectIdentity, ObjectType,
                 UdpTransportTarget, UsmUserData, get_cmd,
             )
             import pysnmp.hlapi.v3arch.asyncio as hlapi
@@ -389,7 +423,7 @@ async def eval_custom_oid(db: AsyncSession, device: dict, oid: str,
                      "aes192": "usmAesCfb192Protocol", "aes256": "usmAesCfb256Protocol"}
             auth_proto = getattr(hlapi, _AUTH.get(cred_data.get("auth_protocol","sha256").lower(), "usmHMAC192SHA256AuthProtocol"))
             priv_proto = getattr(hlapi, _PRIV.get(cred_data.get("priv_protocol","aes").lower(), "usmAesCfb128Protocol"))
-            engine = SnmpEngine()
+            engine = _get_snmp_engine()
             transport = await UdpTransportTarget.create(
                 (device.get("mgmt_ip", device["id"]), 161), timeout=5, retries=0,
             )
@@ -443,8 +477,9 @@ async def eval_ospf_state(db: AsyncSession, device: dict) -> Optional[Breach]:
 
     States that trigger: down, attempt, init, two_way, exstart, exchange, loading.
     'unknown' is ignored (no data yet). 'full' is the only healthy state.
+    Reports all bad neighbors in extra["neighbors"] plus a count.
     """
-    row = (await db.execute(
+    rows = (await db.execute(
         text("""
             SELECT neighbor_router_id::text, neighbor_ip::text, state
             FROM ospf_neighbors
@@ -461,16 +496,18 @@ async def eval_ospf_state(db: AsyncSession, device: dict) -> Optional[Breach]:
                     WHEN 'two_way'  THEN 7
                     ELSE 8
                 END
-            LIMIT 1
         """),
         {"did": device["id"]},
-    )).mappings().first()
-    if not row:
+    )).mappings().all()
+    if not rows:
         return None
-    neighbor = row["neighbor_router_id"] or row["neighbor_ip"] or "unknown"
+    bad = [
+        {"neighbor": r["neighbor_router_id"] or r["neighbor_ip"] or "unknown", "state": r["state"]}
+        for r in rows
+    ]
     return Breach(
         device["id"], device["hostname"],
-        extra={"neighbor": neighbor, "ospf_state": row["state"]},
+        extra={"neighbors": bad, "count": len(bad), "ospf_state": bad[0]["state"]},
     )
 
 
@@ -478,24 +515,48 @@ async def eval_flow_bandwidth(
     device: dict, custom_oid: str, threshold: float
 ) -> Optional[Breach]:
     """Alert when flow bandwidth for a device (optionally filtered by src/dst IP or protocol)
-    exceeds threshold bytes/s, averaged over the last 5 minutes."""
+    exceeds threshold bytes/s, averaged over the last 5 minutes.
+
+    custom_oid is a JSON object with optional keys: src_ip, dst_ip, protocol.
+    Example: {"src_ip": "10.0.0.1", "protocol": 6}
+    """
     import json as _json
     import httpx as _httpx
+    import ipaddress as _ipaddress
+    import structlog as _sl
+    _log = _sl.get_logger(__name__)
+
+    if custom_oid and not custom_oid.strip().startswith("{"):
+        _log.warning("flow_bandwidth_invalid_config",
+                     device=device["id"],
+                     detail="custom_oid must be a JSON object, e.g. {\"src_ip\":\"...\"}; got a plain string")
+        return None
 
     try:
         filt = _json.loads(custom_oid) if custom_oid else {}
+        if not isinstance(filt, dict):
+            raise ValueError("expected JSON object")
     except Exception:
-        filt = {}
+        _log.warning("flow_bandwidth_invalid_config", device=device["id"],
+                     detail="custom_oid is not valid JSON")
+        return None
 
     device_id = device["id"]
     clauses = [
         f"collector_device_id = toUUID('{device_id}')",
         "minute >= now() - INTERVAL 5 MINUTE",
     ]
-    if filt.get("src_ip"):
-        clauses.append(f"src_ip = toIPv4('{filt['src_ip']}')")
-    if filt.get("dst_ip"):
-        clauses.append(f"dst_ip = toIPv4('{filt['dst_ip']}')")
+    for key in ("src_ip", "dst_ip"):
+        raw_ip = filt.get(key)
+        if not raw_ip:
+            continue
+        try:
+            addr = _ipaddress.ip_address(raw_ip)
+        except ValueError:
+            return None
+        col = "src_ip" if key == "src_ip" else "dst_ip"
+        fn = "toIPv6" if isinstance(addr, _ipaddress.IPv6Address) else "toIPv4"
+        clauses.append(f"{col} = {fn}('{raw_ip}')")
     if filt.get("protocol"):
         clauses.append(f"ip_protocol = {int(filt['protocol'])}")
 
@@ -515,7 +576,7 @@ async def eval_flow_bandwidth(
     except Exception:
         return None
 
-    if bps <= threshold:
+    if bps < threshold:
         return None
 
     desc_parts = []
@@ -529,14 +590,31 @@ async def eval_flow_bandwidth(
 async def eval_syslog_match(
     device: dict, custom_oid: str, threshold: float, duration_seconds: int
 ) -> Optional[Breach]:
-    """Alert when syslog messages matching a regex pattern exceed a count threshold."""
+    """Alert when syslog messages matching a regex pattern exceed a count threshold.
+
+    custom_oid is a JSON object with required key 'pattern' (regex) and optional
+    keys: program (string), severity_max (int 0-7).
+    Example: {"pattern": "OSPF.*down", "severity_max": 4}
+    """
     import json as _json
     import httpx as _httpx
+    import structlog as _sl
+    _log = _sl.get_logger(__name__)
+
+    if custom_oid and not custom_oid.strip().startswith("{"):
+        _log.warning("syslog_match_invalid_config",
+                     device=device["id"],
+                     detail="custom_oid must be a JSON object with a 'pattern' key; got a plain string")
+        return None
 
     try:
         filt = _json.loads(custom_oid) if custom_oid else {}
+        if not isinstance(filt, dict):
+            raise ValueError("expected JSON object")
     except Exception:
-        filt = {}
+        _log.warning("syslog_match_invalid_config", device=device["id"],
+                     detail="custom_oid is not valid JSON")
+        return None
 
     pattern = filt.get("pattern", "").strip()
     if not pattern:
@@ -544,7 +622,7 @@ async def eval_syslog_match(
 
     minutes  = max(1, duration_seconds // 60)
     did      = device["id"]
-    esc_pat  = pattern.replace("'", "\\'")
+    esc_pat  = pattern.replace("\\", "\\\\").replace("'", "\\'")
 
     clauses = [
         f"device_id = toUUID('{did}')",
@@ -552,6 +630,9 @@ async def eval_syslog_match(
         f"match(message, '{esc_pat}')",
     ]
     if filt.get("program"):
+        import re as _re
+        if not _re.fullmatch(r'[A-Za-z0-9._/-]+', filt["program"]):
+            return None
         clauses.append(f"program = '{filt['program']}'")
     if filt.get("severity_max") is not None:
         clauses.append(f"severity <= {int(filt['severity_max'])}")
@@ -664,6 +745,7 @@ async def eval_bgp_session_flapping(
             JOIN bgp_session_events e ON e.session_id = s.id
             WHERE s.device_id = :did
               AND e.recorded_at >= NOW() - make_interval(mins => :window)
+              AND (e.prev_state = 'established' OR e.new_state = 'established')
             GROUP BY s.id, s.peer_ip, s.peer_asn, s.local_asn, s.session_state
             HAVING COUNT(e.id) >= :threshold
         """),
@@ -706,7 +788,7 @@ async def eval_bgp_prefix_drop(
         except Exception:
             return []
 
-    cur_series, avg_series = await __import__("asyncio").gather(
+    cur_series, avg_series = await asyncio.gather(
         vm_instant(f'anthrimon_bgp_prefixes_received{{{filter_str}}}'),
         vm_instant(f'avg_over_time(anthrimon_bgp_prefixes_received{{{filter_str}}}[{lookback_hours}h])'),
     )
@@ -765,16 +847,64 @@ async def eval_route_missing(db: AsyncSession, device: dict, prefix: str) -> lis
     return []
 
 
+async def eval_device_latency(
+    device: dict,
+    rtt_threshold_ms: float = 100.0,
+    loss_threshold_pct: float = 10.0,
+) -> list[Breach]:
+    """Alert on high ICMP RTT or packet loss.
+
+    Fires separate breaches for RTT and for loss when their respective thresholds
+    are exceeded.  Does NOT imply device_down — ICMP may be filtered while the
+    device is fully operational.
+
+    rtt_threshold_ms    — alert when avg RTT exceeds this value (default 100 ms)
+    loss_threshold_pct  — alert when loss % meets or exceeds this value (default 10 %)
+    """
+    device_id = device["id"]
+    filter_str = f'device_id="{device_id}"'
+
+    async def vm_instant(query: str) -> float | None:
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                r = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
+            results = r.json().get("data", {}).get("result", [])
+            if results:
+                return float(results[0]["value"][1])
+        except Exception:
+            pass
+        return None
+
+    rtt_avg, loss_pct = await asyncio.gather(
+        vm_instant(f'anthrimon_device_rtt_ms{{{filter_str},stat="avg"}}'),
+        vm_instant(f'anthrimon_device_loss_pct{{{filter_str}}}'),
+    )
+
+    breaches: list[Breach] = []
+
+    if rtt_avg is not None and rtt_avg >= rtt_threshold_ms:
+        breaches.append(Breach(
+            device["id"], device["hostname"],
+            value=round(rtt_avg, 2),
+            extra={"metric": "rtt_ms", "threshold_ms": rtt_threshold_ms},
+        ))
+
+    if loss_pct is not None and loss_pct >= loss_threshold_pct:
+        breaches.append(Breach(
+            device["id"], device["hostname"],
+            value=round(loss_pct, 1),
+            extra={"metric": "loss_pct", "threshold_pct": loss_threshold_pct},
+        ))
+
+    return breaches
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _check(value: float, condition: str, threshold: float) -> bool:
-    if condition == "gt":
-        return value > threshold
-    if condition == "lt":
-        return value < threshold
-    if condition == "gte":
+    if condition in ("gt", "gte"):
         return value >= threshold
-    if condition == "lte":
+    if condition in ("lt", "lte"):
         return value <= threshold
     return False
 

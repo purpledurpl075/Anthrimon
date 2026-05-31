@@ -115,7 +115,7 @@ func (c *AristaEAPICollector) collectDevice(ctx context.Context, dev hub.Device)
 	username, _ := cred.Data["username"].(string)
 	password, _ := cred.Data["password"].(string)
 
-	result, err := eapiCall(ctx, dev.MgmtIP, username, password, []string{"show isis neighbors"})
+	result, err := eapiCall(ctx, dev.MgmtIP, username, password, dev.EapiAllowHTTP, []string{"show isis neighbors"})
 	if err != nil {
 		return nil, err
 	}
@@ -134,10 +134,12 @@ var eapiHTTP = &http.Client{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true, //nolint:gosec — enterprise self-signed certs
 		},
+		MaxIdleConnsPerHost: 2,
+		IdleConnTimeout:     30 * time.Second,
 	},
 }
 
-func eapiCall(ctx context.Context, host, username, password string, cmds []string) ([]map[string]any, error) {
+func eapiCall(ctx context.Context, host, username, password string, allowHTTP bool, cmds []string) ([]map[string]any, error) {
 	payload := map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "runCmds",
@@ -150,7 +152,12 @@ func eapiCall(ctx context.Context, host, username, password string, cmds []strin
 	}
 	body, _ := json.Marshal(payload)
 
-	for _, scheme := range []string{"https", "http"} {
+	schemes := []string{"https"}
+	if allowHTTP {
+		schemes = append(schemes, "http")
+	}
+
+	for _, scheme := range schemes {
 		url := fmt.Sprintf("%s://%s/command-api", scheme, host)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {

@@ -18,21 +18,22 @@ import (
 
 // PollResult carries all results from one complete poll cycle for a device.
 type PollResult struct {
-	DeviceID      uuid.UUID
-	SysInfo       *model.DeviceInfo        // nil if not yet polled or failed
-	Interfaces    []*model.InterfaceResult
-	Health        *model.HealthResult      // nil if health poll not run this cycle
-	LLDPNeighbors  []*model.LLDPNeighbor   // nil if not polled this cycle
-	CDPNeighbors   []*model.CDPNeighbor    // nil if not polled this cycle
-	OSPFNeighbours  []*model.OSPFNeighbour  // nil if not polled this cycle
-	ISISAdjacencies []*model.ISISAdjacency  // nil if not polled this cycle
-	BGPSessions    []*model.BGPSession     // nil if not polled this cycle
-	RouteEntries   []*model.RouteEntry    // nil if not polled this cycle
-	ARPEntries     []*model.ARPEntry       // nil if not polled this cycle
-	MACEntries     []*model.MACEntry       // nil if not polled this cycle
-	VLANs          []*model.VLANResult          // nil if not polled this cycle
-	InterfaceVLANs []*model.InterfaceVLANResult // nil if not polled this cycle
-	STPPorts       []*model.STPPortResult       // nil if not polled this cycle
+	DeviceID        uuid.UUID
+	SysInfo         *model.DeviceInfo            // nil if not yet polled or failed
+	Interfaces      []*model.InterfaceResult
+	Health          *model.HealthResult          // nil if health poll not run this cycle
+	LLDPNeighbors   []*model.LLDPNeighbor        // nil if not polled this cycle
+	CDPNeighbors    []*model.CDPNeighbor         // nil if not polled this cycle
+	OSPFNeighbours  []*model.OSPFNeighbour       // nil if not polled this cycle
+	ISISAdjacencies []*model.ISISAdjacency       // nil if not polled this cycle
+	BGPSessions     []*model.BGPSession          // nil if not polled this cycle
+	RouteEntries    []*model.RouteEntry          // nil if not polled this cycle
+	ARPEntries      []*model.ARPEntry            // nil if not polled this cycle
+	MACEntries      []*model.MACEntry            // nil if not polled this cycle
+	VLANs           []*model.VLANResult          // nil if not polled this cycle
+	InterfaceVLANs  []*model.InterfaceVLANResult // nil if not polled this cycle
+	STPPorts        []*model.STPPortResult       // nil if not polled this cycle
+	ProbeResult     *model.ProbeResult           // nil if probe not run or unavailable
 }
 
 // ResultHandler is a callback invoked after each completed poll cycle.
@@ -48,6 +49,7 @@ type Manager struct {
 	codec   *crypto.AESCodec // nil when running without credential encryption
 	handler ResultHandler
 	log     zerolog.Logger
+	prober  *Prober
 
 	mu      sync.Mutex
 	running map[uuid.UUID]context.CancelFunc // device_id → cancel func
@@ -60,6 +62,7 @@ func NewManager(cfg *config.Config, codec *crypto.AESCodec, handler ResultHandle
 		codec:   codec,
 		handler: handler,
 		log:     log.With().Str("component", "poller_manager").Logger(),
+		prober:  NewProber(log),
 		running: make(map[uuid.UUID]context.CancelFunc),
 	}
 }
@@ -115,7 +118,7 @@ func (m *Manager) sync(ctx context.Context, ds DeviceSource) error {
 		}
 		devCtx, cancel := context.WithCancel(ctx)
 		m.running[dev.ID] = cancel
-		go m.runDevice(devCtx, dev)
+		go m.runDevice(devCtx, dev, m.prober)
 	}
 
 	// Stop goroutines for devices no longer in the list.
@@ -148,7 +151,7 @@ func (m *Manager) stopAll() {
 // runDevice is the long-running goroutine for a single device.
 // It manages the SNMP session lifecycle, schedules polls at the device's
 // configured interval, and dispatches results to the handler.
-func (m *Manager) runDevice(ctx context.Context, dev model.DeviceRow) {
+func (m *Manager) runDevice(ctx context.Context, dev model.DeviceRow, prober *Prober) {
 	log := m.log.With().
 		Str("device_id", dev.ID.String()).
 		Str("target", dev.MgmtIP).
@@ -193,8 +196,11 @@ func (m *Manager) runDevice(ctx context.Context, dev model.DeviceRow) {
 	// same instant as the interface ticker (avoids select starvation when
 	// healthInterval is an exact multiple of pollInterval).
 	healthTicker := time.NewTicker(healthInterval + pollInterval/2)
+	// Probe ticker runs independently of SNMP — fires even when SNMP is broken.
+	probeTicker := time.NewTicker(ProbeInterval)
 	defer ifaceTicker.Stop()
 	defer healthTicker.Stop()
+	defer probeTicker.Stop()
 
 	connectAndSysInfo := func() bool {
 		for {
@@ -370,6 +376,11 @@ func (m *Manager) runDevice(ctx context.Context, dev model.DeviceRow) {
 				continue
 			}
 			m.emit(ctx, log, &PollResult{DeviceID: dev.ID, Health: health})
+
+		case <-probeTicker.C:
+			if pr := prober.Probe(ctx, dev.ID, dev.MgmtIP); pr != nil {
+				m.emit(ctx, log, &PollResult{DeviceID: dev.ID, ProbeResult: pr})
+			}
 		}
 	}
 }

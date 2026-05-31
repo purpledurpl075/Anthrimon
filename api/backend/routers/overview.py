@@ -247,6 +247,12 @@ async def overview(
     }
 
     _overview_cache[cache_key] = (_time.monotonic(), result)
+    # Sweep entries that are well past TTL so the dict doesn't grow unboundedly.
+    if len(_overview_cache) > 500:
+        cutoff = _time.monotonic() - _CACHE_TTL * 60
+        stale = [k for k, (t, _) in _overview_cache.items() if t < cutoff]
+        for k in stale:
+            _overview_cache.pop(k, None)
     return result
 
 
@@ -507,7 +513,7 @@ async def widget_data(
     async def _collector_status():
         rows = (await db.execute(sq_text("""
             SELECT name, status::text, last_seen
-            FROM collectors WHERE tenant_id = :tid ORDER BY name
+            FROM remote_collectors WHERE tenant_id = :tid ORDER BY name
         """), {"tid": str(tid)})).mappings().all()
         return [
             {

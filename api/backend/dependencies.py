@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import uuid
+from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
 
 import structlog
 from fastapi import Depends, Header, HTTPException, Query, Request, status
 import jwt as _jwt
 from jwt.exceptions import InvalidTokenError as JWTError
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from .config import get_settings
@@ -61,7 +63,6 @@ async def _user_from_api_token(raw_token: str, db: AsyncSession) -> Optional[Use
         return None
 
     # Expired tokens are rejected.
-    from datetime import datetime, timezone
     if api_token.expires_at and api_token.expires_at < datetime.now(timezone.utc):
         return None
 
@@ -71,14 +72,26 @@ async def _user_from_api_token(raw_token: str, db: AsyncSession) -> Optional[Use
         return None
 
     result = await db.execute(
-        select(User).where(User.id == api_token.user_id, User.is_active == True)  # noqa: E712
+        select(User).where(
+            User.id == api_token.user_id,
+            User.tenant_id == api_token.tenant_id,
+            User.is_active == True,  # noqa: E712
+        )
     )
     user = result.scalar_one_or_none()
 
-    # Touch last_used without blocking the request.
+    # Touch last_used in a dedicated session so we don't flush other dirty
+    # ORM objects that may be pending on the shared request session.
     if user:
-        api_token.last_used = datetime.now(timezone.utc)
-        await db.commit()
+        token_id = api_token.id
+        async def _touch() -> None:
+            async with AsyncSessionLocal() as s:
+                await s.execute(
+                    update(ApiToken).where(ApiToken.id == token_id)
+                    .values(last_used=datetime.now(timezone.utc))
+                )
+                await s.commit()
+        asyncio.create_task(_touch())
 
     return user
 

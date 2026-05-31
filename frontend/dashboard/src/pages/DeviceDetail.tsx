@@ -8,7 +8,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { useParams, Link, useNavigate } from 'react-router-dom'
-import { fetchDevice, fetchDeviceHealth, fetchDeviceHealthHistory, fetchDeviceInterfaces, fetchDeviceBaselines, overrideBaseline, deleteDevice, patchDevice, setAlertExclusions, fetchDeviceCredentials, linkDeviceCredential, unlinkDeviceCredential, runSnmpDiag, fetchDeviceNeighbors, fetchDeviceOSPF, fetchDeviceAddresses, fetchDeviceRoutes, fetchDeviceVlans, fetchDeviceStp, type AddressEntry, type VlanEntry, type StpPort, type BaselineRow } from '../api/devices'
+import { fetchDevice, fetchDeviceHealth, fetchDeviceHealthHistory, fetchDeviceLatency, fetchDeviceInterfaces, fetchDeviceBaselines, overrideBaseline, deleteDevice, patchDevice, setAlertExclusions, fetchDeviceCredentials, linkDeviceCredential, unlinkDeviceCredential, runSnmpDiag, fetchDeviceNeighbors, fetchDeviceOSPF, fetchDeviceAddresses, fetchDeviceRoutes, fetchDeviceVlans, fetchDeviceStp, type AddressEntry, type VlanEntry, type StpPort, type BaselineRow } from '../api/devices'
 import TimeSeriesChart from '../components/TimeSeriesChart'
 import { fetchCredentials } from '../api/credentials'
 import { fetchConfigStatus, fetchBackups, fetchDiffs, fetchBackup, fetchDiff, triggerCollect, fetchComplianceResults, deployConfig, type ConfigBackupMeta, type ConfigDiffMeta } from '../api/config'
@@ -1218,6 +1218,13 @@ function HealthTab({ deviceId, currentHealth }: { deviceId: string; currentHealt
   const cpuBl  = blData?.baselines?.['cpu_util_pct']?.find(r => r.bucket_type === 'rolling') ?? null
   const memBl  = blData?.baselines?.['mem_util_pct']?.find(r => r.bucket_type === 'rolling') ?? null
 
+  const { data: latency } = useQuery({
+    queryKey:        ['device-latency', deviceId, hours],
+    queryFn:         () => fetchDeviceLatency(deviceId, hours),
+    staleTime:       30_000,
+    refetchInterval: 60_000,
+  })
+
   const temps: { sensor: string; celsius: number; ok: boolean }[] = currentHealth?.temperatures ?? []
   const domTemps    = temps.filter(t => t.sensor.toLowerCase().includes('dom'))
   const systemTemps = temps.filter(t => !t.sensor.toLowerCase().includes('dom'))
@@ -1461,6 +1468,88 @@ function HealthTab({ deviceId, currentHealth }: { deviceId: string; currentHealt
                 )
               })}
             </div>
+          </div>
+        )
+      })()}
+
+      {/* ICMP Latency */}
+      {(() => {
+        const hasRtt  = (latency?.rtt_avg_ms?.length ?? 0) > 0
+        const hasLoss = (latency?.loss_pct?.length ?? 0) > 0
+        if (!hasRtt && !hasLoss) return null
+        const lossNow = latency?.loss_pct?.at(-1)?.[1] ?? null
+        const rttNow  = latency?.rtt_avg_ms?.at(-1)?.[1] ?? null
+        return (
+          <div className="space-y-3">
+            <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide">ICMP Synthetic Probe</p>
+
+            {/* RTT */}
+            {hasRtt && (
+              <div className="bg-slate-50 rounded-2xl border border-slate-200 overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-xl bg-emerald-100 flex items-center justify-center">
+                      <svg className="w-4 h-4 text-emerald-600" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                        <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+                      </svg>
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800">Round-Trip Time</p>
+                      {rttNow != null && (
+                        <p className="text-xs text-slate-400">
+                          Latest avg: <span className="font-semibold" style={{ color: rttNow > 200 ? '#dc2626' : rttNow > 100 ? '#f59e0b' : '#16a34a' }}>
+                            {rttNow.toFixed(1)} ms
+                          </span>
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  {rttNow != null && (
+                    <p className="text-2xl font-bold text-slate-800">{rttNow.toFixed(1)} ms</p>
+                  )}
+                </div>
+                <div className="px-4 pt-3 pb-2 bg-white">
+                  <TimeSeriesChart height={120} yFmt={v => `${v.toFixed(1)} ms`}
+                    series={[
+                      { name: 'Min', color: '#6ee7b7', data: (latency?.rtt_min_ms ?? []) as [number,number][] },
+                      { name: 'Avg', color: '#10b981', data: (latency?.rtt_avg_ms ?? []) as [number,number][] },
+                      { name: 'Max', color: '#059669', data: (latency?.rtt_max_ms ?? []) as [number,number][] },
+                    ]} />
+                </div>
+              </div>
+            )}
+
+            {/* Packet loss */}
+            {hasLoss && (
+              <div className="bg-slate-50 rounded-2xl border border-slate-200 overflow-hidden">
+                <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+                  <div className="flex items-center gap-3">
+                    <div className="w-8 h-8 rounded-xl bg-orange-100 flex items-center justify-center">
+                      <svg className="w-4 h-4 text-orange-500" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                        <path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+                      </svg>
+                    </div>
+                    <div>
+                      <p className="text-sm font-semibold text-slate-800">Packet Loss</p>
+                      {lossNow != null && (
+                        <p className="text-xs text-slate-400">
+                          Latest: <span className="font-semibold" style={{ color: lossNow >= 50 ? '#dc2626' : lossNow > 0 ? '#f59e0b' : '#16a34a' }}>
+                            {lossNow.toFixed(1)}%
+                          </span>
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                  {lossNow != null && (
+                    <p className="text-2xl font-bold text-slate-800">{lossNow.toFixed(1)}%</p>
+                  )}
+                </div>
+                <div className="px-4 pt-3 pb-2 bg-white">
+                  <TimeSeriesChart height={100} yFmt={fmtPct}
+                    series={[{ name: 'Loss', color: '#f97316', data: (latency?.loss_pct ?? []) as [number,number][] }]} />
+                </div>
+              </div>
+            )}
           </div>
         )
       })()}

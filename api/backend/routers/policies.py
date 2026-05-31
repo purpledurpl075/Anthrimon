@@ -24,6 +24,8 @@ from ..schemas.common import PaginatedResponse
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/alert-policies", tags=["alert-policies"])
 
+_seeded_tenants: set[str] = set()  # tenants that have had built-in policies seeded this process lifetime
+
 
 # ── Built-in policy templates ──────────────────────────────────────────────────
 # Each entry defines the policy metadata and the rules it creates when applied.
@@ -139,8 +141,11 @@ async def list_policies(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> list[AlertPolicyRead]:
-    await seed_builtin_policies(db, current_user.tenant_id)
-    await db.commit()
+    tid = str(current_user.tenant_id)
+    if tid not in _seeded_tenants:
+        await seed_builtin_policies(db, current_user.tenant_id)
+        await db.commit()
+        _seeded_tenants.add(tid)
     result = await db.execute(
         select(AlertPolicy)
         .where(AlertPolicy.tenant_id == current_user.tenant_id)

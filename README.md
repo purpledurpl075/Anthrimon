@@ -30,12 +30,12 @@ Arista EOS · Cisco IOS/IOS-XE/IOS-XR/NX-OS · Juniper · Aruba CX · HP ProCurv
   width="100%"/></a><br/><sub><b>Overview dashboard</b></sub></td>
       <td><a href="https://github.com/user-attachments/assets/7e5b331e-880f-4a92-b959-3ed839b3f9a4" target="_blank"><img
    src="https://github.com/user-attachments/assets/7e5b331e-880f-4a92-b959-3ed839b3f9a4" alt="Devices"
-  width="100%"/></a><br/><sub><b>Device list</b></sub></td>
+  width="100%"/></a><br/><sub><b>Topology</b></sub></td>
     </tr>
     <tr>
       <td><a href="https://github.com/user-attachments/assets/40c44dd3-77b1-420a-975f-86b50a88b423" target="_blank"><img
    src="https://github.com/user-attachments/assets/40c44dd3-77b1-420a-975f-86b50a88b423" alt="Topology"
-  width="100%"/></a><br/><sub><b>Network topology</b></sub></td>
+  width="100%"/></a><br/><sub><b>Logging</b></sub></td>
       <td><a href="https://github.com/user-attachments/assets/32711003-dc57-4f34-bfac-c9c929ae4803" target="_blank"><img
    src="https://github.com/user-attachments/assets/32711003-dc57-4f34-bfac-c9c929ae4803" alt="Flow"
   width="100%"/></a><br/><sub><b>Flow monitoring</b></sub></td>
@@ -43,15 +43,15 @@ Arista EOS · Cisco IOS/IOS-XE/IOS-XR/NX-OS · Juniper · Aruba CX · HP ProCurv
     <tr>
       <td><a href="https://github.com/user-attachments/assets/872a551c-7090-4cda-bc7e-7a048e23293b" target="_blank"><img
    src="https://github.com/user-attachments/assets/872a551c-7090-4cda-bc7e-7a048e23293b" alt="Alerts"
-  width="100%"/></a><br/><sub><b>Alerting</b></sub></td>
+  width="100%"/></a><br/><sub><b>MAC & ARP Search</b></sub></td>
       <td><a href="https://github.com/user-attachments/assets/8915293a-bb42-488b-9d0f-9ece5424958f" target="_blank"><img
    src="https://github.com/user-attachments/assets/8915293a-bb42-488b-9d0f-9ece5424958f" alt="Config"
-  width="100%"/></a><br/><sub><b>Config management</b></sub></td>
+  width="100%"/></a><br/><sub><b>Device Health Metrics</b></sub></td>
     </tr>
     <tr>
       <td colspan="2"><a href="https://github.com/user-attachments/assets/68de9a97-1a2e-4cb3-b8ed-0fe2820e958e"
   target="_blank"><img src="https://github.com/user-attachments/assets/68de9a97-1a2e-4cb3-b8ed-0fe2820e958e"
-  alt="Syslog" width="100%"/></a><br/><sub><b>Syslog explorer</b></sub></td>
+  alt="Syslog" width="100%"/></a><br/><sub><b>Configuration Management & Compliance</b></sub></td>
     </tr>
   </table>
 ## Requirements

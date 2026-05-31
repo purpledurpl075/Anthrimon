@@ -48,33 +48,47 @@ func PollHealth(s *client.Session, deviceID uuid.UUID, profile *vendor.Profile, 
 		return nil, err
 	}
 
-	// Optical power collection is best-effort; never fail PollHealth on error.
-	result.OpticalSamples, _ = pollOpticalSensors(s)
+	// Optical power collection is best-effort; skip on devices with no transceivers.
+	if profile == nil || !profile.SkipDOM {
+		result.OpticalSamples, _ = pollOpticalSensors(s, profile)
+	}
 
 	return result, nil
 }
 
-// pollOpticalSensors walks ENTITY-SENSOR-MIB for watts-type sensors (type 6)
-// whose names contain "DOM TX" or "DOM RX". On Arista EOS (and similar vendors),
-// optical TX/RX power is stored as watts with milli(8) scale, precision 4 —
-// i.e. the actual unit is milliwatts. We convert to dBm for storage.
-func pollOpticalSensors(s *client.Session) ([]model.OpticalSample, error) {
+// pollOpticalSensors collects DOM TX/RX optical power readings.
+// For Juniper it uses JUNIPER-DOM-MIB; for all other vendors it walks
+// ENTITY-SENSOR-MIB for both type-6 (watts) and type-14 (dBm) sensors.
+func pollOpticalSensors(s *client.Session, profile *vendor.Profile) ([]model.OpticalSample, error) {
+	if profile != nil && profile.DBVendorType == "juniper" {
+		return pollOpticalSensorsJuniper(s)
+	}
+	return pollOpticalSensorsEntity(s)
+}
+
+// pollOpticalSensorsEntity walks ENTITY-SENSOR-MIB (RFC 3433) for optical power
+// sensors of type 6 (watts, used by Arista EOS and Aruba-CX) and type 14 (dBm,
+// used by Cisco IOS-XE/XR/NX-OS).  Watts are converted mW→dBm; dBm values are
+// used directly after applying the standard RFC 3433 scale/precision.
+func pollOpticalSensorsEntity(s *client.Session) ([]model.OpticalSample, error) {
 	typePDUs, err := s.BulkWalkAll(oid.EntPhySensorType)
 	if err != nil || len(typePDUs) == 0 {
 		return nil, nil
 	}
 
-	// Collect indexes of watts-type sensors.
-	dbmIndexes := make(map[string]bool)
+	// Collect indexes of optical-power sensors (watts or dBm), tracking type.
+	type sensorMeta struct{ sensorType int }
+	optIndexes := make(map[string]sensorMeta)
 	for _, pdu := range typePDUs {
-		if client.PDUInt(pdu) == oid.EntSensorTypeWatts {
+		t := client.PDUInt(pdu)
+		if t == oid.EntSensorTypeWatts || t == oid.EntSensorTypeDBm {
 			idx := formatIndex(pdu.Name, oid.EntPhySensorType)
 			if idx != "" {
-				dbmIndexes[idx] = true
+				optIndexes[idx] = sensorMeta{sensorType: t}
 			}
 		}
 	}
-	if len(dbmIndexes) == 0 {
+	if len(optIndexes) == 0 {
 		return nil, nil
 	}
 
@@ -86,7 +100,7 @@ func pollOpticalSensors(s *client.Session) ([]model.OpticalSample, error) {
 	valueByIdx := make(map[string]int)
 	for _, pdu := range valuePDUs {
 		idx := formatIndex(pdu.Name, oid.EntPhySensorValue)
-		if dbmIndexes[idx] {
+		if _, ok := optIndexes[idx]; ok {
 			valueByIdx[idx] = client.PDUInt(pdu)
 		}
 	}
@@ -96,7 +110,7 @@ func pollOpticalSensors(s *client.Session) ([]model.OpticalSample, error) {
 	if sp, e := s.BulkWalkAll(oid.EntPhySensorScale); e == nil {
 		for _, pdu := range sp {
 			idx := formatIndex(pdu.Name, oid.EntPhySensorScale)
-			if dbmIndexes[idx] {
+			if _, ok := optIndexes[idx]; ok {
 				scaleByIdx[idx] = client.PDUInt(pdu)
 			}
 		}
@@ -105,7 +119,7 @@ func pollOpticalSensors(s *client.Session) ([]model.OpticalSample, error) {
 	if pp, e := s.BulkWalkAll(oid.EntPhySensorPrecision); e == nil {
 		for _, pdu := range pp {
 			idx := formatIndex(pdu.Name, oid.EntPhySensorPrecision)
-			if dbmIndexes[idx] {
+			if _, ok := optIndexes[idx]; ok {
 				precByIdx[idx] = client.PDUInt(pdu)
 			}
 		}
@@ -138,28 +152,34 @@ func pollOpticalSensors(s *client.Session) ([]model.OpticalSample, error) {
 		if name == "" {
 			continue
 		}
-		// Only collect sensors whose description looks like DOM optical power.
+		// Filter to optical power sensors by description.
 		lower := strings.ToLower(name)
-		if !strings.Contains(lower, "dom") && !strings.Contains(lower, "tx power") && !strings.Contains(lower, "rx power") {
+		if !isOpticalPowerSensor(lower) {
 			continue
 		}
 
-		// RFC 3433 scale: exponent = (enum - 9) * 3
+		// RFC 3433 scale: actual exponent = (enum - 9) * 3
 		scaleEnum := scaleByIdx[idx]
 		if scaleEnum == 0 {
 			scaleEnum = oid.EntSensorScaleUnits
 		}
-		scaleExp  := (scaleEnum - oid.EntSensorScaleUnits) * 3
+		scaleExp := (scaleEnum - oid.EntSensorScaleUnits) * 3
 		precision := precByIdx[idx]
 
-		// Type 6 = watts; convert to mW then to dBm.
-		watts := float64(rawVal) * math.Pow10(scaleExp) / math.Pow10(precision)
-		mw    := watts * 1000.0
 		var dbm float64
-		if mw > 0 {
-			dbm = 10.0 * math.Log10(mw)
+		meta := optIndexes[idx]
+		if meta.sensorType == oid.EntSensorTypeDBm {
+			// Value is already in dBm; apply scale/precision only.
+			dbm = float64(rawVal) * math.Pow10(scaleExp) / math.Pow10(precision)
 		} else {
-			dbm = -40.0 // clamp to -40 dBm for zero / negative readings
+			// Type 6 = watts; convert mW → dBm.
+			watts := float64(rawVal) * math.Pow10(scaleExp) / math.Pow10(precision)
+			mw := watts * 1000.0
+			if mw > 0 {
+				dbm = 10.0 * math.Log10(mw)
+			} else {
+				dbm = -40.0
+			}
 		}
 		dbm = math.Round(dbm*1000) / 1000
 
@@ -173,20 +193,108 @@ func pollOpticalSensors(s *client.Session) ([]model.OpticalSample, error) {
 	return samples, nil
 }
 
-// extractIfaceName extracts the interface name from an ENTITY-SENSOR-MIB
-// sensor description of the form "... for <IfaceName>".
-// Falls back to the full name if the pattern is not found.
-func extractIfaceName(sensorName string) string {
-	const sep = " for "
-	idx := strings.LastIndex(strings.ToLower(sensorName), sep)
-	if idx < 0 {
-		return sensorName
+// pollOpticalSensorsJuniper walks JUNIPER-DOM-MIB for TX and RX optical power.
+// Values are in units of 0.001 mW (1 µW); convert to dBm.
+// Indexed by ifIndex, resolved to interface name via IF-MIB ifDescr.
+func pollOpticalSensorsJuniper(s *client.Session) ([]model.OpticalSample, error) {
+	// Resolve ifIndex → interface name.
+	descrPDUs, err := s.BulkWalkAll("1.3.6.1.2.1.2.2.1.2") // ifDescr
+	if err != nil {
+		return nil, nil
 	}
-	iface := strings.TrimSpace(sensorName[idx+len(sep):])
-	// Strip any trailing non-printable / non-ASCII characters.
-	return strings.TrimRightFunc(iface, func(r rune) bool {
-		return !unicode.IsPrint(r) || r > 127
-	})
+	ifName := make(map[string]string)
+	for _, pdu := range descrPDUs {
+		parts := strings.Split(pdu.Name, ".")
+		if len(parts) < 1 {
+			continue
+		}
+		idx := parts[len(parts)-1]
+		if v := client.PDUString(pdu); v != "" {
+			ifName[idx] = v
+		}
+	}
+
+	toDBm := func(val int) float64 {
+		mw := float64(val) * 0.001
+		if mw <= 0 {
+			return -40.0
+		}
+		return math.Round(10.0*math.Log10(mw)*1000) / 1000
+	}
+
+	var samples []model.OpticalSample
+	for _, pair := range []struct {
+		tableOID  string
+		direction string
+	}{
+		{oid.JnxDomCurrentTxPower, "tx"},
+		{oid.JnxDomCurrentRxPower, "rx"},
+	} {
+		pdus, e := s.BulkWalkAll(pair.tableOID)
+		if e != nil {
+			continue
+		}
+		for _, pdu := range pdus {
+			parts := strings.Split(pdu.Name, ".")
+			ifIdx := parts[len(parts)-1]
+			iface := ifName[ifIdx]
+			if iface == "" {
+				continue
+			}
+			val := client.PDUInt(pdu)
+			samples = append(samples, model.OpticalSample{
+				IfaceName:  iface,
+				SensorName: iface + " DOM " + pair.direction + " power",
+				Direction:  pair.direction,
+				PowerDBm:   toDBm(val),
+			})
+		}
+	}
+	return samples, nil
+}
+
+// isOpticalPowerSensor returns true when the lowercase sensor description
+// suggests an optical TX or RX power reading.
+func isOpticalPowerSensor(lower string) bool {
+	return strings.Contains(lower, "dom") ||
+		strings.Contains(lower, "tx power") ||
+		strings.Contains(lower, "rx power") ||
+		strings.Contains(lower, "tx-power") ||
+		strings.Contains(lower, "rx-power") ||
+		strings.Contains(lower, "txpower") ||
+		strings.Contains(lower, "rxpower") ||
+		strings.Contains(lower, "optical power") ||
+		strings.Contains(lower, "laser output power") ||
+		strings.Contains(lower, "laser rx power")
+}
+
+// extractIfaceName extracts the interface name from a sensor description.
+//
+// Handles two common patterns:
+//   - Arista / most vendors: "DOM TX Power Sensor for Ethernet2"  → "Ethernet2"
+//   - Cisco / Aruba-CX:      "GigabitEthernet0/0/0 Tx Power Sensor" → "GigabitEthernet0/0/0"
+func extractIfaceName(sensorName string) string {
+	lower := strings.ToLower(sensorName)
+
+	// Pattern 1: "... for <iface>" (Arista EOS and similar).
+	const sep = " for "
+	if idx := strings.LastIndex(lower, sep); idx >= 0 {
+		iface := strings.TrimSpace(sensorName[idx+len(sep):])
+		return strings.TrimRightFunc(iface, func(r rune) bool {
+			return !unicode.IsPrint(r) || r > 127
+		})
+	}
+
+	// Pattern 2: "<iface> <optical-keyword> ..." (Cisco IOS-XE/XR, Aruba-CX).
+	// Strip the first optical keyword and everything after it.
+	for _, kw := range []string{" tx power", " rx power", " tx-power", " rx-power",
+		" txpower", " rxpower", " dom", " transceiver", " optical", " laser"} {
+		if i := strings.Index(lower, kw); i > 0 {
+			return strings.TrimSpace(sensorName[:i])
+		}
+	}
+
+	return sensorName
 }
 
 // classifyOpticalDirection returns "tx", "rx", or "unknown" from the sensor name.

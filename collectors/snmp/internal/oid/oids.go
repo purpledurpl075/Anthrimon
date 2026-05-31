@@ -97,11 +97,21 @@ const (
 	EntPhySensorPrecision = "1.3.6.1.2.1.99.1.1.1.3" // decimal places 0–9
 	EntPhySensorValue     = "1.3.6.1.2.1.99.1.1.1.4"
 
-	EntSensorTypeCelsius = 8 // entPhySensorType value indicating temperature
-	EntSensorTypeWatts   = 6 // watts — used for optical power (TX/RX) on Arista and others
-	EntSensorScaleUnits  = 9 // entPhySensorScale: units(9) = 10^0
+	EntSensorTypeCelsius = 8  // entPhySensorType value indicating temperature
+	EntSensorTypeWatts   = 6  // watts — used for optical power (TX/RX) on Arista and others
+	EntSensorTypeDBm     = 14 // dBm — optical power reported directly on Cisco IOS-XE/XR/NX-OS
+	EntSensorScaleUnits  = 9  // entPhySensorScale: units(9) = 10^0
 	// RFC 3433 SensorDataScale: actual exponent = (enum - 9) * 3
 	// e.g. milli(8) → (8-9)*3 = -3, units(9) → 0, kilo(10) → +3
+)
+
+// ── Juniper DOM MIB (JUNIPER-DOM-MIB, 1.3.6.1.4.1.2636.3.60) ─────────────────
+// Values are integers in units of 0.001 mW (1 µW).  Convert: mW = value/1000.
+// Indexed by ifIndex; resolve interface name via IF-MIB ifDescr.
+
+const (
+	JnxDomCurrentTxPower = "1.3.6.1.4.1.2636.3.60.1.1.1.1.4" // TX laser output power
+	JnxDomCurrentRxPower = "1.3.6.1.4.1.2636.3.60.1.1.1.1.8" // RX laser power
 )
 
 // ── Cisco: CISCO-PROCESS-MIB ─────────────────────────────────────────────────

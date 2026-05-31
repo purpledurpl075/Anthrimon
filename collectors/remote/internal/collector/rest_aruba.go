@@ -356,30 +356,32 @@ func (a *arubaClient) collectBGP(ctx context.Context, deviceID string) ([]map[st
 
 				stateRaw, _ := status["bgp_peer_state"].(string)
 
-				// Prefix statistics live under status.prefix_statistics.<afi-safi>.received
-				// e.g. status.prefix_statistics["ipv4-unicast"]["received"]
+				// Prefix statistics live under status.prefix_statistics.<afi-safi>.{received,sent}
 				prefixesRx := 0
+				prefixesTx := 0
 				if pfxStats, ok := status["prefix_statistics"].(map[string]any); ok {
 					for _, afiRaw := range pfxStats {
 						if afi, ok := afiRaw.(map[string]any); ok {
 							prefixesRx += jsonInt(afi["received"])
+							prefixesTx += jsonInt(afi["sent"])
 						}
 					}
 				}
 
 				sessions = append(sessions, map[string]any{
-					"device_id":         deviceID,
-					"vrf":               vrfName,
-					"peer_ip":           peerIP,
-					"peer_asn":          data["remote_as"],
-					"local_asn":         localASN,
-					"description":       data["description"],
-					"state":             normBGPState(stateRaw),
-					"uptime_s":          jsonInt(stats["bgp_peer_uptime"]),
-					"flap_count":        jsonInt(stats["bgp_peer_established_count"]),
-					"in_updates":        jsonInt(stats["bgp_peer_update_in_count"]),
-					"out_updates":       jsonInt(stats["bgp_peer_update_out_count"]),
-					"prefixes_received": prefixesRx,
+					"device_id":            deviceID,
+					"vrf":                  vrfName,
+					"peer_ip":              peerIP,
+					"peer_asn":             data["remote_as"],
+					"local_asn":            localASN,
+					"description":          data["description"],
+					"state":                normBGPState(stateRaw),
+					"uptime_s":             jsonInt(stats["bgp_peer_uptime"]),
+					"flap_count":           jsonInt(stats["bgp_peer_established_count"]),
+					"in_updates":           jsonInt(stats["bgp_peer_update_in_count"]),
+					"out_updates":          jsonInt(stats["bgp_peer_update_out_count"]),
+					"prefixes_received":    prefixesRx,
+					"prefixes_advertised":  prefixesTx,
 				})
 			}
 		}

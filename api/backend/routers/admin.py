@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from textwrap import dedent
 
 import httpx
@@ -115,11 +116,12 @@ DEFAULT_HTML = dedent("""\
     <td style="padding:0;line-height:0;">""" + _HERO_SVG + """</td>
   </tr>
 
-  <!-- Header -->
+  <!-- Header: green when resolved, severity color otherwise -->
   <tr>
-    <td style="background:{{severity_color}};padding:28px 32px;">
-      <p style="margin:0 0 6px;color:rgba(255,255,255,0.75);font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;">{{tag}} &middot; Anthrimon</p>
-      <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:700;line-height:1.35;">{{title}}</h1>
+    <td style="background:{{header_color}};padding:24px 32px;">
+      <p style="margin:0 0 4px;color:rgba(255,255,255,0.7);font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;">{{tag}} &middot; {{platform_name}}</p>
+      <h1 style="margin:0 0 4px;color:#ffffff;font-size:20px;font-weight:700;line-height:1.35;">{{title}}</h1>
+      <p style="margin:0;color:rgba(255,255,255,0.85);font-size:13px;font-weight:500;">{{device_name}}</p>
     </td>
   </tr>
 
@@ -127,42 +129,27 @@ DEFAULT_HTML = dedent("""\
   <tr>
     <td style="padding:28px 32px;">
 
-      <!-- Value / threshold card -->
-      <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px;margin-bottom:20px;">
-        <tr>
-          <td style="padding:14px 20px;border-right:1px solid #e2e8f0;width:50%;">
-            <p style="margin:0;font-size:10px;font-weight:700;letter-spacing:1px;color:#94a3b8;text-transform:uppercase;">Value</p>
-            <p style="margin:4px 0 0;font-size:22px;font-weight:700;color:#0f172a;">{{value}}</p>
-          </td>
-          <td style="padding:14px 20px;width:50%;">
-            <p style="margin:0;font-size:10px;font-weight:700;letter-spacing:1px;color:#94a3b8;text-transform:uppercase;">Threshold</p>
-            <p style="margin:4px 0 0;font-size:22px;font-weight:700;color:#0f172a;">{{threshold}}</p>
-          </td>
-        </tr>
-      </table>
+      <!-- Value/threshold card — rendered only when values are present -->
+      {{value_card}}
 
-      <!-- Details table -->
+      <!-- Core details -->
       <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
         <tr>
           <td style="font-size:13px;color:#64748b;padding:5px 0;width:110px;vertical-align:top;">Rule</td>
           <td style="font-size:13px;color:#1e293b;font-weight:500;padding:5px 0;">{{rule_name}}</td>
         </tr>
         <tr>
-          <td style="font-size:13px;color:#64748b;padding:5px 0;">Device</td>
-          <td style="font-size:13px;color:#1e293b;font-weight:500;padding:5px 0;">{{device_name}}</td>
-        </tr>
-        <tr>
           <td style="font-size:13px;color:#64748b;padding:5px 0;">Severity</td>
-          <td style="font-size:13px;font-weight:600;padding:5px 0;color:{{severity_color}};">{{severity}}</td>
+          <td style="font-size:13px;font-weight:700;padding:5px 0;color:{{severity_color}};text-transform:capitalize;">{{severity}}</td>
         </tr>
         <tr>
           <td style="font-size:13px;color:#64748b;padding:5px 0;">Triggered</td>
           <td style="font-size:13px;color:#1e293b;padding:5px 0;">{{triggered_at}}</td>
         </tr>
-        <tr>
-          <td style="font-size:13px;color:#64748b;padding:5px 0;">Resolved</td>
-          <td style="font-size:13px;color:#1e293b;padding:5px 0;">{{resolved_at}}</td>
-        </tr>
+        <!-- extra_rows: description, interface, prefix, neighbor, ospf_state — only when non-empty -->
+        {{extra_rows}}
+        <!-- resolved_row: shown only when alert is resolved, includes duration -->
+        {{resolved_row}}
       </table>
 
       <!-- CTA button -->
@@ -180,7 +167,7 @@ DEFAULT_HTML = dedent("""\
   <!-- Footer -->
   <tr>
     <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:16px 32px;text-align:center;">
-      <p style="margin:0;font-size:11px;color:#94a3b8;">{{platform_name}} Network Monitor &middot; <a href="{{alert_url}}" style="color:#94a3b8;text-decoration:underline;">Manage alert</a></p>
+      <p style="margin:0;font-size:11px;color:#94a3b8;">{{platform_name}} &middot; Ref&nbsp;{{alert_id}} &middot; <a href="{{alert_url}}" style="color:#94a3b8;text-decoration:underline;">Manage alert</a></p>
     </td>
   </tr>
 
@@ -259,8 +246,7 @@ async def update_smtp_settings(
         db.add(SystemSetting(key=_SMTP_KEY, value=new_value))
     else:
         row.value = new_value
-        from sqlalchemy import func
-        row.updated_at = func.now()
+        row.updated_at = datetime.now(timezone.utc)
 
     await db.commit()
     logger.info("smtp_settings_updated", host=body.host, port=body.port)
@@ -404,11 +390,12 @@ DEFAULT_HTML_STATE = dedent("""\
     <td style="padding:0;line-height:0;">""" + _HERO_SVG + """</td>
   </tr>
 
-  <!-- Header -->
+  <!-- Header: green when resolved, severity color otherwise -->
   <tr>
-    <td style="background:{{severity_color}};padding:28px 32px;">
-      <p style="margin:0 0 6px;color:rgba(255,255,255,0.75);font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;">{{tag}} &middot; Anthrimon</p>
-      <h1 style="margin:0;color:#ffffff;font-size:20px;font-weight:700;line-height:1.35;">{{title}}</h1>
+    <td style="background:{{header_color}};padding:24px 32px;">
+      <p style="margin:0 0 4px;color:rgba(255,255,255,0.7);font-size:11px;font-weight:700;letter-spacing:1.5px;text-transform:uppercase;">{{tag}} &middot; {{platform_name}}</p>
+      <h1 style="margin:0 0 4px;color:#ffffff;font-size:20px;font-weight:700;line-height:1.35;">{{title}}</h1>
+      <p style="margin:0;color:rgba(255,255,255,0.85);font-size:13px;font-weight:500;">{{device_name}}</p>
     </td>
   </tr>
 
@@ -416,40 +403,24 @@ DEFAULT_HTML_STATE = dedent("""\
   <tr>
     <td style="padding:28px 32px;">
 
-      <!-- Details table -->
+      <!-- Core details -->
       <table width="100%" cellpadding="0" cellspacing="0" style="margin-bottom:24px;">
         <tr>
-          <td style="font-size:13px;color:#64748b;padding:5px 0;width:120px;vertical-align:top;">Rule</td>
+          <td style="font-size:13px;color:#64748b;padding:5px 0;width:110px;vertical-align:top;">Rule</td>
           <td style="font-size:13px;color:#1e293b;font-weight:500;padding:5px 0;">{{rule_name}}</td>
         </tr>
         <tr>
-          <td style="font-size:13px;color:#64748b;padding:5px 0;">Device</td>
-          <td style="font-size:13px;color:#1e293b;font-weight:500;padding:5px 0;">{{device_name}}</td>
-        </tr>
-        <tr>
           <td style="font-size:13px;color:#64748b;padding:5px 0;">Severity</td>
-          <td style="font-size:13px;font-weight:600;padding:5px 0;color:{{severity_color}};">{{severity}}</td>
-        </tr>
-        <tr>
-          <td style="font-size:13px;color:#64748b;padding:5px 0;">Interface</td>
-          <td style="font-size:13px;color:#1e293b;font-weight:500;padding:5px 0;font-family:monospace;">{{interface_name}}</td>
-        </tr>
-        <tr>
-          <td style="font-size:13px;color:#64748b;padding:5px 0;">Prefix</td>
-          <td style="font-size:13px;color:#1e293b;font-weight:500;padding:5px 0;font-family:monospace;">{{prefix}}</td>
-        </tr>
-        <tr>
-          <td style="font-size:13px;color:#64748b;padding:5px 0;">Neighbor</td>
-          <td style="font-size:13px;color:#1e293b;font-weight:500;padding:5px 0;font-family:monospace;">{{neighbor}}</td>
+          <td style="font-size:13px;font-weight:700;padding:5px 0;color:{{severity_color}};text-transform:capitalize;">{{severity}}</td>
         </tr>
         <tr>
           <td style="font-size:13px;color:#64748b;padding:5px 0;">Triggered</td>
           <td style="font-size:13px;color:#1e293b;padding:5px 0;">{{triggered_at}}</td>
         </tr>
-        <tr>
-          <td style="font-size:13px;color:#64748b;padding:5px 0;">Resolved</td>
-          <td style="font-size:13px;color:#1e293b;padding:5px 0;">{{resolved_at}}</td>
-        </tr>
+        <!-- extra_rows: description, interface, prefix, neighbor, ospf_state — only when non-empty -->
+        {{extra_rows}}
+        <!-- resolved_row: shown only when alert is resolved, includes duration -->
+        {{resolved_row}}
       </table>
 
       <!-- CTA button -->
@@ -467,7 +438,7 @@ DEFAULT_HTML_STATE = dedent("""\
   <!-- Footer -->
   <tr>
     <td style="background:#f8fafc;border-top:1px solid #e2e8f0;padding:16px 32px;text-align:center;">
-      <p style="margin:0;font-size:11px;color:#94a3b8;">{{platform_name}} Network Monitor &middot; <a href="{{alert_url}}" style="color:#94a3b8;text-decoration:underline;">Manage alert</a></p>
+      <p style="margin:0;font-size:11px;color:#94a3b8;">{{platform_name}} &middot; Ref&nbsp;{{alert_id}} &middot; <a href="{{alert_url}}" style="color:#94a3b8;text-decoration:underline;">Manage alert</a></p>
     </td>
   </tr>
 

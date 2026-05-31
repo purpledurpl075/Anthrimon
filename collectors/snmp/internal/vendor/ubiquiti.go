@@ -46,5 +46,7 @@ func init() {
 			Scalar:      []string{oid.UCDMemTotalReal, oid.UCDMemAvailReal},
 			KBAvailable: true,
 		},
+
+		SkipDOM: true, // Ubiquiti devices do not expose DOM via ENTITY-SENSOR-MIB
 	})
 }

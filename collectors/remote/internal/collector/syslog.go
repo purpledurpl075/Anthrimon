@@ -24,6 +24,7 @@ type SyslogCollector struct {
 	fwdCfg      config.ForwardConfig
 	devicesByIP map[string]string // mgmt_ip → device_id
 	timezone    string            // collector-level IANA timezone (e.g. "America/New_York")
+	loc         *time.Location    // cached location for timezone — updated by SetTimezone
 	log         zerolog.Logger
 
 	mu  sync.Mutex
@@ -44,6 +45,7 @@ func NewSyslogCollector(
 		fwdCfg:      fwdCfg,
 		devicesByIP: devicesByIP,
 		timezone:    "UTC",
+		loc:         time.UTC,
 		log:         log.With().Str("component", "syslog_collector").Logger(),
 	}
 }
@@ -61,18 +63,23 @@ func (c *SyslogCollector) SetTimezone(tz string) {
 	if tz == "" {
 		tz = "UTC"
 	}
+	loc := loadLocation(tz)
 	c.mu.Lock()
 	c.timezone = tz
+	c.loc = loc
 	c.mu.Unlock()
 	c.log.Info().Str("timezone", tz).Msg("syslog timezone updated")
 }
 
 // Run starts UDP and TCP listeners and the flush loop.
-// It blocks until ctx is cancelled.
+// It blocks until ctx is cancelled and all listeners have exited.
 func (c *SyslogCollector) Run(ctx context.Context) {
-	go c.listenUDP(ctx)
-	go c.listenTCP(ctx)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); c.listenUDP(ctx) }()
+	go func() { defer wg.Done(); c.listenTCP(ctx) }()
 	c.flushLoop(ctx)
+	wg.Wait()
 }
 
 // ─── UDP listener ─────────────────────────────────────────────────────────────
@@ -138,12 +145,14 @@ func (c *SyslogCollector) listenTCP(ctx context.Context) {
 
 func (c *SyslogCollector) handleTCPConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(5 * time.Minute))
 	srcIP := ""
 	if ta, ok := conn.RemoteAddr().(*net.TCPAddr); ok {
 		srcIP = ta.IP.String()
 	}
 
 	scanner := bufio.NewScanner(conn)
+	scanner.Buffer(make([]byte, 65536), 1<<20)
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
@@ -152,6 +161,9 @@ func (c *SyslogCollector) handleTCPConn(ctx context.Context, conn net.Conn) {
 		}
 		c.ingest(scanner.Text(), srcIP)
 	}
+	if err := scanner.Err(); err != nil {
+		c.log.Debug().Err(err).Str("src", srcIP).Msg("syslog tcp scanner error")
+	}
 }
 
 // ─── Ingest + parse ───────────────────────────────────────────────────────────
@@ -159,10 +171,9 @@ func (c *SyslogCollector) handleTCPConn(ctx context.Context, conn net.Conn) {
 func (c *SyslogCollector) ingest(raw, srcIP string) {
 	c.mu.Lock()
 	deviceID := c.devicesByIP[srcIP]
-	tz := c.timezone
+	loc := c.loc
 	c.mu.Unlock()
 
-	loc := loadLocation(tz)
 	record := parseMessage(raw, srcIP, loc)
 	record["device_id"] = deviceID
 	record["device_ip"] = srcIP
@@ -173,7 +184,7 @@ func (c *SyslogCollector) ingest(raw, srcIP string) {
 	c.mu.Unlock()
 
 	if overflow {
-		c.flush(context.Background())
+		go c.flush(context.Background())
 	}
 }
 

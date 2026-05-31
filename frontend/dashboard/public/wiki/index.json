@@ -1,0 +1,290 @@
+[
+  {
+    "slug": "changing-db-password",
+    "title": "Changing the Database Password",
+    "category": "Administration",
+    "description": "How to rotate the PostgreSQL password and update all services"
+  },
+  {
+    "slug": "adding-users",
+    "title": "Adding and Managing Users",
+    "category": "Administration",
+    "description": "Create accounts, assign roles, and manage access"
+  },
+  {
+    "slug": "restarting-services",
+    "title": "Restarting Services",
+    "category": "Administration",
+    "description": "How to restart the API, collectors, and supporting services"
+  },
+  {
+    "slug": "device-onboarding",
+    "title": "Device Onboarding Workflow",
+    "category": "Configuration",
+    "description": "End-to-end steps for bringing a new device into monitoring"
+  },
+  {
+    "slug": "snmp-credentials",
+    "title": "Configuring SNMP Credentials",
+    "category": "Configuration",
+    "description": "Add SNMP v2c and v3 credentials and link them to devices"
+  },
+  {
+    "slug": "notification-channels",
+    "title": "Notification Channels",
+    "category": "Configuration",
+    "description": "Configure email, Slack, Teams, PagerDuty, and webhook channels"
+  },
+  {
+    "slug": "alert-policies",
+    "title": "Alert Policies",
+    "category": "Configuration",
+    "description": "Control who gets notified, how often, and escalation behaviour"
+  },
+  {
+    "slug": "alert-rules",
+    "title": "Creating Alert Rules",
+    "category": "Configuration",
+    "description": "Set up alert rules, thresholds, and notification policies"
+  },
+  {
+    "slug": "alert-exclusions",
+    "title": "Alert Exclusions",
+    "category": "Configuration",
+    "description": "Permanently suppress a metric for a specific device or interface"
+  },
+  {
+    "slug": "maintenance-windows",
+    "title": "Maintenance Windows",
+    "category": "Configuration",
+    "description": "Suppress alerts during planned changes — one-time and recurring"
+  },
+  {
+    "slug": "remote-collectors",
+    "title": "Deploying Remote Collectors",
+    "category": "Configuration",
+    "description": "Bootstrap a remote collector over WireGuard VPN"
+  },
+  {
+    "slug": "collector-device-assignment",
+    "title": "Assigning Devices to Remote Collectors",
+    "category": "Configuration",
+    "description": "Move devices between the hub collector and a remote collector"
+  },
+  {
+    "slug": "config-management",
+    "title": "Config Management Setup",
+    "category": "Configuration",
+    "description": "SSH collection, config diffs, compliance policies"
+  },
+  {
+    "slug": "bgp-monitoring",
+    "title": "BGP Monitoring",
+    "category": "Configuration",
+    "description": "Sessions, prefix counts, baselines, and BGP alert rules"
+  },
+  {
+    "slug": "snmp-cisco-ios",
+    "title": "SNMP Setup — Cisco IOS / IOS-XE",
+    "category": "SNMP Setup",
+    "description": "Enable SNMP v2c and v3 on Cisco IOS and IOS-XE"
+  },
+  {
+    "slug": "snmp-cisco-nxos",
+    "title": "SNMP Setup — Cisco NX-OS",
+    "category": "SNMP Setup",
+    "description": "Enable SNMP on Cisco Nexus switches with management VRF"
+  },
+  {
+    "slug": "snmp-arista",
+    "title": "SNMP Setup — Arista EOS",
+    "category": "SNMP Setup",
+    "description": "Enable SNMP on Arista switches, including management VRF"
+  },
+  {
+    "slug": "snmp-juniper",
+    "title": "SNMP Setup — Juniper JunOS",
+    "category": "SNMP Setup",
+    "description": "Enable SNMP on Juniper routers and switches"
+  },
+  {
+    "slug": "snmp-procurve",
+    "title": "SNMP Setup — HP ProCurve / Aruba CX",
+    "category": "SNMP Setup",
+    "description": "Enable SNMP on ProCurve and Aruba CX switches"
+  },
+  {
+    "slug": "snmp-fortios",
+    "title": "SNMP Setup — Fortinet FortiOS",
+    "category": "SNMP Setup",
+    "description": "Enable SNMP v2c and v3 on FortiGate firewalls"
+  },
+  {
+    "slug": "snmp-ubiquiti",
+    "title": "SNMP Setup — Ubiquiti",
+    "category": "SNMP Setup",
+    "description": "Enable SNMP on UniFi gateways and EdgeOS routers"
+  },
+  {
+    "slug": "syslog-cisco-ios",
+    "title": "Syslog — Cisco IOS / IOS-XE",
+    "category": "Syslog Setup",
+    "description": "Configure syslog export on Cisco IOS and IOS-XE devices"
+  },
+  {
+    "slug": "syslog-cisco-nxos",
+    "title": "Syslog — Cisco NX-OS",
+    "category": "Syslog Setup",
+    "description": "Configure syslog export on Cisco Nexus switches"
+  },
+  {
+    "slug": "syslog-cisco-iosxr",
+    "title": "Syslog — Cisco IOS-XR",
+    "category": "Syslog Setup",
+    "description": "Configure syslog export on Cisco IOS-XR routers"
+  },
+  {
+    "slug": "syslog-arista",
+    "title": "Syslog — Arista EOS",
+    "category": "Syslog Setup",
+    "description": "Configure syslog export on Arista switches"
+  },
+  {
+    "slug": "syslog-juniper",
+    "title": "Syslog — Juniper JunOS",
+    "category": "Syslog Setup",
+    "description": "Configure syslog export on Juniper routers and switches"
+  },
+  {
+    "slug": "syslog-procurve",
+    "title": "Syslog — HP ProCurve / Aruba",
+    "category": "Syslog Setup",
+    "description": "Configure syslog export on HP ProCurve and Aruba switches"
+  },
+  {
+    "slug": "syslog-fortios",
+    "title": "Syslog — Fortinet FortiOS",
+    "category": "Syslog Setup",
+    "description": "Configure syslog export on FortiGate firewalls"
+  },
+  {
+    "slug": "syslog-ubiquiti",
+    "title": "Syslog — Ubiquiti",
+    "category": "Syslog Setup",
+    "description": "Configure syslog export on UniFi, EdgeOS, and AirOS devices"
+  },
+  {
+    "slug": "flow-cisco-ios",
+    "title": "Flow Export — Cisco IOS / IOS-XE",
+    "category": "Flow Setup",
+    "description": "Configure NetFlow v5 or v9 export on Cisco IOS and IOS-XE"
+  },
+  {
+    "slug": "flow-cisco-nxos",
+    "title": "Flow Export — Cisco NX-OS",
+    "category": "Flow Setup",
+    "description": "Configure NetFlow v9 export on Cisco Nexus switches"
+  },
+  {
+    "slug": "flow-arista",
+    "title": "Flow Export — Arista EOS",
+    "category": "Flow Setup",
+    "description": "Configure sFlow export on Arista switches"
+  },
+  {
+    "slug": "flow-juniper",
+    "title": "Flow Export — Juniper JunOS",
+    "category": "Flow Setup",
+    "description": "Configure IPFIX / J-Flow export on Juniper devices"
+  },
+  {
+    "slug": "flow-procurve",
+    "title": "Flow Export — HP ProCurve / Aruba CX",
+    "category": "Flow Setup",
+    "description": "Configure sFlow export on ProCurve and Aruba CX switches"
+  },
+  {
+    "slug": "flow-fortios",
+    "title": "Flow Export — Fortinet FortiOS",
+    "category": "Flow Setup",
+    "description": "Configure NetFlow v9 export on FortiGate firewalls"
+  },
+  {
+    "slug": "flow-ubiquiti",
+    "title": "Flow Export — Ubiquiti",
+    "category": "Flow Setup",
+    "description": "Configure NetFlow or sFlow on UniFi and EdgeOS devices"
+  },
+  {
+    "slug": "troubleshoot-devices-down",
+    "title": "Devices Showing as Down or Unreachable",
+    "category": "Troubleshooting",
+    "description": "Diagnose and fix false device-down alerts"
+  },
+  {
+    "slug": "troubleshoot-no-metrics",
+    "title": "No Metrics or Stale Data",
+    "category": "Troubleshooting",
+    "description": "Collector not polling — steps to diagnose"
+  },
+  {
+    "slug": "troubleshoot-snmp-failures",
+    "title": "SNMP Collection Failures",
+    "category": "Troubleshooting",
+    "description": "Diagnosing SNMP timeouts, auth failures, and OID errors"
+  },
+  {
+    "slug": "troubleshoot-no-syslog",
+    "title": "No Syslog Messages Appearing",
+    "category": "Troubleshooting",
+    "description": "Device is sending syslog but nothing appears in the UI"
+  },
+  {
+    "slug": "troubleshoot-no-flow",
+    "title": "No Flow Data Appearing",
+    "category": "Troubleshooting",
+    "description": "Flow collector running but no data on the Flow page"
+  },
+  {
+    "slug": "troubleshoot-no-notification",
+    "title": "Alert Fired But No Notification Sent",
+    "category": "Troubleshooting",
+    "description": "Alert is open in the UI but no email or Slack message was sent"
+  },
+  {
+    "slug": "troubleshoot-config-collection",
+    "title": "Config Collection Failing",
+    "category": "Troubleshooting",
+    "description": "SSH config collection timing out or not running"
+  },
+  {
+    "slug": "troubleshoot-remote-collector-offline",
+    "title": "Remote Collector Offline",
+    "category": "Troubleshooting",
+    "description": "Remote collector shows offline — WireGuard, key, and service checks"
+  },
+  {
+    "slug": "ports-reference",
+    "title": "Ports and Protocols Reference",
+    "category": "Reference",
+    "description": "All ports the hub and remote collectors use — inbound and outbound"
+  },
+  {
+    "slug": "metric-names-reference",
+    "title": "Metric Names Reference",
+    "category": "Reference",
+    "description": "All VictoriaMetrics metric names written by the collectors"
+  },
+  {
+    "slug": "vendor-matrix",
+    "title": "Supported Vendor Matrix",
+    "category": "Reference",
+    "description": "Feature support table — SNMP, config, flow, and syslog by vendor"
+  },
+  {
+    "slug": "credential-types-reference",
+    "title": "Credential Types Reference",
+    "category": "Reference",
+    "description": "All credential types — snmp_v2c, snmp_v3, ssh, eapi, api_token, gnmi, netconf"
+  }
+]

@@ -64,6 +64,7 @@ export default function MobileNav() {
     { to: '/maintenance', label: 'Maintenance',   icon: Ic.calendar },
     { to: '/routing',     label: 'Routing',       icon: <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 12h5m5-5.5-5 5m0 1 5 5"/></svg> },
     { to: '/credentials', label: 'Credentials',   icon: Ic.key },
+    { to: '/wiki',        label: 'Wiki',           icon: <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg> },
     ...(isAdmin ? [{ to: '/admin', label: 'Administration', icon: Ic.settings }] : []),
   ]
 

@@ -39,6 +39,11 @@ def _cache_get(tenant_id: str) -> Optional[dict]:
 
 def _cache_set(tenant_id: str, result: dict) -> None:
     _cache[tenant_id] = (time.monotonic(), result)
+    if len(_cache) > 500:
+        cutoff = time.monotonic() - CACHE_TTL * 10
+        stale = [k for k, (t, _) in _cache.items() if t < cutoff]
+        for k in stale:
+            _cache.pop(k, None)
 
 
 # ── Edge computation ───────────────────────────────────────────────────────────
@@ -103,6 +108,10 @@ async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
             continue
         seen_pairs.add(pair)
         src_iface = iface_info.get(f"{src_id}:{n.local_port_name}", {})
+        # Try to resolve target interface via remote_port_desc (usually the SNMP name),
+        # falling back to remote_port_id.
+        remote_port = n.remote_port_desc or n.remote_port_id
+        dst_iface = iface_info.get(f"{dst_id}:{remote_port}", {}) if remote_port else {}
         edges.append({
             "id":               f"lldp-{src_id[:8]}-{dst_id[:8]}",
             "source":           src_id,
@@ -112,6 +121,8 @@ async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
             "source_iface_id":  src_iface.get("id"),
             "source_speed_bps": src_iface.get("speed_bps"),
             "source_if_index":  src_iface.get("if_index"),
+            "target_iface_id":  dst_iface.get("id"),
+            "target_speed_bps": dst_iface.get("speed_bps"),
             "protocol":         "lldp",
         })
 
@@ -125,6 +136,7 @@ async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
             continue
         seen_pairs.add(pair)
         src_iface = iface_info.get(f"{src_id}:{n.local_port_name}", {})
+        dst_iface = iface_info.get(f"{dst_id}:{n.remote_port_id}", {}) if n.remote_port_id else {}
         edges.append({
             "id":               f"cdp-{src_id[:8]}-{dst_id[:8]}",
             "source":           src_id,
@@ -134,6 +146,8 @@ async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
             "source_iface_id":  src_iface.get("id"),
             "source_speed_bps": src_iface.get("speed_bps"),
             "source_if_index":  src_iface.get("if_index"),
+            "target_iface_id":  dst_iface.get("id"),
+            "target_speed_bps": dst_iface.get("speed_bps"),
             "protocol":         "cdp",
         })
 
@@ -152,18 +166,22 @@ async def _persist_topology_links(tenant_id: str, edges: list[dict]) -> None:
         for edge in edges:
             src, dst = edge["source"], edge["target"]
             if src > dst:
+                # Canonical ordering: lower UUID = source. Swap everything.
                 src, dst = dst, src
                 meta = {
                     "source_port":      edge.get("target_port"),
                     "dest_port":        edge.get("source_port"),
+                    "source_speed_bps": edge.get("target_speed_bps"),
+                    "dest_iface_id":    edge.get("source_iface_id"),
                 }
-                siface = None
+                siface = edge.get("target_iface_id")
             else:
                 meta = {
                     "source_port":      edge.get("source_port"),
                     "dest_port":        edge.get("target_port"),
                     "source_speed_bps": edge.get("source_speed_bps"),
                     "source_if_index":  edge.get("source_if_index"),
+                    "dest_iface_id":    edge.get("target_iface_id"),
                 }
                 siface = edge.get("source_iface_id")
             srcs.append(src)
@@ -311,6 +329,8 @@ async def get_topology(
                 "source_iface_id":  row["source_interface_id"],
                 "source_speed_bps": (row["metadata"] or {}).get("source_speed_bps"),
                 "source_if_index":  (row["metadata"] or {}).get("source_if_index"),
+                "target_iface_id":  (row["metadata"] or {}).get("dest_iface_id"),
+                "target_speed_bps": (row["metadata"] or {}).get("dest_speed_bps"),
                 "protocol":         row["link_type"],
             }
             for row in link_rows

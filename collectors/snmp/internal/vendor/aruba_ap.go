@@ -37,5 +37,7 @@ func init() {
 		MemoryOIDs: &OIDSet{
 			Scalar: []string{oid.ArubaAPMemUsedPct, oid.ArubaAPMemTotalKB},
 		},
+
+		SkipDOM: true, // access points have no optical transceivers
 	})
 }

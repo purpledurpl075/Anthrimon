@@ -140,26 +140,29 @@ async def _collect_bgp(client: ArubaRestClient, device_id: uuid.UUID) -> list[di
                 stats      = data.get("statistics", {}) or {}
                 state_raw  = status.get("bgp_peer_state", "unknown")
 
-                # Sum received prefixes across all AFI/SAFI families
-                # e.g. status.prefix_statistics["ipv4-unicast"]["received"]
+                # Sum received and sent prefixes across all AFI/SAFI families
+                # e.g. status.prefix_statistics["ipv4-unicast"]["received" | "sent"]
                 prefixes_rx = 0
+                prefixes_tx = 0
                 pfx_stats = status.get("prefix_statistics") or {}
                 for afi_data in pfx_stats.values():
                     if isinstance(afi_data, dict):
                         prefixes_rx += int(afi_data.get("received") or 0)
+                        prefixes_tx += int(afi_data.get("sent") or 0)
 
                 peers.append({
-                    "vrf":               vrf_name,
-                    "peer_ip":           peer_ip,
-                    "peer_asn":          data.get("remote_as"),
-                    "local_asn":         local_asn,
-                    "description":       data.get("description"),
-                    "state":             _bgp_state(state_raw),
-                    "uptime_s":          stats.get("bgp_peer_uptime") or 0,
-                    "flap_count":        stats.get("bgp_peer_established_count") or 0,
-                    "in_updates":        stats.get("bgp_peer_update_in_count") or 0,
-                    "out_updates":       stats.get("bgp_peer_update_out_count") or 0,
-                    "prefixes_received": prefixes_rx,
+                    "vrf":                  vrf_name,
+                    "peer_ip":              peer_ip,
+                    "peer_asn":             data.get("remote_as"),
+                    "local_asn":            local_asn,
+                    "description":          data.get("description"),
+                    "state":                _bgp_state(state_raw),
+                    "uptime_s":             stats.get("bgp_peer_uptime") or 0,
+                    "flap_count":           stats.get("bgp_peer_established_count") or 0,
+                    "in_updates":           stats.get("bgp_peer_update_in_count") or 0,
+                    "out_updates":          stats.get("bgp_peer_update_out_count") or 0,
+                    "prefixes_received":    prefixes_rx,
+                    "prefixes_advertised":  prefixes_tx,
                 })
     return peers
 
@@ -241,41 +244,43 @@ async def _write_bgp(device_id: uuid.UUID, peers: list[dict]) -> None:
                     (device_id, vrf, peer_ip, local_asn, peer_asn,
                      peer_description, session_state, admin_status,
                      uptime_seconds, in_updates, out_updates, flap_count,
-                     prefixes_received, updated_at)
+                     prefixes_received, prefixes_advertised, updated_at)
                 VALUES
                     (CAST(:did AS uuid), :vrf, CAST(:peer_ip AS inet),
                      :local_asn, :peer_asn,
                      :description, CAST(:state AS bgp_session_state), 'start',
                      :uptime_s, :in_updates, :out_updates, :flap_count,
-                     :prefixes_received, NOW())
+                     :prefixes_received, :prefixes_advertised, NOW())
                 ON CONFLICT (device_id, vrf, peer_ip) DO UPDATE SET
-                    local_asn         = EXCLUDED.local_asn,
-                    peer_asn          = EXCLUDED.peer_asn,
-                    peer_description  = EXCLUDED.peer_description,
-                    session_state     = EXCLUDED.session_state,
-                    uptime_seconds    = EXCLUDED.uptime_seconds,
-                    in_updates        = EXCLUDED.in_updates,
-                    out_updates       = EXCLUDED.out_updates,
-                    flap_count        = EXCLUDED.flap_count,
-                    prefixes_received = EXCLUDED.prefixes_received,
+                    local_asn            = EXCLUDED.local_asn,
+                    peer_asn             = EXCLUDED.peer_asn,
+                    peer_description     = EXCLUDED.peer_description,
+                    session_state        = EXCLUDED.session_state,
+                    uptime_seconds       = EXCLUDED.uptime_seconds,
+                    in_updates           = EXCLUDED.in_updates,
+                    out_updates          = EXCLUDED.out_updates,
+                    flap_count           = EXCLUDED.flap_count,
+                    prefixes_received    = EXCLUDED.prefixes_received,
+                    prefixes_advertised  = COALESCE(EXCLUDED.prefixes_advertised, bgp_sessions.prefixes_advertised),
                     last_state_change = CASE
                         WHEN bgp_sessions.session_state != EXCLUDED.session_state THEN NOW()
                         ELSE bgp_sessions.last_state_change
                     END,
                     updated_at = NOW()
             """), {
-                "did":               str(device_id),
-                "vrf":               p.get("vrf", "default"),
-                "peer_ip":           p["peer_ip"],
-                "local_asn":         p["local_asn"],
-                "peer_asn":          p.get("peer_asn"),
-                "description":       p.get("description"),
-                "state":             p["state"],
-                "uptime_s":          p.get("uptime_s", 0),
-                "in_updates":        p.get("in_updates", 0),
-                "out_updates":       p.get("out_updates", 0),
-                "flap_count":        p.get("flap_count", 0),
-                "prefixes_received": p.get("prefixes_received", 0),
+                "did":                str(device_id),
+                "vrf":                p.get("vrf", "default"),
+                "peer_ip":            p["peer_ip"],
+                "local_asn":          p["local_asn"],
+                "peer_asn":           p.get("peer_asn"),
+                "description":        p.get("description"),
+                "state":              p["state"],
+                "uptime_s":           p.get("uptime_s", 0),
+                "in_updates":         p.get("in_updates", 0),
+                "out_updates":        p.get("out_updates", 0),
+                "flap_count":         p.get("flap_count", 0),
+                "prefixes_received":  p.get("prefixes_received", 0),
+                "prefixes_advertised": p.get("prefixes_advertised"),
             })
 
         # Log transitions

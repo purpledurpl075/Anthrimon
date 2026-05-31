@@ -5,9 +5,11 @@ package collector
 import (
 	"context"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gosnmp/gosnmp"
 	"github.com/rs/zerolog"
@@ -19,19 +21,36 @@ import (
 // ─── OID constants ────────────────────────────────────────────────────────────
 
 const (
-	oidSysUpTime      = "1.3.6.1.2.1.1.3.0"
-	oidIfTable        = "1.3.6.1.2.1.2.2.1"
-	oidIfDescr        = "1.3.6.1.2.1.2.2.1.2"
-	oidIfOperStatus   = "1.3.6.1.2.1.2.2.1.8"
-	oidIfInOctets     = "1.3.6.1.2.1.2.2.1.10"
-	oidIfOutOctets    = "1.3.6.1.2.1.2.2.1.16"
+	// System
+	oidSysUpTime = "1.3.6.1.2.1.1.3.0"
+
+	// IF-MIB — ifTable (32-bit counters, admin/oper status, speed, descr)
+	oidIfTable      = "1.3.6.1.2.1.2.2.1"
+	// IF-MIB — ifXTable (64-bit HC counters, ifName, ifHighSpeed, ifAlias)
+	oidIfXTable     = "1.3.6.1.2.1.31.1.1.1"
+
+	// HOST-RESOURCES-MIB
 	oidHrProcessorLoad = "1.3.6.1.2.1.25.3.3.1.2"
 	oidHrStorageTable  = "1.3.6.1.2.1.25.2.3.1"
-	oidHrStorageUsed   = "1.3.6.1.2.1.25.2.3.1.6"
-	oidHrStorageSize   = "1.3.6.1.2.1.25.2.3.1.5"
-	oidHrStorageType   = "1.3.6.1.2.1.25.2.3.1.2"
-	oidHrStorageTypeRAM = "1.3.6.1.2.1.25.2.1.2"
+	oidHrStorageTypeRAMSuffix = ".2" // hrStorageRam OID ends in .2
+
+	// ENTITY-MIB — physical entity names/descriptions (correlate with sensor index)
+	oidEntPhysicalDescr = "1.3.6.1.2.1.47.1.1.1.1.2"
+	oidEntPhysicalName  = "1.3.6.1.2.1.47.1.1.1.1.7"
+
+	// ENTITY-SENSOR-MIB
+	oidEntPhySensorType      = "1.3.6.1.2.1.99.1.1.1.1"
+	oidEntPhySensorScale     = "1.3.6.1.2.1.99.1.1.1.2"
+	oidEntPhySensorPrecision = "1.3.6.1.2.1.99.1.1.1.3"
+	oidEntPhySensorValue     = "1.3.6.1.2.1.99.1.1.1.4"
+
+	// RFC 3433 SensorDataScale: actual = value * 10^((scale-9)*3) / 10^precision
+	entSensorTypeCelsius = 8
+	entSensorTypeWatts   = 6
+	entSensorScaleUnits  = 9 // units(9) → 10^0
 )
+
+// ─── SNMPCollector ────────────────────────────────────────────────────────────
 
 // SNMPCollector polls assigned devices via SNMP and forwards Prometheus text
 // metrics to the hub.
@@ -64,12 +83,14 @@ func (c *SNMPCollector) SetDevices(devices []hub.Device) {
 // Run starts periodic SNMP polling.  It blocks until ctx is cancelled.
 func (c *SNMPCollector) Run(ctx context.Context) {
 	interval := time.Duration(c.cfg.PollingIntervalS) * time.Second
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
 	c.log.Info().Dur("interval", interval).Msg("snmp poller started")
 
-	// Poll once immediately then follow the ticker.
 	c.pollAll(ctx)
 
 	for {
@@ -99,16 +120,21 @@ func (c *SNMPCollector) pollAll(ctx context.Context) {
 	var mu sync.Mutex
 	var lines []string
 
+outer:
 	for _, dev := range devices {
 		dev := dev
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break outer
+		}
 		wg.Add(1)
-		sem <- struct{}{}
 
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			devLines, err := c.pollDevice(ctx, dev)
+			devLines, err := c.pollDevice(dev)
 			if err != nil {
 				c.log.Warn().Err(err).Str("device_id", dev.ID).
 					Str("ip", dev.MgmtIP).Msg("snmp poll failed")
@@ -136,7 +162,7 @@ func (c *SNMPCollector) pollAll(ctx context.Context) {
 }
 
 // pollDevice connects to one device and returns Prometheus-format metric lines.
-func (c *SNMPCollector) pollDevice(ctx context.Context, dev hub.Device) ([]string, error) {
+func (c *SNMPCollector) pollDevice(dev hub.Device) ([]string, error) {
 	cred := pickSNMPCredential(dev.Credentials)
 	if cred == nil {
 		return nil, fmt.Errorf("no usable snmp credential for %s", dev.ID)
@@ -158,16 +184,15 @@ func (c *SNMPCollector) pollDevice(ctx context.Context, dev hub.Device) ([]strin
 	// sysUpTime
 	uptime, err := getSysUpTime(g)
 	if err == nil {
+		// Match the hub's metric name and label set exactly.
 		lines = append(lines,
-			fmt.Sprintf(`anthrimon_uptime_seconds{device_id=%q,hostname=%q,vendor=%q} %d %d`,
-				dev.ID, dev.Hostname, dev.Vendor, uptime/100, ts))
+			fmt.Sprintf(`anthrimon_device_uptime_seconds{device_id=%q} %d %d`,
+				dev.ID, uptime/100, ts))
 	}
 
-	// Interface counters + oper status
-	ifLines, err := pollInterfaces(g, dev, ts, c.log)
-	if err == nil {
-		lines = append(lines, ifLines...)
-	}
+	// Interface counters, speed, oper-status — HC 64-bit preferred over 32-bit.
+	ifLines := pollInterfaces(g, dev, ts, c.log)
+	lines = append(lines, ifLines...)
 
 	// CPU via hrProcessorLoad
 	cpuLines, err := pollCPU(g, dev, ts)
@@ -176,106 +201,153 @@ func (c *SNMPCollector) pollDevice(ctx context.Context, dev hub.Device) ([]strin
 	}
 
 	// Memory via hrStorageTable
-	memLines, err := pollMemory(g, dev, ts)
-	if err == nil {
-		lines = append(lines, memLines...)
-	}
+	memLines := pollMemory(g, dev, ts, c.log)
+	lines = append(lines, memLines...)
+
+	// ENTITY-SENSOR-MIB — use a short timeout so devices that don't support it
+	// (e.g. ProCurve) don't stall the poll.  Restore afterwards is unnecessary
+	// since nothing follows, but kept for clarity.
+	origTimeout, origRetries := g.Timeout, g.Retries
+	g.Timeout = 2 * time.Second
+	g.Retries = 1
+	typeByIdx, scaleByIdx, precByIdx, valByIdx, nameByIdx := collectEntitySensorMIB(g, c.log)
+	g.Timeout, g.Retries = origTimeout, origRetries
+	lines = append(lines, buildTemperatureLines(dev, ts, typeByIdx, scaleByIdx, precByIdx, valByIdx, nameByIdx)...)
+	lines = append(lines, buildOpticalPowerLines(dev, ts, typeByIdx, scaleByIdx, precByIdx, valByIdx, nameByIdx)...)
 
 	return lines, nil
 }
 
-// ─── SNMP helpers ─────────────────────────────────────────────────────────────
+// ─── Interface collection ─────────────────────────────────────────────────────
 
-func getSysUpTime(g *gosnmp.GoSNMP) (uint32, error) {
-	result, err := g.Get([]string{oidSysUpTime})
-	if err != nil || len(result.Variables) == 0 {
-		return 0, fmt.Errorf("get sysUpTime: %w", err)
+// pollInterfaces walks ifTable and ifXTable, merges by ifIndex, and returns
+// Prometheus lines for all interface metrics.  HC 64-bit counters from ifXTable
+// take precedence over 32-bit ifTable counters when both are present.
+func pollInterfaces(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logger) []string {
+	type ifRow struct {
+		descr        string
+		ifName       string // ifXTable col 1 — preferred display name
+		adminStatus  int
+		operStatus   int
+		speed        uint64 // ifSpeed bps (32-bit)
+		highSpeed    uint64 // ifHighSpeed Mbps (ifXTable col 15)
+		inOctets     uint64
+		inDiscards   uint64
+		inErrors     uint64
+		outOctets    uint64
+		outDiscards  uint64
+		outErrors    uint64
+		hcInOctets   uint64 // 64-bit HC counters (ifXTable)
+		hcOutOctets  uint64
 	}
-	v := result.Variables[0]
-	switch v.Type {
-	case gosnmp.TimeTicks:
-		return v.Value.(uint32), nil
-	default:
-		return 0, fmt.Errorf("unexpected type for sysUpTime: %v", v.Type)
-	}
-}
 
-func pollInterfaces(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logger) ([]string, error) {
-	// Walk ifDescr, ifOperStatus, ifInOctets, ifOutOctets.
-	type ifData struct {
-		descr      string
-		operStatus int
-		inOctets   uint64
-		outOctets  uint64
-	}
-	rows := make(map[int]*ifData)
-	ensure := func(idx int) *ifData {
+	rows := make(map[int]*ifRow)
+	ensure := func(idx int) *ifRow {
 		if r, ok := rows[idx]; ok {
 			return r
 		}
-		r := &ifData{}
+		r := &ifRow{}
 		rows[idx] = r
 		return r
 	}
 
-	walkAndApply := func(oidBase string, apply func(idx int, pdu gosnmp.SnmpPDU)) error {
-		return g.BulkWalk(oidBase, func(pdu gosnmp.SnmpPDU) error {
-			idx := trailingIndex(pdu.Name, oidBase)
-			if idx >= 0 {
-				apply(idx, pdu)
-			}
+	// Walk the full ifTable — one walk gets all columns.
+	if err := g.BulkWalk(oidIfTable, func(pdu gosnmp.SnmpPDU) error {
+		col, idx := splitColIdx(pdu.Name, oidIfTable)
+		if idx < 0 {
 			return nil
-		})
+		}
+		r := ensure(idx)
+		switch col {
+		case 2:  r.descr = pduString(pdu)
+		case 5:  r.speed = pduUint64(pdu)
+		case 7:  r.adminStatus = pduInt(pdu)
+		case 8:  r.operStatus = pduInt(pdu)
+		case 10: r.inOctets = pduUint64(pdu)
+		case 13: r.inDiscards = pduUint64(pdu)
+		case 14: r.inErrors = pduUint64(pdu)
+		case 16: r.outOctets = pduUint64(pdu)
+		case 19: r.outDiscards = pduUint64(pdu)
+		case 20: r.outErrors = pduUint64(pdu)
+		}
+		return nil
+	}); err != nil {
+		log.Debug().Err(err).Str("device_id", dev.ID).Msg("ifTable walk error")
 	}
 
-	// Non-critical walks: log on failure but continue — interface names and
-	// oper-status are useful but missing them doesn't corrupt counter data.
-	if err := walkAndApply(oidIfDescr, func(idx int, pdu gosnmp.SnmpPDU) {
-		ensure(idx).descr = pduString(pdu)
+	// Walk ifXTable for HC counters, ifName, and ifHighSpeed.
+	if err := g.BulkWalk(oidIfXTable, func(pdu gosnmp.SnmpPDU) error {
+		col, idx := splitColIdx(pdu.Name, oidIfXTable)
+		if idx < 0 {
+			return nil
+		}
+		r := ensure(idx)
+		switch col {
+		case 1:  r.ifName = pduString(pdu)
+		case 6:  r.hcInOctets = pduUint64(pdu)
+		case 10: r.hcOutOctets = pduUint64(pdu)
+		case 15: r.highSpeed = pduUint64(pdu)
+		}
+		return nil
 	}); err != nil {
-		log.Warn().Err(err).Str("device", dev.Hostname).Msg("ifDescr walk failed")
-	}
-	if err := walkAndApply(oidIfOperStatus, func(idx int, pdu gosnmp.SnmpPDU) {
-		ensure(idx).operStatus = pduInt(pdu)
-	}); err != nil {
-		log.Warn().Err(err).Str("device", dev.Hostname).Msg("ifOperStatus walk failed")
-	}
-
-	// Critical counter walks: return error on failure so the caller skips
-	// metric emission entirely — emitting zeros would look like traffic stopped
-	// and can trigger false bandwidth alerts.
-	if err := walkAndApply(oidIfInOctets, func(idx int, pdu gosnmp.SnmpPDU) {
-		ensure(idx).inOctets = pduUint64(pdu)
-	}); err != nil {
-		return nil, fmt.Errorf("ifInOctets walk: %w", err)
-	}
-	if err := walkAndApply(oidIfOutOctets, func(idx int, pdu gosnmp.SnmpPDU) {
-		ensure(idx).outOctets = pduUint64(pdu)
-	}); err != nil {
-		return nil, fmt.Errorf("ifOutOctets walk: %w", err)
+		log.Debug().Err(err).Str("device_id", dev.ID).Msg("ifXTable walk error")
 	}
 
 	var lines []string
 	for ifIdx, r := range rows {
-		name := r.descr
+		// Use ifName (ifXTable) when available; fall back to ifDescr.
+		name := r.ifName
+		if name == "" {
+			name = r.descr
+		}
 		if name == "" {
 			name = fmt.Sprintf("if%d", ifIdx)
 		}
-		labels := fmt.Sprintf(`device_id=%q,if_index="%d",if_name=%q,vendor=%q`,
-			dev.ID, ifIdx, name, dev.Vendor)
-		// Normalise oper_status to 1=up / 0=down (SNMP raw: 1=up, 2=down).
+
+		// Speed: prefer ifHighSpeed (Mbps → bps); fall back to 32-bit ifSpeed.
+		speedBPS := r.speed
+		if r.highSpeed > 0 {
+			speedBPS = r.highSpeed * 1_000_000
+		}
+
+		// Counters: prefer HC 64-bit; fall back to 32-bit when HC is zero.
+		inOctets  := pickCounter(r.hcInOctets, r.inOctets)
+		outOctets := pickCounter(r.hcOutOctets, r.outOctets)
+
+		// oper_status: normalise to 1=up / 0=down (SNMP: 1=up, 2=down).
 		operBit := 0
 		if r.operStatus == 1 {
 			operBit = 1
 		}
+
+		labels := fmt.Sprintf(`device_id=%q,if_index="%d",if_name=%q,vendor=%q`,
+			dev.ID, ifIdx, name, dev.Vendor)
+
 		lines = append(lines,
-			fmt.Sprintf("anthrimon_if_in_octets_total{%s} %d %d", labels, r.inOctets, ts),
-			fmt.Sprintf("anthrimon_if_out_octets_total{%s} %d %d", labels, r.outOctets, ts),
+			fmt.Sprintf("anthrimon_if_in_octets_total{%s} %d %d", labels, inOctets, ts),
+			fmt.Sprintf("anthrimon_if_out_octets_total{%s} %d %d", labels, outOctets, ts),
+			fmt.Sprintf("anthrimon_if_in_errors_total{%s} %d %d", labels, r.inErrors, ts),
+			fmt.Sprintf("anthrimon_if_out_errors_total{%s} %d %d", labels, r.outErrors, ts),
+			fmt.Sprintf("anthrimon_if_in_discards_total{%s} %d %d", labels, r.inDiscards, ts),
+			fmt.Sprintf("anthrimon_if_out_discards_total{%s} %d %d", labels, r.outDiscards, ts),
+			fmt.Sprintf("anthrimon_if_speed_bps{%s} %d %d", labels, speedBPS, ts),
 			fmt.Sprintf("anthrimon_if_oper_status{%s} %d %d", labels, operBit, ts),
 		)
 	}
-	return lines, nil
+	return lines
 }
+
+// pickCounter returns hc if it is non-zero, otherwise falls back to fallback.
+// Some devices populate the HC counters only after the 32-bit counter wraps,
+// so a zero HC value with a non-zero 32-bit value means use the 32-bit one.
+func pickCounter(hc, fallback uint64) uint64 {
+	if hc > 0 {
+		return hc
+	}
+	return fallback
+}
+
+// ─── CPU ──────────────────────────────────────────────────────────────────────
 
 func pollCPU(g *gosnmp.GoSNMP, dev hub.Device, ts int64) ([]string, error) {
 	var lines []string
@@ -283,15 +355,17 @@ func pollCPU(g *gosnmp.GoSNMP, dev hub.Device, ts int64) ([]string, error) {
 	err := g.BulkWalk(oidHrProcessorLoad, func(pdu gosnmp.SnmpPDU) error {
 		load := pduUint64(pdu)
 		lines = append(lines,
-			fmt.Sprintf(`anthrimon_device_cpu_util_pct{device_id=%q,cpu_index="%d",hostname=%q,vendor=%q} %d %d`,
-				dev.ID, idx, dev.Hostname, dev.Vendor, load, ts))
+			fmt.Sprintf(`anthrimon_device_cpu_util_pct{device_id=%q,cpu_index="%d"} %d %d`,
+				dev.ID, idx, load, ts))
 		idx++
 		return nil
 	})
 	return lines, err
 }
 
-func pollMemory(g *gosnmp.GoSNMP, dev hub.Device, ts int64) ([]string, error) {
+// ─── Memory ───────────────────────────────────────────────────────────────────
+
+func pollMemory(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logger) []string {
 	type storageRow struct {
 		storageType string
 		allocUnits  uint64
@@ -309,63 +383,246 @@ func pollMemory(g *gosnmp.GoSNMP, dev hub.Device, ts int64) ([]string, error) {
 		return r
 	}
 
-	_ = g.BulkWalk(oidHrStorageType, func(pdu gosnmp.SnmpPDU) error {
-		idx := trailingIndex(pdu.Name, oidHrStorageType)
-		if idx >= 0 {
-			ensure(idx).storageType = pduString(pdu)
+	if err := g.BulkWalk(oidHrStorageTable, func(pdu gosnmp.SnmpPDU) error {
+		col, idx := splitColIdx(pdu.Name, oidHrStorageTable)
+		if idx < 0 {
+			return nil
+		}
+		r := ensure(idx)
+		switch col {
+		case 2: r.storageType = pduString(pdu)
+		case 4: r.allocUnits = pduUint64(pdu)
+		case 5: r.size = pduUint64(pdu)
+		case 6: r.used = pduUint64(pdu)
 		}
 		return nil
-	})
-
-	_ = g.BulkWalk("1.3.6.1.2.1.25.2.3.1.4", func(pdu gosnmp.SnmpPDU) error {
-		idx := trailingIndex(pdu.Name, "1.3.6.1.2.1.25.2.3.1.4")
-		if idx >= 0 {
-			ensure(idx).allocUnits = pduUint64(pdu)
-		}
-		return nil
-	})
-	_ = g.BulkWalk(oidHrStorageSize, func(pdu gosnmp.SnmpPDU) error {
-		idx := trailingIndex(pdu.Name, oidHrStorageSize)
-		if idx >= 0 {
-			ensure(idx).size = pduUint64(pdu)
-		}
-		return nil
-	})
-	_ = g.BulkWalk(oidHrStorageUsed, func(pdu gosnmp.SnmpPDU) error {
-		idx := trailingIndex(pdu.Name, oidHrStorageUsed)
-		if idx >= 0 {
-			ensure(idx).used = pduUint64(pdu)
-		}
-		return nil
-	})
+	}); err != nil {
+		log.Debug().Err(err).Str("device_id", dev.ID).Msg("hrStorageTable walk error")
+	}
 
 	var lines []string
 	for _, r := range rows {
-		if !strings.HasSuffix(r.storageType, "2") { // .2 = hrStorageRam
+		if !strings.HasSuffix(r.storageType, oidHrStorageTypeRAMSuffix) {
 			continue
 		}
 		if r.size == 0 {
 			continue
 		}
 		totalBytes := r.size * r.allocUnits
-		usedBytes := r.used * r.allocUnits
-		ts2 := time.Now().UnixMilli()
+		usedBytes  := r.used * r.allocUnits
 		lines = append(lines,
-			fmt.Sprintf(`anthrimon_device_mem_total_bytes{device_id=%q,hostname=%q,vendor=%q,mem_type="ram"} %d %d`,
-				dev.ID, dev.Hostname, dev.Vendor, totalBytes, ts2),
-			fmt.Sprintf(`anthrimon_device_mem_used_bytes{device_id=%q,hostname=%q,vendor=%q,mem_type="ram"} %d %d`,
-				dev.ID, dev.Hostname, dev.Vendor, usedBytes, ts2),
+			fmt.Sprintf(`anthrimon_device_mem_total_bytes{device_id=%q,mem_type="ram"} %d %d`,
+				dev.ID, totalBytes, ts),
+			fmt.Sprintf(`anthrimon_device_mem_used_bytes{device_id=%q,mem_type="ram"} %d %d`,
+				dev.ID, usedBytes, ts),
 		)
 	}
-	return lines, nil
+	return lines
 }
 
-// ─── Credential + SNMP client helpers ────────────────────────────────────────
+// ─── Temperature ──────────────────────────────────────────────────────────────
 
-// pickSNMPCredential returns the highest-priority SNMP credential (type "snmpv2"
-// or "snmpv3") from the device's credential list, or nil if none.
-// normSNMPType normalises credential type strings so that both "snmpv2c" and
-// "snmp_v2c" (and similar) map to a canonical form for comparison.
+// buildTemperatureLines extracts celsius-type sensor readings from pre-collected
+// ENTITY-SENSOR-MIB data and returns anthrimon_device_temp_celsius metric lines.
+func buildTemperatureLines(
+	dev hub.Device, ts int64,
+	typeByIdx map[string]int, scaleByIdx map[string]int, precByIdx map[string]int,
+	valByIdx map[string]int, nameByIdx map[string]string,
+) []string {
+	var lines []string
+	for idx, rawVal := range valByIdx {
+		if typeByIdx[idx] != entSensorTypeCelsius {
+			continue
+		}
+		name := nameByIdx[idx]
+		if name == "" {
+			name = "Sensor " + idx
+		}
+
+		scaleEnum := scaleByIdx[idx]
+		if scaleEnum == 0 {
+			scaleEnum = entSensorScaleUnits
+		}
+		scaleExp  := (scaleEnum - entSensorScaleUnits) * 3
+		precision := precByIdx[idx]
+
+		celsius := float64(rawVal) * math.Pow10(scaleExp) / math.Pow10(precision)
+		celsius  = math.Round(celsius*10) / 10
+
+		lines = append(lines,
+			fmt.Sprintf(`anthrimon_device_temp_celsius{device_id=%q,sensor=%q} %.1f %d`,
+				dev.ID, escapeLabelValue(name), celsius, ts))
+	}
+	return lines
+}
+
+// ─── DOM optical power ────────────────────────────────────────────────────────
+
+// buildOpticalPowerLines extracts watts-type DOM sensor readings from pre-collected
+// ENTITY-SENSOR-MIB data, converts mW→dBm, and returns TX/RX optical power lines.
+func buildOpticalPowerLines(
+	dev hub.Device, ts int64,
+	typeByIdx map[string]int, scaleByIdx map[string]int, precByIdx map[string]int,
+	valByIdx map[string]int, nameByIdx map[string]string,
+) []string {
+	var lines []string
+	for idx, rawVal := range valByIdx {
+		if typeByIdx[idx] != entSensorTypeWatts {
+			continue
+		}
+		name := nameByIdx[idx]
+		if name == "" {
+			continue
+		}
+
+		lower := strings.ToLower(name)
+		if !strings.Contains(lower, "dom") &&
+			!strings.Contains(lower, "tx power") &&
+			!strings.Contains(lower, "rx power") {
+			continue
+		}
+
+		scaleEnum := scaleByIdx[idx]
+		if scaleEnum == 0 {
+			scaleEnum = entSensorScaleUnits
+		}
+		scaleExp  := (scaleEnum - entSensorScaleUnits) * 3
+		precision := precByIdx[idx]
+
+		watts := float64(rawVal) * math.Pow10(scaleExp) / math.Pow10(precision)
+		mw    := watts * 1000.0
+		var dbm float64
+		if mw > 0 {
+			dbm = 10.0 * math.Log10(mw)
+		} else {
+			dbm = -40.0 // clamp to -40 dBm for zero / negative readings
+		}
+		dbm = math.Round(dbm*1000) / 1000
+
+		metric := "anthrimon_if_dom_rx_power_dbm"
+		if isOpticalTX(lower) {
+			metric = "anthrimon_if_dom_tx_power_dbm"
+		}
+
+		ifaceName := extractIfaceName(name)
+		lines = append(lines,
+			fmt.Sprintf(`%s{device_id=%q,iface=%q} %.4f %d`,
+				metric, dev.ID, escapeLabelValue(ifaceName), dbm, ts))
+	}
+	return lines
+}
+
+// ─── ENTITY-SENSOR-MIB helpers ───────────────────────────────────────────────
+
+// collectEntitySensorMIB walks the ENTITY-SENSOR-MIB tables and ENTITY-MIB
+// name/description tables, returning maps keyed by sensor index.
+func collectEntitySensorMIB(g *gosnmp.GoSNMP, log zerolog.Logger) (
+	typeByIdx map[string]int,
+	scaleByIdx map[string]int,
+	precByIdx map[string]int,
+	valByIdx map[string]int,
+	nameByIdx map[string]string,
+) {
+	typeByIdx  = make(map[string]int)
+	scaleByIdx = make(map[string]int)
+	precByIdx  = make(map[string]int)
+	valByIdx   = make(map[string]int)
+	nameByIdx  = make(map[string]string)
+
+	// Sensor type — collect all, filter later.  If empty the device has no
+	// entity sensors; skip the remaining five walks entirely.
+	_ = g.BulkWalk(oidEntPhySensorType, func(pdu gosnmp.SnmpPDU) error {
+		if idx := trailingIndex(pdu.Name, oidEntPhySensorType); idx != "" {
+			typeByIdx[idx] = pduInt(pdu)
+		}
+		return nil
+	})
+	if len(typeByIdx) == 0 {
+		return
+	}
+
+	// Narrow walks to sensor type we care about.
+	_ = g.BulkWalk(oidEntPhySensorScale, func(pdu gosnmp.SnmpPDU) error {
+		if idx := trailingIndex(pdu.Name, oidEntPhySensorScale); idx != "" {
+			scaleByIdx[idx] = pduInt(pdu)
+		}
+		return nil
+	})
+	_ = g.BulkWalk(oidEntPhySensorPrecision, func(pdu gosnmp.SnmpPDU) error {
+		if idx := trailingIndex(pdu.Name, oidEntPhySensorPrecision); idx != "" {
+			precByIdx[idx] = pduInt(pdu)
+		}
+		return nil
+	})
+	_ = g.BulkWalk(oidEntPhySensorValue, func(pdu gosnmp.SnmpPDU) error {
+		if idx := trailingIndex(pdu.Name, oidEntPhySensorValue); idx != "" {
+			valByIdx[idx] = pduInt(pdu)
+		}
+		return nil
+	})
+
+	// Resolve physical names — try entPhysicalName first (often blank on Arista),
+	// fall back to entPhysicalDescr (populated on Arista EOS).
+	_ = g.BulkWalk(oidEntPhysicalName, func(pdu gosnmp.SnmpPDU) error {
+		if v := pduString(pdu); v != "" {
+			if idx := trailingIndex(pdu.Name, oidEntPhysicalName); idx != "" {
+				nameByIdx[idx] = v
+			}
+		}
+		return nil
+	})
+	_ = g.BulkWalk(oidEntPhysicalDescr, func(pdu gosnmp.SnmpPDU) error {
+		idx := trailingIndex(pdu.Name, oidEntPhysicalDescr)
+		if idx == "" {
+			return nil
+		}
+		if _, already := nameByIdx[idx]; !already {
+			if v := pduString(pdu); v != "" {
+				nameByIdx[idx] = v
+			}
+		}
+		return nil
+	})
+
+	return
+}
+
+// extractIfaceName extracts the interface name from sensor descriptions of the
+// form "... for <IfaceName>" (Arista EOS convention).
+// Falls back to the full sensor name if the pattern is not found.
+func extractIfaceName(sensorName string) string {
+	const sep = " for "
+	idx := strings.LastIndex(strings.ToLower(sensorName), sep)
+	if idx < 0 {
+		return sensorName
+	}
+	iface := strings.TrimSpace(sensorName[idx+len(sep):])
+	return strings.TrimRightFunc(iface, func(r rune) bool {
+		return !unicode.IsPrint(r) || r > 127
+	})
+}
+
+// isOpticalTX returns true when the sensor name indicates a TX direction.
+func isOpticalTX(lower string) bool {
+	return strings.Contains(lower, "tx") || strings.Contains(lower, "transmit")
+}
+
+// ─── SNMP client helpers ──────────────────────────────────────────────────────
+
+func getSysUpTime(g *gosnmp.GoSNMP) (uint32, error) {
+	result, err := g.Get([]string{oidSysUpTime})
+	if err != nil || result == nil || len(result.Variables) == 0 {
+		return 0, fmt.Errorf("get sysUpTime: %w", err)
+	}
+	v := result.Variables[0]
+	if v.Type == gosnmp.TimeTicks {
+		return v.Value.(uint32), nil
+	}
+	return 0, fmt.Errorf("unexpected type for sysUpTime: %v", v.Type)
+}
+
+// ─── Credential + SNMP client builders ───────────────────────────────────────
+
 func normSNMPType(t string) string {
 	return strings.ReplaceAll(strings.ToLower(t), "_", "")
 }
@@ -392,21 +649,21 @@ func buildSNMPClient(dev hub.Device, cred *hub.Credential, cfg config.SNMPConfig
 	}
 
 	g := &gosnmp.GoSNMP{
-		Target:    dev.MgmtIP,
-		Port:      uint16(port),
-		Timeout:   time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Retries:   cfg.Retries,
-		MaxOids:   60,
+		Target:  dev.MgmtIP,
+		Port:    uint16(port),
+		Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Retries: cfg.Retries,
+		MaxOids: 60,
 	}
 
 	switch normSNMPType(cred.Type) {
 	case "snmpv3":
 		g.Version = gosnmp.Version3
-		username, _ := cred.Data["username"].(string)
+		username,  _ := cred.Data["username"].(string)
 		authProto, _ := cred.Data["auth_protocol"].(string)
-		authPass, _ := cred.Data["auth_key"].(string)
+		authPass,  _ := cred.Data["auth_key"].(string)
 		privProto, _ := cred.Data["priv_protocol"].(string)
-		privPass, _ := cred.Data["priv_key"].(string)
+		privPass,  _ := cred.Data["priv_key"].(string)
 
 		msgFlags := gosnmp.NoAuthNoPriv
 		if authPass != "" {
@@ -418,40 +675,30 @@ func buildSNMPClient(dev hub.Device, cred *hub.Credential, cfg config.SNMPConfig
 
 		ap := gosnmp.NoAuth
 		switch strings.ToUpper(authProto) {
-		case "MD5":
-			ap = gosnmp.MD5
-		case "SHA":
-			ap = gosnmp.SHA
-		case "SHA224":
-			ap = gosnmp.SHA224
-		case "SHA256":
-			ap = gosnmp.SHA256
-		case "SHA384":
-			ap = gosnmp.SHA384
-		case "SHA512":
-			ap = gosnmp.SHA512
+		case "MD5":    ap = gosnmp.MD5
+		case "SHA":    ap = gosnmp.SHA
+		case "SHA224": ap = gosnmp.SHA224
+		case "SHA256": ap = gosnmp.SHA256
+		case "SHA384": ap = gosnmp.SHA384
+		case "SHA512": ap = gosnmp.SHA512
 		}
 
 		pp := gosnmp.NoPriv
 		switch strings.ToUpper(privProto) {
-		case "DES":
-			pp = gosnmp.DES
-		case "AES":
-			pp = gosnmp.AES
-		case "AES192":
-			pp = gosnmp.AES192
-		case "AES256":
-			pp = gosnmp.AES256
+		case "DES":    pp = gosnmp.DES
+		case "AES":    pp = gosnmp.AES
+		case "AES192": pp = gosnmp.AES192
+		case "AES256": pp = gosnmp.AES256
 		}
 
 		g.SecurityModel = gosnmp.UserSecurityModel
-		g.MsgFlags = msgFlags
+		g.MsgFlags      = msgFlags
 		g.SecurityParameters = &gosnmp.UsmSecurityParameters{
 			UserName:                 username,
 			AuthenticationProtocol:  ap,
 			AuthenticationPassphrase: authPass,
-			PrivacyProtocol:          pp,
-			PrivacyPassphrase:        privPass,
+			PrivacyProtocol:         pp,
+			PrivacyPassphrase:       privPass,
 		}
 	default: // snmpv2c
 		g.Version = gosnmp.Version2c
@@ -483,40 +730,193 @@ func pduInt(pdu gosnmp.SnmpPDU) int {
 
 func pduUint64(pdu gosnmp.SnmpPDU) uint64 {
 	switch v := pdu.Value.(type) {
-	case int:
-		return uint64(v)
-	case int32:
-		return uint64(v)
-	case int64:
-		return uint64(v)
-	case uint:
-		return uint64(v)
-	case uint32:
-		return uint64(v)
-	case uint64:
-		return v
+	case int:    return uint64(v)
+	case int32:  return uint64(v)
+	case int64:  return uint64(v)
+	case uint:   return uint64(v)
+	case uint32: return uint64(v)
+	case uint64: return v
 	}
 	return 0
 }
 
-// trailingIndex returns the integer at the end of pduName after oidBase.
-// E.g. trailingIndex("1.3.6.1.2.1.2.2.1.2.5", "1.3.6.1.2.1.2.2.1.2") == 5.
-// Returns -1 if the OID does not match or the trailing part is not a single integer.
-func trailingIndex(pduName, oidBase string) int {
+// ─── OID index helpers ────────────────────────────────────────────────────────
+
+// splitColIdx parses a table PDU name into (column, rowIndex).
+// For a table OID like "1.3.6.1.2.1.2.2.1", PDU names have the form
+// "<tableOID>.<col>.<idx>".  Returns (-1, -1) if the PDU is not under the table.
+func splitColIdx(pduName, tableOID string) (col, idx int) {
 	full := strings.TrimPrefix(pduName, ".")
-	base := strings.TrimPrefix(oidBase, ".")
+	base := strings.TrimPrefix(tableOID, ".")
 	if !strings.HasPrefix(full, base+".") {
-		return -1
+		return -1, -1
 	}
 	tail := full[len(base)+1:]
-	// Accept only simple single-component indexes.
+	dot := strings.Index(tail, ".")
+	if dot < 0 {
+		return -1, -1
+	}
+	if _, err := fmt.Sscanf(tail[:dot], "%d", &col); err != nil {
+		return -1, -1
+	}
+	rest := tail[dot+1:]
+	// Accept only simple single-component row indexes.
+	if strings.Contains(rest, ".") {
+		return col, -1
+	}
+	if _, err := fmt.Sscanf(rest, "%d", &idx); err != nil {
+		return col, -1
+	}
+	return col, idx
+}
+
+// trailingIndex returns the single trailing integer component of pduName after
+// stripping baseOID.  Returns "" if the name doesn't match or the tail is not
+// a simple integer.  Used for ENTITY-MIB and ENTITY-SENSOR-MIB where the row
+// index is a single physical entity index.
+func trailingIndex(pduName, baseOID string) string {
+	full := strings.TrimPrefix(pduName, ".")
+	base := strings.TrimPrefix(baseOID, ".")
+	if !strings.HasPrefix(full, base+".") {
+		return ""
+	}
+	tail := full[len(base)+1:]
 	if strings.Contains(tail, ".") {
-		return -1
+		return "" // multi-component index — not a simple entity index
 	}
-	var idx int
-	_, err := fmt.Sscanf(tail, "%d", &idx)
+	return tail
+}
+
+// escapeLabelValue escapes backslashes and double-quotes in a Prometheus label value.
+func escapeLabelValue(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return s
+}
+
+// ─── Live interface sampling ──────────────────────────────────────────────────
+
+// LiveSample is a raw SNMP counter snapshot for one interface at one instant.
+type LiveSample struct {
+	TS          int64  `json:"ts"`           // Unix milliseconds
+	InOctets    uint64 `json:"in_octets"`
+	OutOctets   uint64 `json:"out_octets"`
+	InErrors    uint64 `json:"in_errors"`
+	OutErrors   uint64 `json:"out_errors"`
+	InPkts      uint64 `json:"in_pkts"`
+	OutPkts     uint64 `json:"out_pkts"`
+	InDiscards  uint64 `json:"in_discards"`
+	OutDiscards uint64 `json:"out_discards"`
+}
+
+// LiveInterface streams raw SNMP counter snapshots for one interface every 3 s.
+// The returned channel is closed when ctx is cancelled, max samples (100) are
+// reached, or an SNMP error occurs.  Callers compute rates from successive samples.
+func (c *SNMPCollector) LiveInterface(ctx context.Context, deviceID string, ifIndex int) (<-chan LiveSample, error) {
+	c.mu.RLock()
+	var found hub.Device
+	var ok bool
+	for _, d := range c.devices {
+		if d.ID == deviceID {
+			found = d
+			ok = true
+			break
+		}
+	}
+	c.mu.RUnlock()
+
+	if !ok {
+		return nil, fmt.Errorf("device %s not known to snmp collector", deviceID)
+	}
+
+	cred := pickSNMPCredential(found.Credentials)
+	if cred == nil {
+		return nil, fmt.Errorf("no usable snmp credential for device %s", deviceID)
+	}
+
+	g, err := buildSNMPClient(found, cred, c.cfg)
 	if err != nil {
-		return -1
+		return nil, fmt.Errorf("build snmp client: %w", err)
 	}
-	return idx
+	if err := g.Connect(); err != nil {
+		return nil, fmt.Errorf("snmp connect %s: %w", found.MgmtIP, err)
+	}
+
+	oids := []string{
+		fmt.Sprintf("1.3.6.1.2.1.31.1.1.1.6.%d", ifIndex),  // ifHCInOctets
+		fmt.Sprintf("1.3.6.1.2.1.31.1.1.1.10.%d", ifIndex), // ifHCOutOctets
+		fmt.Sprintf("1.3.6.1.2.1.2.2.1.14.%d", ifIndex),    // ifInErrors
+		fmt.Sprintf("1.3.6.1.2.1.2.2.1.20.%d", ifIndex),    // ifOutErrors
+		fmt.Sprintf("1.3.6.1.2.1.31.1.1.1.7.%d", ifIndex),  // ifHCInUcastPkts
+		fmt.Sprintf("1.3.6.1.2.1.31.1.1.1.11.%d", ifIndex), // ifHCOutUcastPkts
+		fmt.Sprintf("1.3.6.1.2.1.2.2.1.13.%d", ifIndex),    // ifInDiscards
+		fmt.Sprintf("1.3.6.1.2.1.2.2.1.19.%d", ifIndex),    // ifOutDiscards
+	}
+
+	ch := make(chan LiveSample, 1)
+
+	go func() {
+		defer close(ch)
+		defer g.Conn.Close()
+
+		poll := func() (LiveSample, bool) {
+			result, err := g.Get(oids)
+			if err != nil || result == nil {
+				return LiveSample{}, false
+			}
+			s := LiveSample{TS: time.Now().UnixMilli()}
+			for i, v := range result.Variables {
+				val := pduUint64(v)
+				switch i {
+				case 0: s.InOctets = val
+				case 1: s.OutOctets = val
+				case 2: s.InErrors = val
+				case 3: s.OutErrors = val
+				case 4: s.InPkts = val
+				case 5: s.OutPkts = val
+				case 6: s.InDiscards = val
+				case 7: s.OutDiscards = val
+				}
+			}
+			return s, true
+		}
+
+		send := func(s LiveSample) bool {
+			select {
+			case <-ctx.Done():
+				return false
+			case ch <- s:
+				return true
+			}
+		}
+
+		// First sample immediately.
+		if s, ok := poll(); ok {
+			if !send(s) {
+				return
+			}
+		} else {
+			return
+		}
+
+		ticker := time.NewTicker(3 * time.Second)
+		defer ticker.Stop()
+
+		for i := 1; i < 100; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			s, ok := poll()
+			if !ok {
+				return
+			}
+			if !send(s) {
+				return
+			}
+		}
+	}()
+
+	return ch, nil
 }

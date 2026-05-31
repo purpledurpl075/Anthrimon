@@ -51,11 +51,14 @@ func (c *FlowCollector) UpdateDevices(devicesByIP map[string]string) {
 }
 
 // Run starts the NetFlow and sFlow UDP listeners and the flush loop.
-// It blocks until ctx is cancelled.
+// It blocks until ctx is cancelled and all listeners have exited.
 func (c *FlowCollector) Run(ctx context.Context) {
-	go c.listenUDP(ctx, c.cfg.NetflowAddr, "netflow")
-	go c.listenUDP(ctx, c.cfg.SflowAddr, "sflow")
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); c.listenUDP(ctx, c.cfg.NetflowAddr, "netflow") }()
+	go func() { defer wg.Done(); c.listenUDP(ctx, c.cfg.SflowAddr, "sflow") }()
 	c.flushLoop(ctx)
+	wg.Wait()
 }
 
 // listenUDP binds a UDP socket and dispatches each received datagram.
@@ -102,7 +105,7 @@ func (c *FlowCollector) listenUDP(ctx context.Context, addr, kind string) {
 		c.mu.Unlock()
 
 		if overflow {
-			c.flush(ctx)
+			go c.flush(context.Background())
 		}
 	}
 }
