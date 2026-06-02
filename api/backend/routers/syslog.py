@@ -9,9 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..dependencies import get_current_user, get_db
+from ..dependencies import get_db, get_current_principal, accessible_device_ids_subquery, Principal, assert_device_access
 from ..models.device import Device
-from ..models.tenant import User
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/syslog", tags=["syslog"])
@@ -58,22 +57,15 @@ async def _ch(query: str) -> list[dict]:
         raise HTTPException(status_code=503, detail="Syslog data unavailable") from exc
 
 
-async def _assert_device_in_tenant(device_id: str, tenant_id, db: AsyncSession) -> None:
-    """Raise 404 if device_id does not belong to this tenant."""
-    dev = (await db.execute(
-        select(Device).where(
-            Device.id == device_id,
-            Device.tenant_id == tenant_id,
-            Device.is_active == True,  # noqa: E712
-        )
-    )).scalar_one_or_none()
-    if dev is None:
-        raise HTTPException(status_code=404, detail="Device not found")
+async def _assert_device_in_tenant(device_id: str, principal: Principal, db: AsyncSession) -> None:
+    import uuid as _uuid
+    await assert_device_access(principal, _uuid.UUID(device_id), "readonly", db)
 
 
-async def _tenant_device_ids(tenant_id, db: AsyncSession) -> list[str]:
+async def _tenant_device_ids(principal: Principal, db: AsyncSession) -> list[str]:
     rows = (await db.execute(
-        select(Device.id).where(Device.tenant_id == tenant_id, Device.is_active == True)  # noqa: E712
+        accessible_device_ids_subquery(principal)
+        .where(Device.is_active == True)  # noqa: E712
     )).scalars().all()
     return [str(r) for r in rows]
 
@@ -94,14 +86,14 @@ def _quote_str(s: str) -> str:
 async def syslog_summary(
     device_id:    Optional[str] = Query(default=None),
     minutes:      int           = Query(default=60, ge=1, le=10080),
-    current_user: User          = Depends(get_current_user),
+    principal:    Principal = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> dict:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return {"total": 0, "by_severity": {}, "by_facility": {}, "active_devices": 0}
 
@@ -144,14 +136,14 @@ async def syslog_messages(
     minutes:      int           = Query(default=60,  ge=1, le=10080),
     limit:        int           = Query(default=200, ge=1, le=1000),
     offset:       int           = Query(default=0,   ge=0),
-    current_user: User          = Depends(get_current_user),
+    principal:    Principal = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> dict:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return {"messages": [], "total": 0}
 
@@ -192,7 +184,7 @@ async def syslog_messages(
     # Enrich with device names
     dev_rows = (await db.execute(
         select(Device.id, Device.hostname, Device.fqdn)
-        .where(Device.tenant_id == current_user.tenant_id)
+        .where(Device.tenant_id == principal.active_tenant_id)
     )).all()
     dev_name = {str(r.id): r.fqdn or r.hostname for r in dev_rows}
 
@@ -224,14 +216,14 @@ async def syslog_messages(
 async def syslog_rate(
     device_id:    Optional[str] = Query(default=None),
     hours:        int           = Query(default=24, ge=1, le=720),
-    current_user: User          = Depends(get_current_user),
+    principal:    Principal = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return []
 
@@ -263,14 +255,14 @@ async def top_programs(
     device_id:    Optional[str] = Query(default=None),
     minutes:      int           = Query(default=60,  ge=1, le=10080),
     limit:        int           = Query(default=15,  ge=1, le=50),
-    current_user: User          = Depends(get_current_user),
+    principal:    Principal = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return []
 
@@ -301,10 +293,10 @@ async def top_programs(
 async def top_devices(
     minutes:      int = Query(default=60, ge=1, le=10080),
     limit:        int = Query(default=10, ge=1, le=50),
-    current_user: User          = Depends(get_current_user),
+    principal:    Principal = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
-    device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+    device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return []
 
@@ -324,7 +316,7 @@ async def top_devices(
 
     dev_rows = (await db.execute(
         select(Device.id, Device.hostname, Device.fqdn, Device.device_type)
-        .where(Device.tenant_id == current_user.tenant_id)
+        .where(Device.tenant_id == principal.active_tenant_id)
     )).all()
     dev_info = {str(r.id): {"name": r.fqdn or r.hostname, "type": r.device_type} for r in dev_rows}
 
@@ -343,10 +335,10 @@ async def top_devices(
 
 @router.get("/heatmap", summary="Message count by hour-of-day × day-of-week (last 7 days)")
 async def syslog_heatmap(
-    current_user: User          = Depends(get_current_user),
+    principal:    Principal = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
-    device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+    device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return []
 

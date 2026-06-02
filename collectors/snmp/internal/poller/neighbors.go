@@ -25,7 +25,15 @@ func PollLLDPNeighbors(s *client.Session, deviceID uuid.UUID) ([]*model.LLDPNeig
 		return neighbors, nil
 	}
 	neighbors, _, err = pollLLDPNS(s, deviceID, oid.LLDPRemTableIETF, oid.LLDPLocPortIETF, oid.LLDPRemManAddrIETF)
-	return neighbors, err
+	if err != nil {
+		return nil, err
+	}
+	// Return non-nil empty slice to signal "poll ran, no neighbors" so the
+	// writer can prune stale rows.  nil means "poll did not run / SNMP failed".
+	if neighbors == nil {
+		neighbors = []*model.LLDPNeighbor{}
+	}
+	return neighbors, nil
 }
 
 func pollLLDPNS(s *client.Session, deviceID uuid.UUID, remBase, locBase, manBase string) ([]*model.LLDPNeighbor, bool, error) {
@@ -307,8 +315,13 @@ func parseLLDPCapabilities(b []byte) []string {
 // ifByIndex maps ifIndex → ifName, built from the interface poll in the same cycle.
 func PollCDPNeighbors(s *client.Session, deviceID uuid.UUID, ifByIndex map[int]string) ([]*model.CDPNeighbor, error) {
 	pdus, err := s.BulkWalkAll(oid.CDPCacheTable)
-	if err != nil || len(pdus) == 0 {
+	if err != nil {
 		return nil, err
+	}
+	if len(pdus) == 0 {
+		// Successful poll, no CDP neighbors.  Non-nil empty slice signals the
+		// writer to prune stale rows (nil would mean "poll did not run").
+		return []*model.CDPNeighbor{}, nil
 	}
 
 	type rowKey struct{ ifIdx, devIdx int }

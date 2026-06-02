@@ -1,4 +1,5 @@
 from .admin import router as admin_router
+from .platform import router as platform_router
 from .users import router as users_router
 from .topology import router as topology_router
 from .auth import router as auth_router
@@ -17,9 +18,12 @@ from .config_mgmt import router as config_router
 from .collectors import router as collectors_router
 from .bgp import router as bgp_router
 from .api_methods import router as api_methods_router
+from .clients import router as clients_router
+from .search import router as search_router
 
-__all__ = ["admin_router", "auth_router", "bgp_router", "collectors_router", "config_router",
+__all__ = ["admin_router", "platform_router", "auth_router", "bgp_router", "collectors_router", "config_router",
            "flow_router", "syslog_router", "topology_router", "channels_router",
            "credentials_router", "maintenance_router", "devices_router",
            "discovery_router", "interfaces_router", "alerts_router",
-           "overview_router", "policies_router", "users_router", "api_methods_router"]
+           "overview_router", "policies_router", "users_router", "api_methods_router",
+           "clients_router", "search_router"]

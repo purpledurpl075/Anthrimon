@@ -126,6 +126,10 @@ def _build_title(rule: AlertRule, breach: Breach) -> str:
             f"high RTT {breach.value:.1f} ms (threshold {breach.extra.get('threshold_ms','?')} ms)"
             if breach.extra.get("metric") == "rtt_ms"
             else f"packet loss {breach.value:.1f}% (threshold {breach.extra.get('threshold_pct','?')}%)"
+        ) if breach.value is not None else (
+            f"high RTT — ms (threshold {breach.extra.get('threshold_ms','?')} ms)"
+            if breach.extra.get("metric") == "rtt_ms"
+            else f"packet loss —% (threshold {breach.extra.get('threshold_pct','?')}%)"
         ),
     }
     return f"{base}: {metric_labels.get(rule.metric, rule.metric)}"
@@ -190,7 +194,7 @@ class AlertEngine:
                 logger.error("alert_engine_error", error=str(exc), exc_info=True)
 
     async def _housekeeping(self, platform: dict) -> None:
-        """Periodic cleanup: auto-close stale alerts + prune state dicts."""
+        """Periodic cleanup: auto-close stale alerts + purge old alerts + prune state dicts."""
         # ── Auto-close stale open alerts ─────────────────────────────────────
         auto_close_days = int(platform.get("auto_close_stale_days", 0))
         if auto_close_days > 0:
@@ -210,6 +214,25 @@ class AlertEngine:
                     await db.commit()
             except Exception as exc:
                 logger.error("housekeeping_error", error=str(exc))
+
+        # ── Purge old resolved/expired alerts ────────────────────────────────
+        # Only purges non-open alerts; open/acknowledged alerts are never deleted
+        # by retention — they must be resolved or auto-closed first.
+        retention_days = int(platform.get("alert_retention_days", 0))
+        if retention_days > 0:
+            try:
+                async with AsyncSessionLocal() as db:
+                    result = await db.execute(text(f"""
+                        DELETE FROM alerts
+                        WHERE status IN ('resolved','expired','suppressed')
+                          AND triggered_at < now() - interval '{retention_days} days'
+                    """))
+                    deleted = result.rowcount
+                    if deleted:
+                        logger.info("alert_retention_purged", count=deleted, days=retention_days)
+                    await db.commit()
+            except Exception as exc:
+                logger.error("housekeeping_retention_error", error=str(exc))
 
         # ── Prune in-memory state for deleted devices / retired rules ─────────
         # Any fingerprint not touched within _STATE_TTL is for a condition that
@@ -323,7 +346,7 @@ class AlertEngine:
                 b = await eval_mem(db, device, rule.condition, rule.threshold or 0)
                 if b: breaches.append(b)
             elif rule.metric == "device_down":
-                b = await eval_device_down(db, device)
+                b = await eval_device_down(db, device, platform)
                 if b: breaches.append(b)
             elif rule.metric == "interface_down":
                 excluded_iface_ids = set(exclusions.get("interface_ids", []))

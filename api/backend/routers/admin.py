@@ -15,9 +15,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import crypto
 from ..alerting.notify import _build_test_email, _send_smtp
-from ..dependencies import get_db, require_role
+from ..dependencies import get_db, require_role, require_tenant_user
 from ..models.settings import SystemSetting
-from ..models.tenant import User
+from ..models.tenant import Tenant, User
 from ..schemas.admin import SmtpSettingsRead, SmtpSettingsWrite
 
 logger = structlog.get_logger(__name__)
@@ -39,6 +39,7 @@ PLATFORM_DEFAULTS: dict = {
     "default_renotify_s":            3600,
     "max_alerts_per_device_per_hour": 0,
     "auto_close_stale_days":         0,
+    "device_down_stale_min_s":       45,
     # Notifications
     "notifications_paused":          False,
     "notifications_paused_until":    None,
@@ -64,6 +65,7 @@ class PlatformSettingsRead(BaseModel):
     default_renotify_s:             int
     max_alerts_per_device_per_hour: int
     auto_close_stale_days:          int
+    device_down_stale_min_s:        int
     notifications_paused:           bool
     notifications_paused_until:     Optional[str]
     business_hours_enabled:         bool
@@ -84,6 +86,7 @@ class PlatformSettingsWrite(BaseModel):
     default_renotify_s:             int        = 3600
     max_alerts_per_device_per_hour: int        = 0
     auto_close_stale_days:          int        = 0
+    device_down_stale_min_s:        int        = 45
     notifications_paused:           bool       = False
     notifications_paused_until:     Optional[str] = None
     business_hours_enabled:         bool       = False
@@ -197,7 +200,7 @@ async def _get_smtp_row(db: AsyncSession) -> SystemSetting | None:
 
 @router.get("/settings/smtp", response_model=SmtpSettingsRead)
 async def get_smtp_settings(
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> SmtpSettingsRead:
     row = await _get_smtp_row(db)
@@ -217,7 +220,7 @@ async def get_smtp_settings(
 @router.put("/settings/smtp", response_model=SmtpSettingsRead)
 async def update_smtp_settings(
     body: SmtpSettingsWrite,
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> SmtpSettingsRead:
     row = await _get_smtp_row(db)
@@ -264,7 +267,7 @@ async def update_smtp_settings(
 @router.post("/settings/smtp/test", status_code=204, response_model=None,
              summary="Send a test email using the current SMTP settings")
 async def test_smtp_settings(
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     row = await _get_smtp_row(db)
@@ -297,7 +300,7 @@ async def _smtp_config_from_row(row: SystemSetting) -> dict:
 @router.get("/settings/email-template", response_model=EmailTemplateRead,
             summary="Get the HTML email alert template")
 async def get_email_template(
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> EmailTemplateRead:
     row = (await db.execute(
@@ -313,7 +316,7 @@ async def get_email_template(
             summary="Save the HTML email alert template")
 async def save_email_template(
     body: EmailTemplateWrite,
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> EmailTemplateRead:
     row = (await db.execute(
@@ -331,7 +334,7 @@ async def save_email_template(
 @router.delete("/settings/email-template", status_code=204, response_model=None,
                summary="Reset the HTML email template to default")
 async def reset_email_template(
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     row = (await db.execute(
@@ -468,7 +471,7 @@ class EmailTemplateStatus(BaseModel):
 @router.get("/settings/email-templates", response_model=list[EmailTemplateStatus],
             summary="List all email templates (default + per-metric)")
 async def list_email_templates(
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> list[EmailTemplateStatus]:
     _METRIC_LABELS = {
@@ -512,7 +515,7 @@ async def list_email_templates(
             summary="Get email template for a specific alert metric")
 async def get_metric_template(
     metric: str,
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> EmailTemplateRead:
     if metric not in ALERT_METRICS:
@@ -534,7 +537,7 @@ async def get_metric_template(
 async def save_metric_template(
     metric: str,
     body: EmailTemplateWrite,
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> EmailTemplateRead:
     if metric not in ALERT_METRICS:
@@ -555,7 +558,7 @@ async def save_metric_template(
                summary="Reset a metric email template to default")
 async def reset_metric_template(
     metric: str,
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     if metric not in ALERT_METRICS:
@@ -566,6 +569,243 @@ async def reset_metric_template(
     if row:
         await db.delete(row)
         await db.commit()
+
+
+# ── Tenant settings ────────────────────────────────────────────────────────────
+
+class TenantSettingsRead(BaseModel):
+    name:          str
+    slug:          str
+    contact_name:  Optional[str] = None
+    contact_email: Optional[str] = None
+    notes:         Optional[str] = None
+
+
+class TenantSettingsWrite(BaseModel):
+    name:          str
+    contact_name:  Optional[str] = None
+    contact_email: Optional[str] = None
+    notes:         Optional[str] = None
+
+
+@router.get("/tenant", response_model=TenantSettingsRead,
+            summary="Get current tenant identity and site settings")
+async def get_tenant_settings(
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
+    db: AsyncSession = Depends(get_db),
+) -> TenantSettingsRead:
+    tenant = (await db.execute(
+        select(Tenant).where(Tenant.id == current_user.tenant_id)
+    )).scalar_one()
+    s = tenant.settings or {}
+    return TenantSettingsRead(
+        name=tenant.name,
+        slug=tenant.slug,
+        contact_name=s.get("contact_name"),
+        contact_email=s.get("contact_email"),
+        notes=s.get("notes"),
+    )
+
+
+@router.put("/tenant", response_model=TenantSettingsRead,
+            summary="Update current tenant identity")
+async def save_tenant_settings(
+    body: TenantSettingsWrite,
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
+    db: AsyncSession = Depends(get_db),
+) -> TenantSettingsRead:
+    tenant = (await db.execute(
+        select(Tenant).where(Tenant.id == current_user.tenant_id)
+    )).scalar_one()
+    tenant.name = body.name.strip()
+    tenant.settings = {
+        **(tenant.settings or {}),
+        "contact_name":  body.contact_name or None,
+        "contact_email": body.contact_email or None,
+        "notes":         body.notes or None,
+    }
+    await db.commit()
+    await db.refresh(tenant)
+    s = tenant.settings or {}
+    return TenantSettingsRead(
+        name=tenant.name,
+        slug=tenant.slug,
+        contact_name=s.get("contact_name"),
+        contact_email=s.get("contact_email"),
+        notes=s.get("notes"),
+    )
+
+
+# ── Sites ──────────────────────────────────────────────────────────────────────
+
+import uuid as _uuid
+from sqlalchemy import func as sqla_func
+
+from ..models.device import Device
+from ..models.site import Site
+
+
+class SiteRead(BaseModel):
+    id:           _uuid.UUID
+    name:         str
+    description:  Optional[str] = None
+    location:     Optional[str] = None
+    device_count: int = 0
+
+
+class SiteWrite(BaseModel):
+    name:        str
+    description: Optional[str] = None
+    location:    Optional[str] = None
+
+
+@router.get("/sites", response_model=list[SiteRead], summary="List sites for this tenant")
+async def list_sites(
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
+    db: AsyncSession = Depends(get_db),
+) -> list[SiteRead]:
+    rows = (await db.execute(
+        select(
+            Site.id, Site.name, Site.description, Site.location,
+            sqla_func.count(Device.id).label("device_count"),
+        )
+        .outerjoin(Device, Device.site_id == Site.id)
+        .where(Site.tenant_id == current_user.tenant_id)
+        .group_by(Site.id)
+        .order_by(Site.name)
+    )).all()
+    return [SiteRead(id=r.id, name=r.name, description=r.description,
+                     location=r.location, device_count=r.device_count) for r in rows]
+
+
+@router.post("/sites", response_model=SiteRead, status_code=201, summary="Create a site")
+async def create_site(
+    body: SiteWrite,
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
+    db: AsyncSession = Depends(get_db),
+) -> SiteRead:
+    site = Site(
+        tenant_id=current_user.tenant_id,
+        name=body.name.strip(),
+        description=body.description or None,
+        location=body.location or None,
+    )
+    db.add(site)
+    await db.commit()
+    await db.refresh(site)
+    return SiteRead(id=site.id, name=site.name, description=site.description,
+                    location=site.location, device_count=0)
+
+
+@router.patch("/sites/{site_id}", response_model=SiteRead, summary="Update a site")
+async def update_site(
+    site_id: _uuid.UUID,
+    body: SiteWrite,
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
+    db: AsyncSession = Depends(get_db),
+) -> SiteRead:
+    site = (await db.execute(
+        select(Site).where(Site.id == site_id, Site.tenant_id == current_user.tenant_id)
+    )).scalar_one_or_none()
+    if not site:
+        raise HTTPException(status_code=404, detail="Site not found")
+    site.name = body.name.strip()
+    site.description = body.description or None
+    site.location = body.location or None
+    await db.commit()
+    await db.refresh(site)
+    count = (await db.execute(
+        select(sqla_func.count(Device.id)).where(Device.site_id == site.id)
+    )).scalar_one()
+    return SiteRead(id=site.id, name=site.name, description=site.description,
+                    location=site.location, device_count=count)
+
+
+@router.delete("/sites/{site_id}", status_code=204, response_model=None, summary="Delete a site")
+async def delete_site(
+    site_id: _uuid.UUID,
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    site = (await db.execute(
+        select(Site).where(Site.id == site_id, Site.tenant_id == current_user.tenant_id)
+    )).scalar_one_or_none()
+    if not site:
+        raise HTTPException(status_code=404, detail="Site not found")
+    await db.delete(site)
+    await db.commit()
+
+
+class SiteDevicesWrite(BaseModel):
+    device_ids: list[_uuid.UUID]
+
+
+@router.get("/sites/{site_id}/devices", summary="List devices in a site")
+async def get_site_devices(
+    site_id: _uuid.UUID,
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    site = (await db.execute(
+        select(Site).where(Site.id == site_id, Site.tenant_id == current_user.tenant_id)
+    )).scalar_one_or_none()
+    if not site:
+        raise HTTPException(status_code=404, detail="Site not found")
+    devices = (await db.execute(
+        select(Device.id, Device.hostname, Device.fqdn, Device.mgmt_ip, Device.vendor)
+        .where(Device.site_id == site_id)
+        .order_by(Device.hostname)
+    )).all()
+    return [{"id": str(d.id), "hostname": d.hostname, "fqdn": d.fqdn,
+             "mgmt_ip": str(d.mgmt_ip) if d.mgmt_ip else None, "vendor": d.vendor}
+            for d in devices]
+
+
+@router.put("/sites/{site_id}/devices", summary="Set devices assigned to a site")
+async def set_site_devices(
+    site_id: _uuid.UUID,
+    body: SiteDevicesWrite,
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    site = (await db.execute(
+        select(Site).where(Site.id == site_id, Site.tenant_id == current_user.tenant_id)
+    )).scalar_one_or_none()
+    if not site:
+        raise HTTPException(status_code=404, detail="Site not found")
+    # Clear previous assignments for this site, then set new ones
+    await db.execute(
+        Device.__table__.update()
+        .where(Device.site_id == site_id)
+        .values(site_id=None)
+    )
+    if body.device_ids:
+        await db.execute(
+            Device.__table__.update()
+            .where(
+                Device.id.in_(body.device_ids),
+                Device.tenant_id == current_user.tenant_id,
+            )
+            .values(site_id=site_id)
+        )
+    await db.commit()
+    return {"assigned": len(body.device_ids)}
+
+
+@router.get("/devices/unassigned", summary="List devices not assigned to any site")
+async def get_unassigned_devices(
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    devices = (await db.execute(
+        select(Device.id, Device.hostname, Device.fqdn, Device.mgmt_ip, Device.vendor, Device.site_id)
+        .where(Device.tenant_id == current_user.tenant_id)
+        .order_by(Device.hostname)
+    )).all()
+    return [{"id": str(d.id), "hostname": d.hostname, "fqdn": d.fqdn,
+             "mgmt_ip": str(d.mgmt_ip) if d.mgmt_ip else None,
+             "vendor": d.vendor, "site_id": str(d.site_id) if d.site_id else None}
+            for d in devices]
 
 
 # ── Platform settings ──────────────────────────────────────────────────────────
@@ -582,7 +822,7 @@ async def load_platform_settings(db: AsyncSession) -> dict:
 @router.get("/settings/platform", response_model=PlatformSettingsRead,
             summary="Get platform-wide configuration")
 async def get_platform_settings(
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> PlatformSettingsRead:
     cfg = await load_platform_settings(db)
@@ -593,7 +833,7 @@ async def get_platform_settings(
             summary="Save platform-wide configuration")
 async def save_platform_settings(
     body: PlatformSettingsWrite,
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> PlatformSettingsRead:
     value = body.model_dump()
@@ -624,9 +864,10 @@ async def _ch_admin(query: str) -> list[dict]:
 
 @router.get("/data/stats", summary="Storage usage stats across alerts, flow, and syslog")
 async def data_stats(
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
+    import re as _re
     from sqlalchemy import func, text
     from ..models.alert import Alert
 
@@ -643,32 +884,51 @@ async def data_stats(
         "SELECT pg_size_pretty(pg_total_relation_size('config_backups'))"
     ))).scalar_one()
 
-    ch_flow = await _ch_admin(
-        "SELECT count() AS rows, formatReadableSize(sum(bytes_on_disk)) AS size "
-        "FROM system.parts WHERE database='default' AND table='flow_records' AND active=1"
-    )
-    ch_flow_oldest = await _ch_admin(
-        "SELECT min(flow_start) AS oldest FROM flow_records"
-    )
-    ch_syslog = await _ch_admin(
-        "SELECT count() AS rows, formatReadableSize(sum(bytes_on_disk)) AS size "
-        "FROM system.parts WHERE database='default' AND table='syslog_messages' AND active=1"
-    )
-    ch_syslog_oldest = await _ch_admin(
-        "SELECT min(received_at) AS oldest FROM syslog_messages"
-    )
-    ch_ttls = await _ch_admin(
-        "SELECT name, engine_full FROM system.tables "
-        "WHERE database='default' AND name IN ('flow_records','syslog_messages')"
-    )
+    platform = await load_platform_settings(db)
 
-    import re as _re
+    # ClickHouse queries — degrade gracefully if unavailable
+    ch_flow: list[dict] = []
+    ch_flow_oldest: list[dict] = []
+    ch_syslog: list[dict] = []
+    ch_syslog_oldest: list[dict] = []
+    ch_ttls: list[dict] = []
+    try:
+        ch_flow = await _ch_admin(
+            "SELECT count() AS rows, formatReadableSize(sum(bytes_on_disk)) AS size "
+            "FROM system.parts WHERE database='default' AND table='flow_records' AND active=1"
+        )
+        ch_flow_oldest = await _ch_admin(
+            "SELECT min(flow_start) AS oldest FROM flow_records"
+        )
+        ch_syslog = await _ch_admin(
+            "SELECT count() AS rows, formatReadableSize(sum(bytes_on_disk)) AS size "
+            "FROM system.parts WHERE database='default' AND table='syslog_messages' AND active=1"
+        )
+        ch_syslog_oldest = await _ch_admin(
+            "SELECT min(received_at) AS oldest FROM syslog_messages"
+        )
+        ch_ttls = await _ch_admin(
+            "SELECT name, engine_full FROM system.tables "
+            "WHERE database='default' AND name IN ('flow_records','syslog_messages')"
+        )
+    except Exception as exc:
+        logger.warning("data_stats_clickhouse_unavailable", error=str(exc))
+
     def _ttl(engine_full: str) -> int:
         m = _re.search(r'toIntervalDay\((\d+)\)', engine_full)
         return int(m.group(1)) if m else 90
 
+    def _oldest(rows: list[dict], key: str) -> Optional[str]:
+        """Return ISO timestamp or None; treats epoch/zero as absent."""
+        val = rows[0].get(key) if rows else None
+        if not val:
+            return None
+        s = str(val)
+        if s.startswith("0000") or s.startswith("1970-01-01 00:00:00") or s == "1970-01-01T00:00:00":
+            return None
+        return s
+
     ttl_map = {r["name"]: _ttl(r["engine_full"]) for r in ch_ttls}
-    platform = await load_platform_settings(db)
 
     return {
         "alerts": {
@@ -680,13 +940,13 @@ async def data_stats(
         "flow": {
             "rows":           int(ch_flow[0]["rows"]) if ch_flow else 0,
             "size":           ch_flow[0].get("size", "0 B") if ch_flow else "0 B",
-            "oldest":         ch_flow_oldest[0].get("oldest") if ch_flow_oldest else None,
+            "oldest":         _oldest(ch_flow_oldest, "oldest"),
             "retention_days": ttl_map.get("flow_records", 90),
         },
         "syslog": {
             "rows":           int(ch_syslog[0]["rows"]) if ch_syslog else 0,
             "size":           ch_syslog[0].get("size", "0 B") if ch_syslog else "0 B",
-            "oldest":         ch_syslog_oldest[0].get("oldest") if ch_syslog_oldest else None,
+            "oldest":         _oldest(ch_syslog_oldest, "oldest"),
             "retention_days": ttl_map.get("syslog_messages", 90),
         },
         "config": {
@@ -703,7 +963,7 @@ class RetentionUpdate(BaseModel):
 @router.put("/data/retention/alerts", summary="Set alert retention days")
 async def set_alert_retention(
     body: RetentionUpdate,
-    current_user: User = Depends(require_role("admin", "superadmin")),
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     if not 1 <= body.retention_days <= 3650:
@@ -722,22 +982,34 @@ async def set_alert_retention(
 
 
 @router.put("/data/retention/flow", summary="Set flow data TTL in ClickHouse")
-async def set_flow_retention(body: RetentionUpdate, _: User = Depends(require_role("admin", "superadmin"))) -> dict:
+async def set_flow_retention(body: RetentionUpdate, _: User = Depends(require_tenant_user("tenant_admin"))) -> dict:
     if not 1 <= body.retention_days <= 3650:
         raise HTTPException(status_code=400, detail="retention_days must be 1–3650")
     d = body.retention_days
+    errors: list[str] = []
     for table, col in [("flow_records","flow_start"),("flow_agg_1min","minute"),
                        ("flow_agg_proto_5min","bucket"),("flow_agg_asn_5min","bucket"),
                        ("flow_agg_iface_1hr","hour")]:
-        await _ch_admin(f"ALTER TABLE {table} MODIFY TTL toDateTime({col}) + toIntervalDay({d})")
+        try:
+            await _ch_admin(f"ALTER TABLE {table} MODIFY TTL toDateTime({col}) + toIntervalDay({d})")
+        except Exception as exc:
+            errors.append(f"{table}: {exc}")
+    if errors:
+        raise HTTPException(status_code=502, detail="Some TTLs failed to update: " + "; ".join(errors))
     return {"retention_days": d}
 
 
 @router.put("/data/retention/syslog", summary="Set syslog data TTL in ClickHouse")
-async def set_syslog_retention(body: RetentionUpdate, _: User = Depends(require_role("admin", "superadmin"))) -> dict:
+async def set_syslog_retention(body: RetentionUpdate, _: User = Depends(require_tenant_user("tenant_admin"))) -> dict:
     if not 1 <= body.retention_days <= 3650:
         raise HTTPException(status_code=400, detail="retention_days must be 1–3650")
     d = body.retention_days
+    errors: list[str] = []
     for table, col in [("syslog_messages","ts"),("syslog_agg_1hr","hour")]:
-        await _ch_admin(f"ALTER TABLE {table} MODIFY TTL toDateTime({col}) + toIntervalDay({d})")
+        try:
+            await _ch_admin(f"ALTER TABLE {table} MODIFY TTL toDateTime({col}) + toIntervalDay({d})")
+        except Exception as exc:
+            errors.append(f"{table}: {exc}")
+    if errors:
+        raise HTTPException(status_code=502, detail="Some TTLs failed to update: " + "; ".join(errors))
     return {"retention_days": d}

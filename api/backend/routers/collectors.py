@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import AsyncSessionLocal
 
-from ..dependencies import get_current_user, get_db, require_role
+from ..dependencies import get_current_user, get_db, require_tenant_user
 from ..models.api_method import DeviceApiMethod
 from ..models.credential import Credential, DeviceCredential
 from ..models.device import Device
@@ -338,7 +338,7 @@ async def list_collectors(
              status_code=status.HTTP_201_CREATED)
 async def create_collector(
     body:         CollectorCreate,
-    current_user: User         = Depends(require_role("admin", "superadmin")),
+    current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     token, token_hash = _generate_token()
@@ -376,7 +376,7 @@ def _binary_info(arch: str) -> dict:
 
 @router.get("/builds/status", summary="Check whether collector binaries have been built")
 async def collector_build_status(
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
 ) -> dict:
     """Return build state for every supported architecture plus toolchain availability."""
     return {
@@ -388,7 +388,7 @@ async def collector_build_status(
 
 @router.post("/builds", summary="Build collector binaries for all supported architectures")
 async def build_collector_binaries(
-    _: User = Depends(require_role("admin", "superadmin")),
+    _: User = Depends(require_tenant_user("tenant_admin")),
 ) -> dict:
     """Compile linux/amd64 and linux/arm64 collector binaries on the hub.
 
@@ -610,7 +610,7 @@ class CollectorUpdate(BaseModel):
 async def patch_collector(
     collector_id: str,
     body:         CollectorUpdate,
-    current_user: User         = Depends(require_role("admin", "superadmin")),
+    current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     c = (await db.execute(
@@ -652,7 +652,7 @@ async def _ch_query(query: str) -> list[dict]:
 @router.get("/{collector_id}/details", summary="Collector details + assigned devices")
 async def collector_details(
     collector_id: str,
-    current_user: User         = Depends(require_role("admin", "superadmin")),
+    current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     c = (await db.execute(
@@ -692,7 +692,7 @@ async def collector_logs(
     collector_id: str,
     limit:   int = Query(default=100, ge=1, le=500),
     minutes: int = Query(default=120, ge=1, le=10080),
-    current_user: User         = Depends(require_role("admin", "superadmin")),
+    current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     c = (await db.execute(
@@ -734,7 +734,7 @@ async def collector_own_logs(
     collector_id: str,
     limit:   int = Query(default=200, ge=1, le=1000),
     minutes: int = Query(default=120, ge=1, le=10080),
-    current_user: User         = Depends(require_role("admin", "superadmin")),
+    current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     c = (await db.execute(
@@ -764,7 +764,7 @@ async def collector_own_logs(
                summary="Revoke (active) or permanently delete (revoked) a collector")
 async def delete_collector(
     collector_id: str,
-    current_user: User         = Depends(require_role("admin", "superadmin")),
+    current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> None:
     c = (await db.execute(
@@ -806,7 +806,7 @@ async def delete_collector(
 @router.post("/{collector_id}/update", summary="Trigger a hot-patch self-update on a remote collector")
 async def trigger_collector_update(
     collector_id: str,
-    current_user: User         = Depends(require_role("admin", "superadmin")),
+    current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     """Signal a running collector to download and install the latest built binary.
@@ -884,7 +884,7 @@ async def trigger_collector_update(
 @router.post("/{collector_id}/refresh", summary="Trigger an immediate device-config refresh on a remote collector")
 async def trigger_collector_refresh(
     collector_id: str,
-    current_user: User         = Depends(require_role("admin", "superadmin")),
+    current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     """Tell a running collector to re-fetch its device list from the hub immediately.
@@ -948,7 +948,7 @@ async def trigger_collector_refresh(
 @router.post("/{collector_id}/token", summary="Regenerate registration token")
 async def regenerate_token(
     collector_id: str,
-    current_user: User         = Depends(require_role("admin", "superadmin")),
+    current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     c = (await db.execute(
@@ -1077,7 +1077,7 @@ async def download_collector_package(
     collector_id: str,
     arch:         str = "amd64",
     token:        str = "",
-    current_user: User = Depends(require_role("admin", "superadmin")),
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """Return a zip containing the collector binary, pre-filled collector.yaml,
@@ -1321,6 +1321,31 @@ _MEM_USED_RE  = re.compile(rb'anthrimon_device_mem_used_bytes\{[^}]*device_id="(
 _MEM_TOTAL_RE = re.compile(rb'anthrimon_device_mem_total_bytes\{[^}]*device_id="([0-9a-f-]{36})"[^}]*mem_type="ram"[^}]*\}\s+([\d.]+)')
 _UPTIME_RE = re.compile(rb'anthrimon_uptime_seconds\{[^}]*device_id="([0-9a-f-]{36})"[^}]*\}\s+([\d.]+)')
 
+# Interface status metrics — emitted by remote collector only.
+# Labels are fixed-order: device_id, if_index, if_name, vendor.
+_IF_OPER_RE  = re.compile(rb'anthrimon_if_oper_status\{[^}]*device_id="([0-9a-f-]{36})"[^}]*if_index="(\d+)"[^}]*\}\s+([01])')
+_IF_ADMIN_RE = re.compile(rb'anthrimon_if_admin_status\{[^}]*device_id="([0-9a-f-]{36})"[^}]*if_index="(\d+)"[^}]*\}\s+([01])')
+
+# STP metrics — emitted by remote collector (BRIDGE-MIB).
+# state: 1=disabled,2=blocking,3=listening,4=learning,5=forwarding
+# role:  0=unknown,1=disabled,2=root,3=designated,4=alternate,5=backup  (RFC 4188)
+_IF_STP_STATE_RE = re.compile(rb'anthrimon_if_stp_state\{[^}]*device_id="([0-9a-f-]{36})"[^}]*if_index="(\d+)"[^}]*\}\s+(\d+)')
+_IF_STP_ROLE_RE  = re.compile(rb'anthrimon_if_stp_role\{[^}]*device_id="([0-9a-f-]{36})"[^}]*if_index="(\d+)"[^}]*\}\s+(\d+)')
+
+# Device sysinfo line emitted once per poll cycle by the remote collector.
+# Labels: device_id, sysname (hostname from SNMP sysName OID), sysdescr.
+_DEVICE_INFO_RE = re.compile(
+    rb'anthrimon_device_info\{[^}]*device_id="([0-9a-f-]{36})"[^}]*'
+    rb'sysdescr="((?:[^"\\]|\\.)*)"[^}]*sysname="([^"]*)"'
+)
+
+# Active failure report: emitted by remote collector when a device returns 0
+# metrics (SNMP timed out / connect failed).  Hub sets status='unreachable'
+# immediately, bypassing the passive stale-threshold detection.
+_DEVICE_UNREACHABLE_RE = re.compile(
+    rb'anthrimon_device_unreachable\{[^}]*device_id="([0-9a-f-]{36})"[^}]*\}'
+)
+
 
 def _parse_health_from_metrics(body: bytes) -> dict[str, dict]:
     """Extract per-device health snapshots from a Prometheus exposition body."""
@@ -1381,19 +1406,29 @@ async def ingest_metrics(
         )).all()
     }
 
+    # Collect device IDs that the collector actively flagged as unreachable.
+    # These must be excluded from the last_polled/status='up' batch and instead
+    # have status set to 'unreachable' immediately — no waiting for stale threshold.
+    unreachable_ids: set[str] = set()
+    for m in _DEVICE_UNREACHABLE_RE.finditer(body):
+        did = m.group(1).decode()
+        if did in allowed_device_ids:
+            unreachable_ids.add(did)
+
     # Stamp last_polled + status='up' for devices actually assigned to this collector.
+    # Devices flagged unreachable are excluded here; they get their own update below.
     device_ids = {m.group(1).decode() for m in _DEVICE_ID_RE.finditer(body)}
     valid_ids: list[uuid.UUID] = []
     for did in device_ids:
-        if did not in allowed_device_ids:
+        if did not in allowed_device_ids or did in unreachable_ids:
             continue
         try:
             valid_ids.append(uuid.UUID(did))
         except ValueError:
             pass
 
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     if valid_ids:
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
         await db.execute(
             update(Device)
             .where(
@@ -1402,6 +1437,26 @@ async def ingest_metrics(
             )
             .values(status="up", last_polled=now, last_seen=now)
         )
+
+    # Set status='unreachable' for actively-reported failures.
+    # last_polled is intentionally NOT updated — keeps it stale as a secondary
+    # indicator and avoids resetting the stale clock on a failed poll.
+    if unreachable_ids:
+        unreachable_uuids: list[uuid.UUID] = []
+        for did in unreachable_ids:
+            try:
+                unreachable_uuids.append(uuid.UUID(did))
+            except ValueError:
+                pass
+        if unreachable_uuids:
+            await db.execute(
+                update(Device)
+                .where(
+                    Device.id.in_(unreachable_uuids),
+                    Device.tenant_id == collector.tenant_id,
+                )
+                .values(status="unreachable")
+            )
 
     # Parse and upsert device_health_latest for remote-collector-managed devices.
     # The local SNMP collector writes this table directly; remote collectors must
@@ -1442,6 +1497,129 @@ async def ingest_metrics(
                     "uptime":   uptime,
                 },
             )
+
+    # Parse and batch-update interface oper/admin status in PostgreSQL.
+    # The local SNMP collector writes these directly; remote collectors post them
+    # as Prometheus metrics and we sync them here so alerting stays accurate.
+    if_oper:  dict[tuple[str, int], int] = {}
+    if_admin: dict[tuple[str, int], int] = {}
+
+    for m in _IF_OPER_RE.finditer(body):
+        did, idx, bit = m.group(1).decode(), int(m.group(2)), int(m.group(3))
+        if did in allowed_device_ids:
+            if_oper[(did, idx)] = bit
+
+    for m in _IF_ADMIN_RE.finditer(body):
+        did, idx, bit = m.group(1).decode(), int(m.group(2)), int(m.group(3))
+        if did in allowed_device_ids:
+            if_admin[(did, idx)] = bit
+
+    all_iface_keys = set(if_oper.keys()) | set(if_admin.keys())
+    if all_iface_keys:
+        by_dev: dict[str, dict[int, tuple]] = {}
+        for did_str, idx in all_iface_keys:
+            oper_bit  = if_oper.get((did_str, idx))
+            admin_bit = if_admin.get((did_str, idx))
+            oper_val  = "up" if oper_bit  == 1 else ("down" if oper_bit  == 0 else None)
+            admin_val = "up" if admin_bit == 1 else ("down" if admin_bit == 0 else None)
+            by_dev.setdefault(did_str, {})[idx] = (oper_val, admin_val)
+
+        for did_str, iface_map in by_dev.items():
+            idxs   = list(iface_map.keys())
+            opers  = [v[0] for v in iface_map.values()]
+            admins = [v[1] for v in iface_map.values()]
+            await db.execute(
+                text("""
+                    UPDATE interfaces
+                    SET oper_status  = COALESCE(CAST(v.oper  AS if_status), oper_status),
+                        admin_status = COALESCE(CAST(v.admin AS if_status), admin_status)
+                    FROM (
+                        SELECT unnest(CAST(:idxs AS integer[])) AS if_index,
+                               unnest(CAST(:opers AS text[]))   AS oper,
+                               unnest(CAST(:admins AS text[]))  AS admin
+                    ) v
+                    WHERE interfaces.device_id = CAST(:did AS uuid)
+                      AND interfaces.if_index  = v.if_index
+                """),
+                {"did": did_str, "idxs": idxs, "opers": opers, "admins": admins},
+            )
+
+    # Parse STP state/role from remote-collector BRIDGE-MIB metrics and upsert
+    # interface_stp.  Uses interface if_index to resolve interface_id in the DB.
+    _STP_STATE = {1: "disabled", 2: "blocking", 3: "listening", 4: "learning", 5: "forwarding"}
+    _STP_ROLE  = {0: "unknown", 1: "disabled", 2: "root", 3: "designated", 4: "alternate", 5: "backup"}
+
+    stp_states: dict[tuple[str, int], str] = {}
+    stp_roles:  dict[tuple[str, int], str] = {}
+
+    for m in _IF_STP_STATE_RE.finditer(body):
+        did, idx, val = m.group(1).decode(), int(m.group(2)), int(m.group(3))
+        if did in allowed_device_ids:
+            state_str = _STP_STATE.get(val)
+            if state_str:
+                stp_states[(did, idx)] = state_str
+
+    for m in _IF_STP_ROLE_RE.finditer(body):
+        did, idx, val = m.group(1).decode(), int(m.group(2)), int(m.group(3))
+        if did in allowed_device_ids:
+            stp_roles[(did, idx)] = _STP_ROLE.get(val, "unknown")
+
+    all_stp_keys = set(stp_states.keys()) | set(stp_roles.keys())
+    if all_stp_keys:
+        stp_by_dev: dict[str, dict[int, tuple[str | None, str | None]]] = {}
+        for did_str, idx in all_stp_keys:
+            stp_by_dev.setdefault(did_str, {})[idx] = (
+                stp_states.get((did_str, idx)),
+                stp_roles.get((did_str, idx)),
+            )
+
+        for did_str, stp_map in stp_by_dev.items():
+            idxs   = list(stp_map.keys())
+            states = [v[0] for v in stp_map.values()]
+            roles  = [v[1] for v in stp_map.values()]
+            await db.execute(
+                text("""
+                    INSERT INTO interface_stp (interface_id, stp_state, stp_role, updated_at)
+                    SELECT i.id,
+                           v.state,
+                           v.role,
+                           NOW()
+                    FROM (
+                        SELECT unnest(CAST(:idxs AS integer[])) AS if_index,
+                               unnest(CAST(:states AS text[]))  AS state,
+                               unnest(CAST(:roles AS text[]))   AS role
+                    ) v
+                    JOIN interfaces i
+                      ON i.device_id = CAST(:did AS uuid)
+                     AND i.if_index  = v.if_index
+                    WHERE v.state IS NOT NULL
+                    ON CONFLICT (interface_id) DO UPDATE SET
+                        stp_state  = EXCLUDED.stp_state,
+                        stp_role   = EXCLUDED.stp_role,
+                        updated_at = EXCLUDED.updated_at
+                """),
+                {"did": did_str, "idxs": idxs, "states": states, "roles": roles},
+            )
+
+    # Parse anthrimon_device_info lines and backfill hostname / sys_description
+    # for devices where the hub has no hostname yet (e.g. newly-registered vEOS nodes).
+    # Only updates when the DB hostname is blank — never overwrites a user-set value.
+    for m in _DEVICE_INFO_RE.finditer(body):
+        did      = m.group(1).decode()
+        sysdescr = m.group(2).decode().encode('raw_unicode_escape').decode('unicode_escape')
+        sysname  = m.group(3).decode()
+        if did not in allowed_device_ids or not sysname:
+            continue
+        await db.execute(
+            text("""
+                UPDATE devices
+                SET hostname        = :sysname,
+                    sys_description = :sysdescr
+                WHERE id = CAST(:did AS uuid)
+                  AND (hostname IS NULL OR hostname = '')
+            """),
+            {"did": did, "sysname": sysname, "sysdescr": sysdescr},
+        )
 
     await db.commit()
 
@@ -1862,4 +2040,96 @@ async def ingest_isis_neighbors(
             logger.warning("isis_ingest_failed", collector=collector.name,
                            device_id=did, error=str(exc))
 
+    return {"written": written}
+
+
+@router.post("/stp-ports",
+             summary="Ingest per-interface STP state collected by the remote collector")
+async def ingest_stp_ports(
+    request: Request,
+    db:      AsyncSession = Depends(get_db),
+) -> dict:
+    """Accept a list of STP port records from a remote collector and upsert them
+    into interface_stp.  Each record: device_id, if_index (int), stp_state (str),
+    stp_role (str).
+    """
+    collector = await _require_collector(request, db)
+    records   = await request.json()
+    if not records:
+        return {"written": 0}
+
+    allowed = {
+        str(did) for (did,) in (await db.execute(
+            select(Device.id).where(
+                Device.collector_id == collector.id,
+                Device.is_active == True,  # noqa: E712
+            )
+        )).all()
+    }
+
+    by_device: dict[str, list[dict]] = {}
+    for r in records:
+        did = r.get("device_id")
+        if did and did in allowed:
+            by_device.setdefault(did, []).append(r)
+
+    written = 0
+    for did_str, ports in by_device.items():
+        # eAPI records use if_name; SNMP records use if_index.  Handle both.
+        by_name  = [p for p in ports if p.get("if_name") and not p.get("if_index")]
+        by_index = [p for p in ports if p.get("if_index")]
+
+        if by_name:
+            names  = [p["if_name"]      for p in by_name]
+            states = [p.get("stp_state") for p in by_name]
+            roles  = [p.get("stp_role")  for p in by_name]
+            await db.execute(
+                text("""
+                    INSERT INTO interface_stp (interface_id, stp_state, stp_role, updated_at)
+                    SELECT i.id, v.state, v.role, NOW()
+                    FROM (
+                        SELECT unnest(CAST(:names AS text[])) AS if_name,
+                               unnest(CAST(:states AS text[])) AS state,
+                               unnest(CAST(:roles AS text[]))  AS role
+                    ) v
+                    JOIN interfaces i
+                      ON i.device_id = CAST(:did AS uuid)
+                     AND i.name      = v.if_name
+                    WHERE v.state IS NOT NULL
+                    ON CONFLICT (interface_id) DO UPDATE SET
+                        stp_state  = EXCLUDED.stp_state,
+                        stp_role   = EXCLUDED.stp_role,
+                        updated_at = EXCLUDED.updated_at
+                """),
+                {"did": did_str, "names": names, "states": states, "roles": roles},
+            )
+            written += len(by_name)
+
+        if by_index:
+            idxs   = [p["if_index"]      for p in by_index]
+            states = [p.get("stp_state") for p in by_index]
+            roles  = [p.get("stp_role")  for p in by_index]
+            await db.execute(
+                text("""
+                    INSERT INTO interface_stp (interface_id, stp_state, stp_role, updated_at)
+                    SELECT i.id, v.state, v.role, NOW()
+                    FROM (
+                        SELECT unnest(CAST(:idxs AS integer[])) AS if_index,
+                               unnest(CAST(:states AS text[]))  AS state,
+                               unnest(CAST(:roles AS text[]))   AS role
+                    ) v
+                    JOIN interfaces i
+                      ON i.device_id = CAST(:did AS uuid)
+                     AND i.if_index  = v.if_index
+                    WHERE v.state IS NOT NULL
+                    ON CONFLICT (interface_id) DO UPDATE SET
+                        stp_state  = EXCLUDED.stp_state,
+                        stp_role   = EXCLUDED.stp_role,
+                        updated_at = EXCLUDED.updated_at
+                """),
+                {"did": did_str, "idxs": idxs, "states": states, "roles": roles},
+            )
+            written += len(by_index)
+
+    await db.commit()
     return {"written": written}

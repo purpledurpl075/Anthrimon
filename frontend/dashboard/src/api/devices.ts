@@ -21,6 +21,8 @@ export interface HealthHistory {
   temp_series: Record<string, [number, number][]>
   dom_tx:      Record<string, [number, number][]>
   dom_rx:      Record<string, [number, number][]>
+  dom_tx_now:  Record<string, number>
+  dom_rx_now:  Record<string, number>
 }
 
 export const fetchDeviceHealthHistory = (id: string, hours: number) =>

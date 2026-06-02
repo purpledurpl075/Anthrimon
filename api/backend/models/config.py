@@ -42,6 +42,7 @@ class CompliancePolicy(Base):
 
     id:              Mapped[uuid.UUID]          = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id:       Mapped[uuid.UUID]          = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="RESTRICT"), nullable=False)
+    site_id:         Mapped[Optional[uuid.UUID]]= mapped_column(UUID(as_uuid=True), ForeignKey("sites.id", ondelete="SET NULL"))
     name:            Mapped[str]               = mapped_column(Text, nullable=False)
     description:     Mapped[Optional[str]]     = mapped_column(Text)
     is_enabled:      Mapped[bool]              = mapped_column(Boolean, nullable=False, default=True)

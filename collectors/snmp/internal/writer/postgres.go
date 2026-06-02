@@ -120,13 +120,15 @@ func (w *PostgresWriter) Handle(ctx context.Context, result *poller.PollResult) 
 		}
 	}
 
-	if len(result.LLDPNeighbors) > 0 {
+	// nil = poll did not run (SNMP failed) — preserve existing data.
+	// non-nil (even empty) = poll ran successfully — sync and prune stale rows.
+	if result.LLDPNeighbors != nil {
 		if err := w.upsertLLDPNeighbors(ctx, result.DeviceID, result.LLDPNeighbors); err != nil {
 			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert lldp neighbors failed")
 		}
 	}
 
-	if len(result.CDPNeighbors) > 0 {
+	if result.CDPNeighbors != nil {
 		if err := w.upsertCDPNeighbors(ctx, result.DeviceID, result.CDPNeighbors); err != nil {
 			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert cdp neighbors failed")
 		}
@@ -620,6 +622,7 @@ func (w *PostgresWriter) upsertMACEntries(ctx context.Context, deviceID uuid.UUI
 // ── Neighbours ────────────────────────────────────────────────────────────────
 
 func (w *PostgresWriter) upsertLLDPNeighbors(ctx context.Context, deviceID uuid.UUID, neighbors []*model.LLDPNeighbor) error {
+	pollAt := time.Now()
 	batch := &pgx.Batch{}
 	for _, n := range neighbors {
 		capsJSON, _ := json.Marshal(n.Capabilities)
@@ -632,8 +635,9 @@ func (w *PostgresWriter) upsertLLDPNeighbors(ctx context.Context, deviceID uuid.
 				device_id, local_port_name,
 				remote_chassis_id_subtype, remote_chassis_id,
 				remote_port_id_subtype, remote_port_id, remote_port_desc,
-				remote_system_name, remote_mgmt_ip, remote_system_capabilities
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+				remote_system_name, remote_mgmt_ip, remote_system_capabilities,
+				updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 			ON CONFLICT (device_id, local_port_name, remote_chassis_id) DO UPDATE SET
 				remote_chassis_id_subtype    = EXCLUDED.remote_chassis_id_subtype,
 				remote_port_id_subtype       = EXCLUDED.remote_port_id_subtype,
@@ -642,26 +646,37 @@ func (w *PostgresWriter) upsertLLDPNeighbors(ctx context.Context, deviceID uuid.
 				remote_system_name           = EXCLUDED.remote_system_name,
 				remote_mgmt_ip               = EXCLUDED.remote_mgmt_ip,
 				remote_system_capabilities   = EXCLUDED.remote_system_capabilities,
-				updated_at                   = NOW()
+				updated_at                   = EXCLUDED.updated_at
 		`,
 			deviceID, n.LocalPort,
 			safeStr(n.ChassisIDSubtype), safeStr(n.ChassisID),
 			safeStr(n.PortIDSubtype), safeStr(n.PortID), safeStr(n.PortDesc),
-			safeStr(n.SystemName), mgmtIP, capsJSON,
+			safeStr(n.SystemName), mgmtIP, capsJSON, pollAt,
 		)
 	}
 
 	br := w.pool.SendBatch(ctx, batch)
-	defer br.Close()
 	for i := 0; i < batch.Len(); i++ {
 		if _, err := br.Exec(); err != nil {
 			w.log.Error().Err(err).Msg("lldp neighbor batch exec error")
 		}
 	}
+	if err := br.Close(); err != nil {
+		w.log.Error().Err(err).Str("device_id", deviceID.String()).Msg("lldp neighbor batch close error")
+	}
+
+	// Purge neighbors not seen in this poll cycle — they were physically removed.
+	if _, err := w.pool.Exec(ctx,
+		`DELETE FROM lldp_neighbors WHERE device_id = $1 AND updated_at < $2`,
+		deviceID, pollAt,
+	); err != nil {
+		w.log.Error().Err(err).Str("device_id", deviceID.String()).Msg("purge stale lldp neighbors failed")
+	}
 	return nil
 }
 
 func (w *PostgresWriter) upsertCDPNeighbors(ctx context.Context, deviceID uuid.UUID, neighbors []*model.CDPNeighbor) error {
+	pollAt := time.Now()
 	batch := &pgx.Batch{}
 	for _, n := range neighbors {
 		capsJSON, _ := json.Marshal(n.Capabilities)
@@ -677,8 +692,9 @@ func (w *PostgresWriter) upsertCDPNeighbors(ctx context.Context, deviceID uuid.U
 			INSERT INTO cdp_neighbors (
 				device_id, local_port_name,
 				remote_device_id, remote_port_id, remote_mgmt_ip,
-				remote_platform, remote_capabilities, native_vlan, duplex
-			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+				remote_platform, remote_capabilities, native_vlan, duplex,
+				updated_at
+			) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 			ON CONFLICT (device_id, local_port_name, remote_device_id) DO UPDATE SET
 				remote_port_id       = EXCLUDED.remote_port_id,
 				remote_mgmt_ip       = EXCLUDED.remote_mgmt_ip,
@@ -686,20 +702,30 @@ func (w *PostgresWriter) upsertCDPNeighbors(ctx context.Context, deviceID uuid.U
 				remote_capabilities  = EXCLUDED.remote_capabilities,
 				native_vlan          = EXCLUDED.native_vlan,
 				duplex               = EXCLUDED.duplex,
-				updated_at           = NOW()
+				updated_at           = EXCLUDED.updated_at
 		`,
 			deviceID, n.LocalPort,
 			safeStr(n.RemoteDevice), safeStr(n.RemotePort), mgmtIP,
-			safeStr(n.Platform), capsJSON, nativeVLAN, safeStr(n.Duplex),
+			safeStr(n.Platform), capsJSON, nativeVLAN, safeStr(n.Duplex), pollAt,
 		)
 	}
 
 	br := w.pool.SendBatch(ctx, batch)
-	defer br.Close()
 	for i := 0; i < batch.Len(); i++ {
 		if _, err := br.Exec(); err != nil {
 			w.log.Error().Err(err).Msg("cdp neighbor batch exec error")
 		}
+	}
+	if err := br.Close(); err != nil {
+		w.log.Error().Err(err).Str("device_id", deviceID.String()).Msg("cdp neighbor batch close error")
+	}
+
+	// Purge neighbors not seen in this poll cycle — they were physically removed.
+	if _, err := w.pool.Exec(ctx,
+		`DELETE FROM cdp_neighbors WHERE device_id = $1 AND updated_at < $2`,
+		deviceID, pollAt,
+	); err != nil {
+		w.log.Error().Err(err).Str("device_id", deviceID.String()).Msg("purge stale cdp neighbors failed")
 	}
 	return nil
 }

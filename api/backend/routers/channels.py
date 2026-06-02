@@ -8,11 +8,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..alerting.notify import _build_test_email, _load_smtp, _send_smtp
+from ..alerting.notify import (
+    _build_test_email, _load_smtp, _send_smtp,
+    _test_slack, _test_webhook, _test_pagerduty, _test_teams,
+    _log_send,
+)
 from ..dependencies import get_current_user, get_db, require_role
-from ..models.alert import NotificationChannel
+from ..models.alert import NotificationChannel, NotificationSendLog
 from ..models.tenant import User
-from ..schemas.alert import NotificationChannelCreate, NotificationChannelRead, NotificationChannelUpdate
+from ..schemas.alert import (
+    NotificationChannelCreate, NotificationChannelRead, NotificationChannelUpdate,
+    NotificationSendLogRead,
+)
 from ..schemas.common import PaginatedResponse
 
 logger = structlog.get_logger(__name__)
@@ -103,20 +110,77 @@ async def test_channel(
     if not channel.is_enabled:
         raise HTTPException(status_code=400, detail="Channel is disabled")
 
-    if channel.type != "email":
-        raise HTTPException(status_code=400, detail=f"Test not supported for type '{channel.type}'")
+    from sqlalchemy import select as _select
+    from ..models.settings import SystemSetting as _SS
+    prow = (await db.execute(_select(_SS).where(_SS.key == "platform"))).scalar_one_or_none()
+    platform_name: str = (prow.value.get("platform_name", "Anthrimon") if prow else "Anthrimon")
 
-    smtp = await _load_smtp(db)
-    if smtp is None:
-        raise HTTPException(status_code=400, detail="SMTP server is not configured — set it in Administration > SMTP Server")
+    try:
+        if channel.type == "email":
+            smtp = await _load_smtp(db)
+            if smtp is None:
+                raise HTTPException(status_code=400,
+                    detail="SMTP server is not configured — set it in Administration > SMTP Server")
+            recipients: list[str] = channel.config.get("to", [])
+            if not recipients:
+                raise HTTPException(status_code=400, detail="Channel has no recipients configured")
+            subject, body = _build_test_email()
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, _send_smtp, smtp, recipients, subject, body)
 
-    recipients: list[str] = channel.config.get("to", [])
-    if not recipients:
-        raise HTTPException(status_code=400, detail="Channel has no recipients configured")
+        elif channel.type == "slack":
+            webhook_url = channel.config.get("webhook_url", "")
+            if not webhook_url:
+                raise HTTPException(status_code=400, detail="Slack webhook URL is not configured")
+            await _test_slack(webhook_url, platform_name)
 
-    subject, body = _build_test_email()
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _send_smtp, smtp, recipients, subject, body)
+        elif channel.type == "webhook":
+            url = channel.config.get("url", "")
+            if not url:
+                raise HTTPException(status_code=400, detail="Webhook URL is not configured")
+            await _test_webhook(url, channel.config.get("secret"), platform_name)
+
+        elif channel.type == "pagerduty":
+            key = channel.config.get("integration_key", "")
+            if not key:
+                raise HTTPException(status_code=400, detail="PagerDuty integration key is not configured")
+            await _test_pagerduty(key, platform_name)
+
+        elif channel.type == "teams":
+            webhook_url = channel.config.get("webhook_url", "")
+            if not webhook_url:
+                raise HTTPException(status_code=400, detail="Teams webhook URL is not configured")
+            await _test_teams(webhook_url, platform_name)
+
+        else:
+            raise HTTPException(status_code=400, detail=f"Test not supported for type '{channel.type}'")
+
+        await _log_send(channel.id, channel.tenant_id, None, "test", "success", None, 1)
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        await _log_send(channel.id, channel.tenant_id, None, "test", "failure", str(exc), 1)
+        raise HTTPException(status_code=502, detail=f"Test failed: {exc}") from exc
+
+
+@router.get("/notification-channels/{channel_id}/send-log",
+            response_model=list[NotificationSendLogRead])
+async def get_channel_send_log(
+    channel_id: uuid.UUID,
+    limit: int = Query(default=50, ge=1, le=200),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[NotificationSendLogRead]:
+    await _get(channel_id, current_user.tenant_id, db)
+    from sqlalchemy import desc
+    rows = (await db.execute(
+        select(NotificationSendLog)
+        .where(NotificationSendLog.channel_id == channel_id)
+        .order_by(desc(NotificationSendLog.sent_at))
+        .limit(limit)
+    )).scalars().all()
+    return [NotificationSendLogRead.model_validate(r) for r in rows]
 
 
 async def _get(channel_id: uuid.UUID, tenant_id: uuid.UUID, db: AsyncSession) -> NotificationChannel:

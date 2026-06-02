@@ -164,21 +164,33 @@ async def _compute_interface_down(db: AsyncSession, iface_map: dict, valid_devs:
     oper_status is written as 1=up, 0=down.  avg_over_time gives the
     fraction of samples that were up — exactly normal_up_pct.
     """
+    # clamp_max(..., 1) guards against stale series that stored raw ifOperStatus
+    # values (1=up, 6=notPresent) instead of the normalised 0/1 bit, which would
+    # otherwise corrupt the baseline with avg values > 1.
     rows_avg = await _vm_query(
-        f"avg_over_time(anthrimon_if_oper_status[{_WINDOW}:{_STEP}])"
+        f"clamp_max(avg_over_time(anthrimon_if_oper_status[{_WINDOW}:{_STEP}]), 1)"
     )
-    count = 0
+    # When duplicate label sets exist for the same (device_id, if_name) — e.g. one
+    # series with a vendor label and one without — take the maximum so a fully-up
+    # series wins over a stale all-zeros series.
+    best: dict[tuple[str, str], float] = {}
     for r in rows_avg:
         device_id = r["metric"].get("device_id", "")
         if_name   = r["metric"].get("if_name", "")
         if not device_id or not if_name:
             continue
+        try:
+            up_pct = min(1.0, float(r["value"][1]))
+        except (KeyError, IndexError, ValueError):
+            continue
+        key = (device_id, if_name)
+        if up_pct > best.get(key, -1):
+            best[key] = up_pct
+
+    count = 0
+    for (device_id, if_name), up_pct in best.items():
         iface_id = iface_map.get((device_id, if_name))
         if iface_id is None:
-            continue
-        try:
-            up_pct = float(r["value"][1])
-        except (KeyError, IndexError, ValueError):
             continue
         await _upsert(
             db, device_id, "interface_down", iface_id, label=if_name,

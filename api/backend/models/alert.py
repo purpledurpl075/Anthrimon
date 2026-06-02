@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Integer, String, Text, func
-from sqlalchemy.dialects.postgresql import ENUM as PgEnum, INET, JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, ENUM as PgEnum, INET, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
@@ -21,6 +21,7 @@ class NotificationChannel(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    site_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("sites.id", ondelete="SET NULL"))
     name: Mapped[str] = mapped_column(Text, nullable=False)
     type: Mapped[str] = mapped_column(
         PgEnum("email", "slack", "webhook", "pagerduty", "teams",
@@ -38,6 +39,7 @@ class MaintenanceWindow(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    site_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("sites.id", ondelete="SET NULL"))
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text)
     device_selector: Mapped[Optional[dict]] = mapped_column(JSONB)
@@ -60,6 +62,7 @@ class AlertPolicy(Base):
     is_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     is_builtin: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     device_selector: Mapped[Optional[dict]] = mapped_column(JSONB)
+    site_ids: Mapped[Optional[list]] = mapped_column(ARRAY(UUID(as_uuid=True)))
     created_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
 
@@ -102,6 +105,8 @@ class AlertRule(Base):
     baseline_deviation_pct: Mapped[Optional[float]] = mapped_column()
     # Multi-condition AND
     extra_conditions: Mapped[list] = mapped_column(JSONB, nullable=False, server_default="[]")
+    # Site scoping (NULL = tenant-wide)
+    site_ids: Mapped[Optional[list]] = mapped_column(ARRAY(UUID(as_uuid=True)))
     # Notifications
     notify_on_resolve: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     custom_oid: Mapped[Optional[str]] = mapped_column(Text)
@@ -161,6 +166,20 @@ class AlertComment(Base):
     created_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
 
 
+class NotificationSendLog(Base):
+    __tablename__ = "notification_send_log"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    channel_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("notification_channels.id", ondelete="CASCADE"), nullable=False)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    alert_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("alerts.id", ondelete="SET NULL"))
+    event: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False)
+    error: Mapped[Optional[str]] = mapped_column(Text)
+    attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    sent_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+
+
 class AuditLog(Base):
     """Append-only audit trail. Use BIGSERIAL for fast sequential inserts."""
     __tablename__ = "audit_log"
@@ -176,4 +195,7 @@ class AuditLog(Base):
     new_value: Mapped[Optional[dict]] = mapped_column(JSONB)
     ip_address: Mapped[Optional[str]] = mapped_column(INET)
     user_agent: Mapped[Optional[str]] = mapped_column(Text)
+    # Site context and acting-as support (Phase A)
+    site_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("sites.id", ondelete="SET NULL"))
+    acted_as_tenant_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="SET NULL"))
     created_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())

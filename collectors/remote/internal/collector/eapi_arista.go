@@ -25,9 +25,12 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	zlog "github.com/rs/zerolog/log"
 
 	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/hub"
 )
+
+var eapiLog = zlog.Logger.With().Str("subsystem", "arista_eapi").Logger()
 
 const eapiCollectEvery = 5 * time.Minute
 
@@ -73,7 +76,7 @@ func (c *AristaEAPICollector) Run(ctx context.Context) {
 	}
 }
 
-// collectAll runs IS-IS collection for every eAPI-enabled Arista device.
+// collectAll runs IS-IS and STP collection for every eAPI-enabled Arista device.
 func (c *AristaEAPICollector) collectAll(ctx context.Context) {
 	c.mu.RLock()
 	devices := make([]hub.Device, len(c.devices))
@@ -87,26 +90,49 @@ func (c *AristaEAPICollector) collectAll(ctx context.Context) {
 		if dev.Vendor != "arista" {
 			continue
 		}
-		adjs, err := c.collectDevice(ctx, dev)
+
+		cred := dev.SSHCredential()
+		if cred == nil {
+			c.logger.Warn().Str("device", dev.Hostname).Msg("no ssh credential for eapi")
+			continue
+		}
+		username, _ := cred.Data["username"].(string)
+		password, _ := cred.Data["password"].(string)
+
+		results, err := eapiCall(ctx, dev.MgmtIP, username, password,
+			[]string{"show isis neighbors", "show spanning-tree"})
 		if err != nil {
 			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("arista eapi collection failed")
 			continue
 		}
-		if len(adjs) == 0 {
-			continue
+
+		// IS-IS neighbors (result[0])
+		if len(results) > 0 {
+			adjs := parseISISNeighbors(dev.ID, results[0])
+			if len(adjs) > 0 {
+				if err := c.hubClient.PostISISNeighbors(ctx, adjs); err != nil {
+					c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("isis post to hub failed")
+				} else {
+					c.logger.Info().Str("device", dev.Hostname).Int("adjacencies", len(adjs)).Msg("isis neighbors posted")
+				}
+			}
 		}
-		if err := c.hubClient.PostISISNeighbors(ctx, adjs); err != nil {
-			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("isis post to hub failed")
-		} else {
-			c.logger.Info().
-				Str("device", dev.Hostname).
-				Int("adjacencies", len(adjs)).
-				Msg("isis neighbors posted")
+
+		// STP ports (result[1])
+		if len(results) > 1 {
+			stpPorts := parseAristaSTP(dev.ID, results[1])
+			if len(stpPorts) > 0 {
+				if err := c.hubClient.PostSTPPorts(ctx, stpPorts); err != nil {
+					c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("stp post to hub failed")
+				} else {
+					c.logger.Info().Str("device", dev.Hostname).Int("ports", len(stpPorts)).Msg("stp ports posted")
+				}
+			}
 		}
 	}
 }
 
-// collectDevice fetches IS-IS adjacency state from one Arista device via eAPI.
+// collectDevice is retained for backward-compat but no longer used by collectAll.
 func (c *AristaEAPICollector) collectDevice(ctx context.Context, dev hub.Device) ([]map[string]any, error) {
 	cred := dev.SSHCredential()
 	if cred == nil {
@@ -115,7 +141,7 @@ func (c *AristaEAPICollector) collectDevice(ctx context.Context, dev hub.Device)
 	username, _ := cred.Data["username"].(string)
 	password, _ := cred.Data["password"].(string)
 
-	result, err := eapiCall(ctx, dev.MgmtIP, username, password, dev.EapiAllowHTTP, []string{"show isis neighbors"})
+	result, err := eapiCall(ctx, dev.MgmtIP, username, password, []string{"show isis neighbors"})
 	if err != nil {
 		return nil, err
 	}
@@ -139,7 +165,7 @@ var eapiHTTP = &http.Client{
 	},
 }
 
-func eapiCall(ctx context.Context, host, username, password string, allowHTTP bool, cmds []string) ([]map[string]any, error) {
+func eapiCall(ctx context.Context, host, username, password string, cmds []string) ([]map[string]any, error) {
 	payload := map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "runCmds",
@@ -152,12 +178,9 @@ func eapiCall(ctx context.Context, host, username, password string, allowHTTP bo
 	}
 	body, _ := json.Marshal(payload)
 
-	schemes := []string{"https"}
-	if allowHTTP {
-		schemes = append(schemes, "http")
-	}
-
-	for _, scheme := range schemes {
+	// Always try HTTPS first, fall back to HTTP — matches hub-side Python behavior.
+	// TLS verification is skipped (InsecureSkipVerify) so self-signed certs work.
+	for _, scheme := range []string{"https", "http"} {
 		url := fmt.Sprintf("%s://%s/command-api", scheme, host)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {
@@ -168,6 +191,7 @@ func eapiCall(ctx context.Context, host, username, password string, allowHTTP bo
 
 		resp, err := eapiHTTP.Do(req)
 		if err != nil {
+			eapiLog.Debug().Err(err).Str("scheme", scheme).Str("host", host).Msg("eapi do failed")
 			continue
 		}
 		respBody, _ := io.ReadAll(resp.Body)
@@ -260,6 +284,76 @@ func parseISISNeighbors(deviceID string, result map[string]any) []map[string]any
 		}
 	}
 	return rows
+}
+
+// parseAristaSTP converts "show spanning-tree" JSON output into flat records
+// for the hub's /collectors/stp-ports endpoint.
+// Arista reports STP per instance (CIST = MST0, or per-VLAN in PVST).
+// We take the CIST (MST0 or MSTI 0) first; fall back to the first instance.
+func parseAristaSTP(deviceID string, result map[string]any) []map[string]any {
+	instances, _ := result["spanningTreeInstances"].(map[string]any)
+	if len(instances) == 0 {
+		return nil
+	}
+
+	// Prefer MST0 / CIST; fall back to first key.
+	pick := ""
+	for _, key := range []string{"MST0", "CIST", "VL1"} {
+		if _, ok := instances[key]; ok {
+			pick = key
+			break
+		}
+	}
+	if pick == "" {
+		for k := range instances {
+			pick = k
+			break
+		}
+	}
+
+	inst, _ := instances[pick].(map[string]any)
+	ifaces, _ := inst["interfaces"].(map[string]any)
+
+	var rows []map[string]any
+	for ifName, ifRaw := range ifaces {
+		iface, _ := ifRaw.(map[string]any)
+		stateRaw, _ := iface["state"].(string)
+		roleRaw, _ := iface["role"].(string)
+		if stateRaw == "" {
+			continue
+		}
+		rows = append(rows, map[string]any{
+			"device_id": deviceID,
+			"if_name":   ifName,
+			"stp_state": normStpState(stateRaw),
+			"stp_role":  normStpRole(roleRaw),
+		})
+	}
+	return rows
+}
+
+func normStpState(s string) string {
+	switch strings.ToLower(s) {
+	case "forwarding":  return "forwarding"
+	case "blocking":    return "blocking"
+	case "listening":   return "listening"
+	case "learning":    return "learning"
+	case "disabled":    return "disabled"
+	case "discarding":  return "blocking" // RSTP uses "discarding" instead of "blocking"
+	default:            return "disabled"
+	}
+}
+
+func normStpRole(s string) string {
+	switch strings.ToLower(s) {
+	case "root":        return "root"
+	case "designated":  return "designated"
+	case "alternate":   return "alternate"
+	case "backup":      return "backup"
+	case "disabled":    return "disabled"
+	case "master":      return "root" // MSTP master port acts as root
+	default:            return "unknown"
+	}
 }
 
 // ── Normalisers ───────────────────────────────────────────────────────────────

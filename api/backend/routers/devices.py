@@ -13,7 +13,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from ..dependencies import get_current_user, get_db, require_role
+from ..dependencies import get_current_user, get_db, require_role, get_current_principal, accessible_device_ids_subquery, Principal
 from ..models.alert import Alert
 from ..models.credential import Credential, DeviceCredential
 from ..models.device import Device
@@ -53,7 +53,7 @@ async def get_all_addresses(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    from sqlalchemy import cast, String, or_
+    from sqlalchemy import cast, or_, String
 
     tenant_id = current_user.tenant_id
     items: list[dict] = []
@@ -64,19 +64,51 @@ async def get_all_addresses(
     hostname = {str(r.id): r.fqdn or r.hostname for r in device_rows}
     allowed_ids = set(hostname.keys())
 
-    # Build MAC→(physical_port, vlan_id) lookup so ARP entries can show the
-    # physical port rather than the L3 SVI (e.g. "Vlan2").
+    # Infrastructure uplink ports per device — only bridges/switches/routers count.
+    # Used to suppress MAC entries learned via uplinks (transitive, not physical location).
+    # Per-device view skips this: show everything for a specific device.
+    uplink_ports: dict[str, set[str]] = {}
+    if not device_id:
+        _infra_lldp = or_(
+            LLDPNeighbor.remote_system_capabilities.contains(["switch"]),
+            LLDPNeighbor.remote_system_capabilities.contains(["bridge"]),
+            LLDPNeighbor.remote_system_capabilities.contains(["router"]),
+        )
+        _infra_cdp = or_(
+            CDPNeighbor.remote_capabilities.contains(["switch"]),
+            CDPNeighbor.remote_capabilities.contains(["router"]),
+            CDPNeighbor.remote_capabilities.contains(["trans-bridge"]),
+        )
+        lldp_rows = (await db.execute(
+            select(cast(LLDPNeighbor.device_id, String).label("did"), LLDPNeighbor.local_port_name)
+            .where(cast(LLDPNeighbor.device_id, String).in_(allowed_ids), _infra_lldp)
+        )).all()
+        cdp_rows = (await db.execute(
+            select(cast(CDPNeighbor.device_id, String).label("did"), CDPNeighbor.local_port_name)
+            .where(cast(CDPNeighbor.device_id, String).in_(allowed_ids), _infra_cdp)
+        )).all()
+        for r in (*lldp_rows, *cdp_rows):
+            uplink_ports.setdefault(r.did, set()).add(r.local_port_name)
+
+    # All MAC entries for tenant — filter to access ports only (global view).
     mac_q = select(MACEntry).where(cast(MACEntry.device_id, String).in_(allowed_ids))
     if device_id:
         mac_q = mac_q.where(MACEntry.device_id == device_id)
     mac_rows_all = (await db.execute(mac_q)).scalars().all()
-    # (device_id, normalised_mac) → (port_name, vlan_id)
-    mac_lookup: dict[tuple[str, str], tuple[str | None, int | None]] = {
-        (str(m.device_id), m.mac_address.lower()): (m.port_name, m.vlan_id)
-        for m in mac_rows_all
-    }
 
-    # Build (device_id, iface_name) → iface_id so port names become clickable links.
+    # Access-port MAC entries only (uplink-filtered).
+    mac_access = [
+        m for m in mac_rows_all
+        if not (m.port_name and m.port_name in uplink_ports.get(str(m.device_id), set()))
+    ]
+
+    # mac → best (device_id, port_name, vlan_id) for ARP enrichment.
+    # Prefer entries already in mac_access (access ports).
+    mac_to_phys: dict[str, tuple[str, str | None, int | None]] = {}
+    for m in mac_access:
+        mac_to_phys[m.mac_address.lower()] = (str(m.device_id), m.port_name, m.vlan_id)
+
+    # Build (device_id, iface_name) → iface_id for clickable port links.
     iface_q = select(Interface.id, Interface.device_id, Interface.name).where(
         cast(Interface.device_id, String).in_(allowed_ids)
     )
@@ -96,37 +128,54 @@ async def get_all_addresses(
                 cast(ARPEntry.ip_address, String).ilike(f"%{search}%"),
                 cast(ARPEntry.mac_address, String).ilike(f"%{search}%"),
             ))
-        rows = (await db.execute(q.order_by(ARPEntry.ip_address))).scalars().all()
-        for r in rows:
-            did      = str(r.device_id)
-            mac_info = mac_lookup.get((did, str(r.mac_address).lower()))
-            phys_port = mac_info[0] if mac_info else None
-            vlan_id   = mac_info[1] if mac_info else None
+        arp_rows = (await db.execute(q.order_by(ARPEntry.updated_at.desc()))).scalars().all()
+
+        # Global view: deduplicate by (mac, ip) — keep most-recently-seen entry.
+        seen_arp: set[tuple[str, str]] = set()
+        for r in arp_rows:
+            mac_str = str(r.mac_address).lower()
+            ip_str  = str(r.ip_address)
+            key = (mac_str, ip_str)
+            if not device_id and key in seen_arp:
+                continue
+            seen_arp.add(key)
+
+            did = str(r.device_id)
+            # Use physical access-port info when available.
+            phys = mac_to_phys.get(mac_str)
+            if phys:
+                phys_did, phys_port, vlan_id = phys
+            else:
+                phys_did, phys_port, vlan_id = did, None, None
             port_name = phys_port or r.interface_name
             items.append({
                 "type": "arp", "device_id": did,
                 "device_name": hostname.get(did, ""),
-                "ip": str(r.ip_address), "mac": str(r.mac_address),
+                "ip": ip_str, "mac": str(r.mac_address),
                 "port":           port_name,
-                "port_iface_id":  iface_lookup.get((did, port_name)) if port_name else None,
+                "port_iface_id":  iface_lookup.get((phys_did, port_name)) if port_name else None,
                 "vlan_interface": r.interface_name if phys_port else None,
                 "vlan":           vlan_id,
                 "entry_type": r.entry_type, "updated_at": r.updated_at.isoformat(),
             })
 
     if not type or type == "mac":
-        q = select(MACEntry).where(cast(MACEntry.device_id, String).in_(allowed_ids))
-        if device_id:
-            q = q.where(MACEntry.device_id == device_id)
+        # Global view: access-port entries only, deduplicated by mac.
+        # Per-device view: show all entries.
+        seen_mac: set[str] = set()
+        source = mac_access if not device_id else mac_rows_all
         if search:
-            q = q.where(cast(MACEntry.mac_address, String).ilike(f"%{search}%"))
-        rows = (await db.execute(q.order_by(MACEntry.mac_address))).scalars().all()
-        for r in rows:
+            source = [m for m in source if search.lower() in m.mac_address.lower()]
+        for r in sorted(source, key=lambda m: m.mac_address):
+            mac_str = r.mac_address.lower()
+            if not device_id and mac_str in seen_mac:
+                continue
+            seen_mac.add(mac_str)
             did = str(r.device_id)
             items.append({
                 "type": "mac", "device_id": did,
                 "device_name": hostname.get(did, ""),
-                "ip": None, "mac": str(r.mac_address),
+                "ip": None, "mac": r.mac_address,
                 "port":          r.port_name,
                 "port_iface_id": iface_lookup.get((did, r.port_name)) if r.port_name else None,
                 "vlan_interface": None, "vlan": r.vlan_id,
@@ -147,10 +196,10 @@ async def list_devices(
     is_active: bool = Query(default=True),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
-    current_user: User = Depends(get_current_user),
+    principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[DeviceListRead]:
-    q = select(Device).where(Device.tenant_id == current_user.tenant_id)
+    q = select(Device).where(Device.id.in_(accessible_device_ids_subquery(principal)))
 
     if is_active is not None:
         q = q.where(Device.is_active == is_active)
@@ -300,18 +349,19 @@ async def update_device(
         collector = (await db.execute(
             select(RemoteCollector).where(RemoteCollector.id == device.collector_id)
         )).scalar_one_or_none()
-        if collector and collector.wg_ip:
-            asyncio.create_task(_nudge_collector(str(collector.wg_ip)))
+        if collector and collector.wg_ip and collector.api_key_hash:
+            asyncio.create_task(_nudge_collector(str(collector.wg_ip), collector.api_key_hash))
 
     return DeviceRead.model_validate(device)
 
 
-async def _nudge_collector(wg_ip: str) -> None:
+async def _nudge_collector(wg_ip: str, api_key_hash: str) -> None:
     """Fire-and-forget: ask the remote collector to refresh its device config."""
+    from .collectors import _control_token
     url = f"http://{wg_ip}:9090/refresh"
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            await client.post(url)
+            await client.post(url, headers={"Authorization": f"Bearer {_control_token(api_key_hash)}"})
         logger.debug("collector_nudged", wg_ip=wg_ip)
     except Exception as exc:
         # Non-fatal — collector will pick up the change on its next periodic refresh.
@@ -445,10 +495,30 @@ async def get_device_health_history(
         except Exception:
             return []
 
-    temp_results, dom_tx_results, dom_rx_results = await asyncio.gather(
+    # Instant query — always returns the last known value regardless of range window.
+    # Used for the "current" badge so the DOM panel shows values even before history
+    # accumulates (first poll after collector start).
+    async def vm_instant_iface(metric: str) -> dict[str, float]:
+        try:
+            async with httpx.AsyncClient(timeout=5) as client:
+                r = await client.get(f"{_VM_URL}/api/v1/query",
+                    params={"query": f'{metric}{{device_id="{did}"}}'})
+                r.raise_for_status()
+                return {
+                    s["metric"].get("iface", "unknown"): float(s["value"][1])
+                    for s in r.json().get("data", {}).get("result", [])
+                    if s.get("value")
+                }
+        except Exception:
+            return {}
+
+    (temp_results, dom_tx_results, dom_rx_results,
+     dom_tx_now, dom_rx_now) = await asyncio.gather(
         vm_multi(f'anthrimon_device_temp_celsius{{device_id="{did}"}}'),
         vm_multi(f'anthrimon_if_dom_tx_power_dbm{{device_id="{did}"}}'),
         vm_multi(f'anthrimon_if_dom_rx_power_dbm{{device_id="{did}"}}'),
+        vm_instant_iface("anthrimon_if_dom_tx_power_dbm"),
+        vm_instant_iface("anthrimon_if_dom_rx_power_dbm"),
     )
 
     for result in temp_results:
@@ -471,6 +541,8 @@ async def get_device_health_history(
         "temp_series": temp_series,
         "dom_tx":      dom_tx_series,
         "dom_rx":      dom_rx_series,
+        "dom_tx_now":  dom_tx_now,
+        "dom_rx_now":  dom_rx_now,
     }
 
 

@@ -186,8 +186,9 @@ async def interface_live_stream(
         if rc is None or not rc.wg_ip:
             raise HTTPException(status_code=503, detail="Remote collector not reachable")
 
+        from .collectors import _control_token
         wg_ip      = str(rc.wg_ip).split("/")[0]
-        auth_token = rc.api_key_hash
+        auth_token = _control_token(rc.api_key_hash)
         device_id  = str(device.id)
         if_index   = iface.if_index
         speed_bps  = iface.speed_bps

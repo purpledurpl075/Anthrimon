@@ -25,3 +25,17 @@ export const deleteChannel = (id: string) =>
 
 export const testChannel = (id: string) =>
   api.post(`/notification-channels/${id}/test`)
+
+export interface ChannelSendLogEntry {
+  id: number
+  channel_id: string
+  alert_id: string | null
+  event: string
+  status: string
+  error: string | null
+  attempts: number
+  sent_at: string
+}
+
+export const fetchChannelSendLog = (id: string, limit = 50) =>
+  api.get<ChannelSendLogEntry[]>(`/notification-channels/${id}/send-log?limit=${limit}`).then(r => r.data)

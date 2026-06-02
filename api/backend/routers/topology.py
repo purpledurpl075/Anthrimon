@@ -191,40 +191,35 @@ async def _persist_topology_links(tenant_id: str, edges: list[dict]) -> None:
             sifaces.append(siface or _ZERO_UUID)
 
         async with AsyncSessionLocal() as db:
-            await db.execute(text("""
-                INSERT INTO topology_links
-                    (tenant_id, source_device_id, source_interface_id,
-                     dest_device_id, link_type, metadata, discovered_at, updated_at)
-                SELECT
-                    CAST(:tid AS uuid),
-                    unnest(CAST(:srcs AS uuid[])),
-                    NULLIF(unnest(CAST(:sifaces AS uuid[])), CAST(:zero AS uuid)),
-                    unnest(CAST(:dsts AS uuid[])),
-                    unnest(CAST(:ltypes AS topology_link_type[])),
-                    unnest(CAST(:metas AS jsonb[])),
-                    now(), now()
-                ON CONFLICT (source_device_id, dest_device_id, link_type,
-                    COALESCE(source_interface_id, CAST(:zero AS uuid)),
-                    COALESCE(dest_interface_id,   CAST(:zero AS uuid)))
-                DO UPDATE SET
-                    source_interface_id = EXCLUDED.source_interface_id,
-                    metadata            = EXCLUDED.metadata,
-                    updated_at          = now()
-            """), {
-                "tid":    tenant_id,
-                "srcs":   srcs,
-                "dsts":   dsts,
-                "ltypes": ltypes,
-                "metas":  metas,
-                "sifaces":sifaces,
-                "zero":   _ZERO_UUID,
-            })
-            # Prune edges not seen in the last 10 minutes
-            await db.execute(text("""
-                DELETE FROM topology_links
-                WHERE tenant_id = CAST(:tid AS uuid)
-                  AND updated_at < now() - interval '10 minutes'
-            """), {"tid": tenant_id})
+            # Full replace: wipe tenant's links then re-insert the current set.
+            # This ensures downed interfaces (and their stale rows) are immediately
+            # removed rather than persisting until the 10-minute prune window.
+            await db.execute(
+                text("DELETE FROM topology_links WHERE tenant_id = CAST(:tid AS uuid)"),
+                {"tid": tenant_id},
+            )
+            if srcs:
+                await db.execute(text("""
+                    INSERT INTO topology_links
+                        (tenant_id, source_device_id, source_interface_id,
+                         dest_device_id, link_type, metadata, discovered_at, updated_at)
+                    SELECT
+                        CAST(:tid AS uuid),
+                        unnest(CAST(:srcs AS uuid[])),
+                        NULLIF(unnest(CAST(:sifaces AS uuid[])), CAST(:zero AS uuid)),
+                        unnest(CAST(:dsts AS uuid[])),
+                        unnest(CAST(:ltypes AS topology_link_type[])),
+                        unnest(CAST(:metas AS jsonb[])),
+                        now(), now()
+                """), {
+                    "tid":    tenant_id,
+                    "srcs":   srcs,
+                    "dsts":   dsts,
+                    "ltypes": ltypes,
+                    "metas":  metas,
+                    "sifaces":sifaces,
+                    "zero":   _ZERO_UUID,
+                })
             await db.commit()
     except Exception:
         logger.exception("topology_links_persist_failed")
@@ -318,6 +313,17 @@ async def get_topology(
     """), {"tid": tenant_id})).mappings().all()
 
     if link_rows:
+        # Deduplicate by device pair — a stale row from a downed interface may
+        # still exist alongside the new row until the next background refresh.
+        seen_db: set[frozenset] = set()
+        deduped = []
+        for row in link_rows:
+            pair = frozenset([row["source_device_id"], row["dest_device_id"]])
+            if pair not in seen_db:
+                seen_db.add(pair)
+                deduped.append(row)
+        link_rows = deduped
+
         # Return persisted edges immediately and refresh in background
         edges = [
             {

@@ -194,6 +194,12 @@ func (c *Client) PostISISNeighbors(ctx context.Context, neighbors []map[string]a
 	return c.postJSON(ctx, "/api/v1/collectors/isis-neighbors", neighbors, nil)
 }
 
+// PostSTPPorts sends per-interface STP state records to the hub.
+// Each record must contain: device_id, if_index (int), stp_state, stp_role.
+func (c *Client) PostSTPPorts(ctx context.Context, ports []map[string]any) error {
+	return c.postJSON(ctx, "/api/v1/collectors/stp-ports", ports, nil)
+}
+
 // DownloadBinary fetches the latest collector binary for the given architecture
 // from the hub.  Returns the raw bytes and the expected SHA-256 hex digest
 // from the X-Binary-SHA256 response header (empty string if the hub did not

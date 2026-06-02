@@ -4,6 +4,8 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
+from typing import Optional
+
 from sqlalchemy import ForeignKey, Integer, PrimaryKeyConstraint, Text, func
 from sqlalchemy.dialects.postgresql import ENUM as PgEnum, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -21,6 +23,7 @@ class Credential(Base):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id"), nullable=False)
+    site_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("sites.id", ondelete="SET NULL"))
     name: Mapped[str] = mapped_column(Text, nullable=False)
     type: Mapped[str] = mapped_column(
         PgEnum("snmp_v2c", "snmp_v3", "gnmi_tls", "ssh", "api_token", "netconf",

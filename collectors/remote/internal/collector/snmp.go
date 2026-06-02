@@ -23,6 +23,8 @@ import (
 const (
 	// System
 	oidSysUpTime = "1.3.6.1.2.1.1.3.0"
+	oidSysDescr  = "1.3.6.1.2.1.1.1.0"
+	oidSysName   = "1.3.6.1.2.1.1.5.0"
 
 	// IF-MIB — ifTable (32-bit counters, admin/oper status, speed, descr)
 	oidIfTable      = "1.3.6.1.2.1.2.2.1"
@@ -43,6 +45,11 @@ const (
 	oidEntPhySensorScale     = "1.3.6.1.2.1.99.1.1.1.2"
 	oidEntPhySensorPrecision = "1.3.6.1.2.1.99.1.1.1.3"
 	oidEntPhySensorValue     = "1.3.6.1.2.1.99.1.1.1.4"
+
+	// BRIDGE-MIB (RFC 4188) — spanning tree
+	oidDot1dBasePortIfIndex = "1.3.6.1.2.1.17.1.4.1.2"  // bridge port → ifIndex
+	oidDot1dStpPortState    = "1.3.6.1.2.1.17.2.15.1.3"  // STP port state (1-5)
+	oidDot1dStpPortRole     = "1.3.6.1.2.1.17.2.15.1.10" // RSTP port role (0-5)
 
 	// RFC 3433 SensorDataScale: actual = value * 10^((scale-9)*3) / 10^precision
 	entSensorTypeCelsius = 8
@@ -135,15 +142,27 @@ outer:
 			defer func() { <-sem }()
 
 			devLines, err := c.pollDevice(dev)
-			if err != nil {
-				c.log.Warn().Err(err).Str("device_id", dev.ID).
-					Str("ip", dev.MgmtIP).Msg("snmp poll failed")
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			if err != nil || len(devLines) == 0 {
+				// Active failure report: hub sets status='unreachable' immediately,
+				// bypassing ARP cache / management-plane survivability gaps.
+				if err != nil {
+					c.log.Warn().Err(err).Str("device_id", dev.ID).
+						Str("ip", dev.MgmtIP).Msg("snmp poll failed")
+				} else {
+					c.log.Warn().Str("device_id", dev.ID).
+						Str("ip", dev.MgmtIP).Msg("snmp poll returned no metrics")
+				}
+				lines = append(lines,
+					fmt.Sprintf(`anthrimon_device_unreachable{device_id=%q} 1 %d`,
+						dev.ID, time.Now().UnixMilli()))
 				return
 			}
 
-			mu.Lock()
 			lines = append(lines, devLines...)
-			mu.Unlock()
 		}()
 	}
 
@@ -190,6 +209,19 @@ func (c *SNMPCollector) pollDevice(dev hub.Device) ([]string, error) {
 				dev.ID, uptime/100, ts))
 	}
 
+	// sysName + sysDescr — emitted once per cycle so the hub can backfill
+	// the hostname for devices that were registered without one.
+	sysInfoResult, sysErr := g.Get([]string{oidSysName, oidSysDescr})
+	if sysErr == nil && len(sysInfoResult.Variables) == 2 {
+		sysName  := strings.TrimSpace(pduString(sysInfoResult.Variables[0]))
+		sysDescr := strings.TrimSpace(pduString(sysInfoResult.Variables[1]))
+		if sysName != "" {
+			lines = append(lines,
+				fmt.Sprintf(`anthrimon_device_info{device_id=%q,sysname=%q,sysdescr=%q} 1 %d`,
+					dev.ID, sysName, sysDescr, ts))
+		}
+	}
+
 	// Interface counters, speed, oper-status — HC 64-bit preferred over 32-bit.
 	ifLines := pollInterfaces(g, dev, ts, c.log)
 	lines = append(lines, ifLines...)
@@ -203,6 +235,9 @@ func (c *SNMPCollector) pollDevice(dev hub.Device) ([]string, error) {
 	// Memory via hrStorageTable
 	memLines := pollMemory(g, dev, ts, c.log)
 	lines = append(lines, memLines...)
+
+	// BRIDGE-MIB — STP per-port state and role (non-fatal; many devices won't support it)
+	lines = append(lines, pollSTP(g, dev, ts)...)
 
 	// ENTITY-SENSOR-MIB — use a short timeout so devices that don't support it
 	// (e.g. ProCurve) don't stall the poll.  Restore afterwards is unnecessary
@@ -314,10 +349,14 @@ func pollInterfaces(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logg
 		inOctets  := pickCounter(r.hcInOctets, r.inOctets)
 		outOctets := pickCounter(r.hcOutOctets, r.outOctets)
 
-		// oper_status: normalise to 1=up / 0=down (SNMP: 1=up, 2=down).
+		// oper/admin status: normalise to 1=up / 0=down (SNMP: 1=up, 2=down).
 		operBit := 0
 		if r.operStatus == 1 {
 			operBit = 1
+		}
+		adminBit := 0
+		if r.adminStatus == 1 {
+			adminBit = 1
 		}
 
 		labels := fmt.Sprintf(`device_id=%q,if_index="%d",if_name=%q,vendor=%q`,
@@ -332,6 +371,7 @@ func pollInterfaces(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logg
 			fmt.Sprintf("anthrimon_if_out_discards_total{%s} %d %d", labels, r.outDiscards, ts),
 			fmt.Sprintf("anthrimon_if_speed_bps{%s} %d %d", labels, speedBPS, ts),
 			fmt.Sprintf("anthrimon_if_oper_status{%s} %d %d", labels, operBit, ts),
+			fmt.Sprintf("anthrimon_if_admin_status{%s} %d %d", labels, adminBit, ts),
 		)
 	}
 	return lines
@@ -418,6 +458,92 @@ func pollMemory(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logger) 
 		)
 	}
 	return lines
+}
+
+// ─── STP ──────────────────────────────────────────────────────────────────────
+
+// pollSTP walks dot1dStpPortState and dot1dStpPortRole from BRIDGE-MIB and emits
+// one anthrimon_if_stp_state and one anthrimon_if_stp_role line per interface.
+// Returns nil if the device doesn't support the BRIDGE-MIB.
+func pollSTP(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
+	// Build bridge port → ifIndex mapping from dot1dBasePortIfIndex.
+	bridgeToIf := make(map[int]int)
+	_ = g.BulkWalk(oidDot1dBasePortIfIndex, func(pdu gosnmp.SnmpPDU) error {
+		portNum := lastOIDIndex(pdu.Name)
+		if portNum > 0 {
+			bridgeToIf[portNum] = pduInt(pdu)
+		}
+		return nil
+	})
+
+	type stpRow struct{ state, role int }
+	ports := make(map[int]*stpRow)
+	ensure := func(p int) *stpRow {
+		if r, ok := ports[p]; ok {
+			return r
+		}
+		r := &stpRow{}
+		ports[p] = r
+		return r
+	}
+
+	// Walk dot1dStpPortState — if empty, device doesn't participate in STP.
+	if err := g.BulkWalk(oidDot1dStpPortState, func(pdu gosnmp.SnmpPDU) error {
+		portNum := lastOIDIndex(pdu.Name)
+		if portNum > 0 {
+			ensure(portNum).state = pduInt(pdu)
+		}
+		return nil
+	}); err != nil || len(ports) == 0 {
+		return nil
+	}
+
+	// Walk dot1dStpPortRole (RSTP extension — non-fatal).
+	_ = g.BulkWalk(oidDot1dStpPortRole, func(pdu gosnmp.SnmpPDU) error {
+		portNum := lastOIDIndex(pdu.Name)
+		if portNum > 0 {
+			ensure(portNum).role = pduInt(pdu)
+		}
+		return nil
+	})
+
+	var lines []string
+	for portNum, r := range ports {
+		if r.state == 0 {
+			continue
+		}
+		ifIdx := portNum
+		if len(bridgeToIf) > 0 {
+			mapped, ok := bridgeToIf[portNum]
+			if !ok {
+				continue
+			}
+			ifIdx = mapped
+		}
+		labels := fmt.Sprintf(`device_id=%q,if_index="%d"`, dev.ID, ifIdx)
+		lines = append(lines,
+			fmt.Sprintf("anthrimon_if_stp_state{%s} %d %d", labels, r.state, ts),
+			fmt.Sprintf("anthrimon_if_stp_role{%s} %d %d", labels, r.role, ts),
+		)
+	}
+	return lines
+}
+
+// lastOIDIndex returns the final integer component of an OID name string.
+func lastOIDIndex(pduName string) int {
+	s := strings.TrimPrefix(pduName, ".")
+	dot := strings.LastIndex(s, ".")
+	if dot < 0 {
+		return -1
+	}
+	n := 0
+	for _, c := range s[dot+1:] {
+		if c < '0' || c > '9' {
+			return -1
+		}
+		n = n*10 + int(c-'0')
+	}
+	return n
 }
 
 // ─── Temperature ──────────────────────────────────────────────────────────────

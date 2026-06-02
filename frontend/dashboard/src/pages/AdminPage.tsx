@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchSmtpSettings, saveSmtpSettings, testSmtpSettings } from '../api/admin'
-import { fetchChannels, createChannel, updateChannel, deleteChannel, testChannel, type NotificationChannel } from '../api/channels'
+import { fetchChannels, createChannel, updateChannel, deleteChannel, testChannel, fetchChannelSendLog, type NotificationChannel, type ChannelSendLogEntry } from '../api/channels'
 import api from '../api/client'
 import { useRole, hasRole } from '../hooks/useCurrentUser'
 
@@ -126,11 +127,11 @@ function SmtpTab() {
 // ── Notification Channels tab ──────────────────────────────────────────────────
 
 const CHANNEL_TYPES = [
-  { value: 'email',     label: 'Email',     available: true,  colour: 'bg-green-100 text-green-700' },
-  { value: 'slack',     label: 'Slack',     available: false, colour: 'bg-purple-100 text-purple-700' },
-  { value: 'webhook',   label: 'Webhook',   available: false, colour: 'bg-blue-100 text-blue-700' },
-  { value: 'pagerduty', label: 'PagerDuty', available: false, colour: 'bg-red-100 text-red-700' },
-  { value: 'teams',     label: 'Teams',     available: false, colour: 'bg-indigo-100 text-indigo-700' },
+  { value: 'email',     label: 'Email',     available: true, colour: 'bg-green-100 text-green-700' },
+  { value: 'slack',     label: 'Slack',     available: true, colour: 'bg-purple-100 text-purple-700' },
+  { value: 'webhook',   label: 'Webhook',   available: true, colour: 'bg-blue-100 text-blue-700' },
+  { value: 'pagerduty', label: 'PagerDuty', available: true, colour: 'bg-red-100 text-red-700' },
+  { value: 'teams',     label: 'Teams',     available: true, colour: 'bg-indigo-100 text-indigo-700' },
 ]
 
 function typeMeta(type: string) {
@@ -142,29 +143,114 @@ function TypeBadge({ type }: { type: string }) {
   return <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${m.colour}`}>{m.label}</span>
 }
 
+function fmtRelTime(iso: string): string {
+  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
+  if (secs < 60)   return `${secs}s ago`
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
+  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
+  return `${Math.floor(secs / 86400)}d ago`
+}
+
+function SendLogPanel({ channelId }: { channelId: string }) {
+  const { data: entries = [], isLoading } = useQuery<ChannelSendLogEntry[]>({
+    queryKey: ['channel-send-log', channelId],
+    queryFn: () => fetchChannelSendLog(channelId, 20),
+    staleTime: 10_000,
+  })
+
+  if (isLoading) return <div className="px-4 py-3 text-xs text-slate-400">Loading…</div>
+  if (entries.length === 0) return <div className="px-4 py-3 text-xs text-slate-400">No sends recorded yet.</div>
+
+  return (
+    <div className="divide-y divide-slate-100">
+      {entries.map(e => (
+        <div key={e.id} className="px-4 py-2 flex items-start gap-3 text-xs">
+          <span className={`mt-0.5 inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${e.status === 'success' ? 'bg-green-500' : 'bg-red-500'}`} />
+          <span className="text-slate-400 w-20 flex-shrink-0">{fmtRelTime(e.sent_at)}</span>
+          <span className={`font-medium w-20 flex-shrink-0 ${e.status === 'success' ? 'text-green-600' : 'text-red-600'}`}>
+            {e.status}
+            {e.attempts > 1 && <span className="text-slate-400 font-normal"> ({e.attempts} tries)</span>}
+          </span>
+          <span className="text-slate-500">
+            {e.event === 'test' ? 'test send' : e.event}
+            {e.error && <span className="text-red-500 ml-2 truncate max-w-xs">{e.error}</span>}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 function channelSummary(ch: NotificationChannel): string {
   if (ch.type === 'email') {
     const to: string[] = (ch.config.to as string[]) ?? []
     return to.length ? to.join(', ') : 'No recipients'
+  }
+  if (ch.type === 'slack' || ch.type === 'teams') {
+    const url = (ch.config.webhook_url as string) ?? ''
+    return url ? url.replace(/^https?:\/\//, '').slice(0, 60) + (url.length > 66 ? '…' : '') : 'No webhook URL'
+  }
+  if (ch.type === 'webhook') {
+    const url = (ch.config.url as string) ?? ''
+    return url ? url.replace(/^https?:\/\//, '').slice(0, 60) + (url.length > 66 ? '…' : '') : 'No URL'
+  }
+  if (ch.type === 'pagerduty') {
+    const key = (ch.config.integration_key as string) ?? ''
+    return key ? key.slice(0, 8) + '…' : 'No integration key'
   }
   return ''
 }
 
 function ChannelModal({ editing, onClose }: { editing: NotificationChannel | null; onClose: () => void }) {
   const qc = useQueryClient()
-  const [name, setName]           = useState(editing?.name ?? '')
-  const [type, setType]           = useState(editing?.type ?? 'email')
+  const activeType = editing?.type ?? 'email'
+
+  const [name, setName]             = useState(editing?.name ?? '')
+  const [type, setType]             = useState(activeType)
+  const [enabled, setEnabled]       = useState(editing?.is_enabled ?? true)
+  const [errMsg, setErrMsg]         = useState('')
+
+  // email
   const [recipients, setRecipients] = useState(
     editing?.type === 'email' ? ((editing.config.to as string[]) ?? []).join('\n') : ''
   )
-  const [enabled, setEnabled]     = useState(editing?.is_enabled ?? true)
-  const [errMsg, setErrMsg]       = useState('')
+  // slack / teams
+  const [webhookUrl, setWebhookUrl] = useState(
+    editing?.type === 'slack'  ? (editing.config.webhook_url as string ?? '') :
+    editing?.type === 'teams'  ? (editing.config.webhook_url as string ?? '') : ''
+  )
+  // generic webhook
+  const [webhookTargetUrl, setWebhookTargetUrl] = useState(
+    editing?.type === 'webhook' ? (editing.config.url as string ?? '') : ''
+  )
+  const [webhookSecret, setWebhookSecret] = useState(
+    editing?.type === 'webhook' ? (editing.config.secret as string ?? '') : ''
+  )
+  // pagerduty
+  const [integrationKey, setIntegrationKey] = useState(
+    editing?.type === 'pagerduty' ? (editing.config.integration_key as string ?? '') : ''
+  )
+
+  const currentType = editing ? activeType : type
+
+  function buildConfig(): Record<string, unknown> {
+    if (currentType === 'email')
+      return { to: recipients.split('\n').map(s => s.trim()).filter(Boolean) }
+    if (currentType === 'slack' || currentType === 'teams')
+      return { webhook_url: webhookUrl.trim() }
+    if (currentType === 'webhook') {
+      const cfg: Record<string, unknown> = { url: webhookTargetUrl.trim() }
+      if (webhookSecret.trim()) cfg.secret = webhookSecret.trim()
+      return cfg
+    }
+    if (currentType === 'pagerduty')
+      return { integration_key: integrationKey.trim() }
+    return {}
+  }
 
   const save = useMutation({
     mutationFn: () => {
-      const config = type === 'email'
-        ? { to: recipients.split('\n').map(s => s.trim()).filter(Boolean) }
-        : {}
+      const config = buildConfig()
       return editing
         ? updateChannel(editing.id, { name, config, is_enabled: enabled })
         : createChannel({ name, type, config, is_enabled: enabled })
@@ -184,22 +270,20 @@ function ChannelModal({ editing, onClose }: { editing: NotificationChannel | nul
         </div>
 
         <div className="p-6 space-y-4">
-          <FInput label="Name" value={name} onChange={setName} placeholder="ops-email" />
+          <FInput label="Name" value={name} onChange={setName} placeholder="ops-slack" />
 
           {!editing ? (
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">Type</label>
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 {CHANNEL_TYPES.map(t => (
-                  <button key={t.value} onClick={() => t.available && setType(t.value)} disabled={!t.available}
+                  <button key={t.value} onClick={() => setType(t.value)}
                     className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-sm transition-colors ${
                       type === t.value ? 'border-blue-500 bg-blue-50 text-blue-700' :
-                      t.available ? 'border-slate-200 hover:border-slate-300 text-slate-700' :
-                      'border-slate-100 text-slate-300 cursor-not-allowed'
+                      'border-slate-200 hover:border-slate-300 text-slate-700'
                     }`}>
-                    <span className={`inline-block w-2 h-2 rounded-full ${t.available ? 'bg-current' : 'bg-slate-200'}`} />
+                    <span className="inline-block w-2 h-2 rounded-full bg-current" />
                     {t.label}
-                    {!t.available && <span className="ml-auto text-xs text-slate-300">soon</span>}
                   </button>
                 ))}
               </div>
@@ -211,7 +295,7 @@ function ChannelModal({ editing, onClose }: { editing: NotificationChannel | nul
             </div>
           )}
 
-          {(editing?.type ?? type) === 'email' && (
+          {currentType === 'email' && (
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">Recipients</label>
               <textarea value={recipients} onChange={e => setRecipients(e.target.value)} rows={3}
@@ -219,6 +303,34 @@ function ChannelModal({ editing, onClose }: { editing: NotificationChannel | nul
                 className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none font-mono" />
               <p className="text-xs text-slate-400 mt-1">One address per line</p>
             </div>
+          )}
+
+          {(currentType === 'slack') && (
+            <FInput label="Incoming Webhook URL" value={webhookUrl} onChange={setWebhookUrl}
+              placeholder="https://hooks.slack.com/services/…"
+              hint="Create an incoming webhook in your Slack app settings" />
+          )}
+
+          {(currentType === 'teams') && (
+            <FInput label="Incoming Webhook URL" value={webhookUrl} onChange={setWebhookUrl}
+              placeholder="https://…webhook.office.com/webhookb2/…"
+              hint="Create an incoming webhook connector in your Teams channel" />
+          )}
+
+          {currentType === 'webhook' && (
+            <>
+              <FInput label="URL" value={webhookTargetUrl} onChange={setWebhookTargetUrl}
+                placeholder="https://your-endpoint.example.com/hook" />
+              <FInput label="HMAC secret (optional)" value={webhookSecret} onChange={setWebhookSecret}
+                type="password"
+                hint="If set, each request includes X-Anthrimon-Signature: sha256=<hmac>" />
+            </>
+          )}
+
+          {currentType === 'pagerduty' && (
+            <FInput label="Integration key" value={integrationKey} onChange={setIntegrationKey}
+              placeholder="a1b2c3d4e5f6…"
+              hint="Events API v2 integration key from your PagerDuty service" />
           )}
 
           <FToggle label="Enabled" checked={enabled} onChange={setEnabled} />
@@ -242,6 +354,7 @@ function ChannelsTab() {
   const [modal, setModal]             = useState<'new' | NotificationChannel | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [testStatus, setTestStatus]   = useState<Record<string, 'idle' | 'testing' | 'ok' | 'err'>>({})
+  const [logOpen, setLogOpen]         = useState<Record<string, boolean>>({})
 
   const { data: channels = [], isLoading } = useQuery({
     queryKey: ['channels'],
@@ -295,34 +408,46 @@ function ChannelsTab() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {channels.map(ch => (
-                <tr key={ch.id} className="hover:bg-slate-50">
-                  <td className="px-4 py-3 font-medium text-slate-800">{ch.name}</td>
-                  <td className="px-4 py-3"><TypeBadge type={ch.type} /></td>
-                  <td className="px-4 py-3 text-xs text-slate-400 max-w-xs truncate">{channelSummary(ch)}</td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${ch.is_enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>
-                      {ch.is_enabled ? 'Enabled' : 'Disabled'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-right space-x-3">
-                    {ch.type === 'email' && (
+                <React.Fragment key={ch.id}>
+                  <tr className="hover:bg-slate-50">
+                    <td className="px-4 py-3 font-medium text-slate-800">{ch.name}</td>
+                    <td className="px-4 py-3"><TypeBadge type={ch.type} /></td>
+                    <td className="px-4 py-3 text-xs text-slate-400 max-w-xs truncate">{channelSummary(ch)}</td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${ch.is_enabled ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-500'}`}>
+                        {ch.is_enabled ? 'Enabled' : 'Disabled'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3 text-right space-x-3">
                       <button onClick={() => handleTest(ch.id)}
                         disabled={testStatus[ch.id] === 'testing'}
                         className={`text-xs ${testStatus[ch.id] === 'ok' ? 'text-green-600' : testStatus[ch.id] === 'err' ? 'text-red-500' : 'text-slate-400 hover:text-blue-600'}`}>
                         {testStatus[ch.id] === 'testing' ? 'Sending…' : testStatus[ch.id] === 'ok' ? 'Sent!' : testStatus[ch.id] === 'err' ? 'Failed' : 'Test'}
                       </button>
-                    )}
-                    <button onClick={() => setModal(ch)} className="text-xs text-blue-600 hover:underline">Edit</button>
-                    {confirmDelete === ch.id ? (
-                      <>
-                        <button onClick={() => deleteMut.mutate(ch.id)} className="text-xs text-red-600 hover:underline font-medium">Confirm</button>
-                        <button onClick={() => setConfirmDelete(null)} className="text-xs text-slate-400 hover:underline">Cancel</button>
-                      </>
-                    ) : (
-                      <button onClick={() => setConfirmDelete(ch.id)} className="text-xs text-slate-400 hover:text-red-600">Delete</button>
-                    )}
-                  </td>
-                </tr>
+                      <button
+                        onClick={() => setLogOpen(s => ({ ...s, [ch.id]: !s[ch.id] }))}
+                        className={`text-xs ${logOpen[ch.id] ? 'text-blue-600' : 'text-slate-400 hover:text-blue-600'}`}>
+                        Log
+                      </button>
+                      <button onClick={() => setModal(ch)} className="text-xs text-blue-600 hover:underline">Edit</button>
+                      {confirmDelete === ch.id ? (
+                        <>
+                          <button onClick={() => deleteMut.mutate(ch.id)} className="text-xs text-red-600 hover:underline font-medium">Confirm</button>
+                          <button onClick={() => setConfirmDelete(null)} className="text-xs text-slate-400 hover:underline">Cancel</button>
+                        </>
+                      ) : (
+                        <button onClick={() => setConfirmDelete(ch.id)} className="text-xs text-slate-400 hover:text-red-600">Delete</button>
+                      )}
+                    </td>
+                  </tr>
+                  {logOpen[ch.id] && (
+                    <tr className="bg-slate-50">
+                      <td colSpan={5} className="border-t border-slate-100">
+                        <SendLogPanel channelId={ch.id} />
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>
@@ -336,245 +461,298 @@ function ChannelsTab() {
 
 // ── Admin page ─────────────────────────────────────────────────────────────────
 
-// ── Users tab ──────────────────────────────────────────────────────────────────
 
-interface UserRecord {
-  id: string; username: string; email: string; full_name: string | null
-  role: string; is_active: boolean; last_login: string | null; created_at: string
+// ── Tenant / Site tab ─────────────────────────────────────────────────────────
+
+interface TenantSettings {
+  name: string; slug: string
+  contact_name: string | null; contact_email: string | null
+  notes: string | null
 }
 
-const ROLES = ['readonly', 'operator', 'admin', 'superadmin'] as const
-const ROLE_STYLE: Record<string, string> = {
-  superadmin: 'bg-purple-100 text-purple-700',
-  admin:      'bg-blue-100 text-blue-700',
-  operator:   'bg-cyan-100 text-cyan-700',
-  readonly:   'bg-slate-100 text-slate-600',
+function TenantTab() {
+  const qc = useQueryClient()
+  const [f, setF] = useState<TenantSettings | null>(null)
+  const [saved, setSaved] = useState(false)
+  const [errMsg, setErrMsg] = useState('')
+
+  const { data, isLoading } = useQuery<TenantSettings>({
+    queryKey: ['tenant-settings'],
+    queryFn:  () => api.get<TenantSettings>('/admin/tenant').then(r => r.data),
+  })
+  useEffect(() => { if (data) setF(data) }, [data])
+
+  const saveMut = useMutation({
+    mutationFn: () => api.put('/admin/tenant', {
+      name:          f?.name,
+      contact_name:  f?.contact_name || null,
+      contact_email: f?.contact_email || null,
+      notes:         f?.notes || null,
+    }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['tenant-settings'] })
+      setSaved(true); setErrMsg('')
+      setTimeout(() => setSaved(false), 2000)
+    },
+    onError: (e: any) => setErrMsg(e?.response?.data?.detail ?? 'Save failed'),
+  })
+
+  if (isLoading || !f) return <div className="p-6 text-slate-400 text-sm">Loading…</div>
+
+  const set = <K extends keyof TenantSettings>(k: K, v: TenantSettings[K]) =>
+    setF(p => p ? { ...p, [k]: v } : p)
+
+  const txt = (k: keyof TenantSettings, label: string, ph = '', hint?: string) => (
+    <SettingRow label={label} description={hint ?? ''}>
+      <input value={(f[k] as string) ?? ''} onChange={e => set(k, e.target.value as any)}
+        placeholder={ph}
+        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+    </SettingRow>
+  )
+
+  return (
+    <div className="p-6 max-w-3xl">
+      <div className="mb-6">
+        <h2 className="text-sm font-semibold text-slate-800">Tenant</h2>
+        <p className="text-xs text-slate-400 mt-0.5">Identity and contact details for this tenant</p>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 px-6 mb-4">
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide pt-4 pb-2">Identity</h3>
+        <SettingRow label="Tenant name" description="Display name for this tenant / organisation.">
+          <input value={f.name} onChange={e => set('name', e.target.value)}
+            placeholder="Acme Corp"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
+        </SettingRow>
+        <SettingRow label="Slug" description="URL-safe identifier — set at provisioning time, read-only.">
+          <input value={f.slug} readOnly
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-slate-50 text-slate-400 cursor-not-allowed font-mono" />
+        </SettingRow>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 px-6 mb-4">
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide pt-4 pb-2">NOC Contact</h3>
+        {txt('contact_name', 'Contact name', 'Network Operations', 'Primary contact for this environment.')}
+        {txt('contact_email', 'Contact email', 'noc@example.com', 'Used in alert footers and acknowledgement flows.')}
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 px-6 mb-6">
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide pt-4 pb-2">Notes</h3>
+        <div className="py-4">
+          <textarea value={f.notes ?? ''} onChange={e => set('notes', e.target.value)} rows={4}
+            placeholder="Freeform notes — network topology summary, maintenance contacts, escalation procedures…"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y" />
+        </div>
+      </div>
+
+      {errMsg && <p className="text-xs text-red-500 mb-3">{errMsg}</p>}
+      <div className="flex items-center justify-end gap-3">
+        <button onClick={() => saveMut.mutate()} disabled={saveMut.isPending}
+          className={`px-4 py-2 text-xs font-medium rounded-xl transition-colors disabled:opacity-50 ${
+            saved ? 'bg-green-600 text-white' : 'bg-slate-800 text-white hover:bg-slate-700'
+          }`}>
+          {saved ? 'Saved!' : saveMut.isPending ? 'Saving…' : 'Save changes'}
+        </button>
+      </div>
+    </div>
+  )
 }
 
-function fmtLoginAge(iso: string | null): string {
-  if (!iso) return 'Never'
-  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (secs < 60) return 'Just now'
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
-  return `${Math.floor(secs / 86400)}d ago`
+// ── Sites tab ─────────────────────────────────────────────────────────────────
+
+interface SiteRecord {
+  id: string; name: string; description: string | null
+  location: string | null; device_count: number
+}
+interface DeviceRecord {
+  id: string; hostname: string; fqdn: string | null
+  mgmt_ip: string | null; vendor: string | null; site_id: string | null
 }
 
-interface UserModalProps {
-  editing: UserRecord | null
+function SiteModal({ editing, allDevices, onClose }: {
+  editing: SiteRecord | null
+  allDevices: DeviceRecord[]
   onClose: () => void
-  currentUserId: string
-}
-
-function UserModal({ editing, onClose, currentUserId }: UserModalProps) {
+}) {
   const qc = useQueryClient()
   const isNew = editing === null
 
-  const [username,  setUsername]  = useState(editing?.username  ?? '')
-  const [email,     setEmail]     = useState(editing?.email     ?? '')
-  const [fullName,  setFullName]  = useState(editing?.full_name ?? '')
-  const [role,      setRole]      = useState(editing?.role      ?? 'readonly')
-  const [password,  setPassword]  = useState('')
-  const [error,     setError]     = useState<string | null>(null)
+  const [name,        setName]        = useState(editing?.name ?? '')
+  const [description, setDescription] = useState(editing?.description ?? '')
+  const [location,    setLocation]    = useState(editing?.location ?? '')
+  const [errMsg,      setErrMsg]      = useState('')
 
-  const isSelf = editing?.id === currentUserId
+  const assignedToThis = allDevices.filter(d => !isNew && d.site_id === editing?.id).map(d => d.id)
+  const [assigned, setAssigned] = useState<Set<string>>(new Set(assignedToThis))
+
+  const toggleDevice = (id: string) =>
+    setAssigned(prev => { const s = new Set(prev); s.has(id) ? s.delete(id) : s.add(id); return s })
 
   const saveMut = useMutation({
     mutationFn: async () => {
-      if (isNew) {
-        return api.post('/users', { username, email, password, full_name: fullName || null, role })
-      }
-      const patch: Record<string, unknown> = { email, full_name: fullName || null }
-      if (!isSelf) patch.role = role
-      return api.patch(`/users/${editing!.id}`, patch)
+      const site = isNew
+        ? (await api.post<SiteRecord>('/admin/sites', { name, description: description || null, location: location || null })).data
+        : (await api.patch<SiteRecord>(`/admin/sites/${editing!.id}`, { name, description: description || null, location: location || null })).data
+      await api.put(`/admin/sites/${site.id}/devices`, { device_ids: [...assigned] })
     },
-    onSuccess: () => { qc.invalidateQueries({ queryKey: ['users'] }); onClose() },
-    onError:   (e: any) => setError(e?.response?.data?.detail ?? 'Save failed'),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['admin-sites'] }); qc.invalidateQueries({ queryKey: ['admin-all-devices'] }); onClose() },
+    onError: (e: any) => setErrMsg(e?.response?.data?.detail ?? 'Save failed'),
   })
 
-  const resetMut = useMutation({
-    mutationFn: () => api.post(`/users/${editing!.id}/reset-password`, { new_password: password }),
-    onSuccess:  () => { setPassword(''); setError(null); alert('Password updated') },
-    onError:    (e: any) => setError(e?.response?.data?.detail ?? 'Reset failed'),
-  })
+  // Devices available: all devices not assigned to another site, plus those already in this site
+  const available = allDevices.filter(d => !d.site_id || d.site_id === editing?.id)
+  const [devSearch, setDevSearch] = useState('')
+  const filtered = available.filter(d =>
+    !devSearch || (d.fqdn ?? d.hostname).toLowerCase().includes(devSearch.toLowerCase()) ||
+    (d.mgmt_ip ?? '').includes(devSearch)
+  )
 
   return (
     <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md">
-        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-800">{isNew ? 'New user' : `Edit ${editing!.username}`}</h2>
-          <button onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors">
-            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12" /></svg>
+      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-lg flex flex-col max-h-[90vh]">
+        <div className="px-6 py-4 border-b border-slate-100 flex items-center justify-between shrink-0">
+          <h2 className="text-sm font-semibold text-slate-800">{isNew ? 'New site' : `Edit — ${editing!.name}`}</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
           </button>
         </div>
 
-        <div className="px-6 py-4 space-y-3">
-          {isNew && (
-            <FInput label="Username" value={username} onChange={setUsername} placeholder="jsmith" />
-          )}
-          <FInput label="Email" value={email} onChange={setEmail} type="email" placeholder="j.smith@example.com" />
-          <FInput label="Full name" value={fullName} onChange={setFullName} placeholder="Jane Smith" />
+        <div className="overflow-y-auto flex-1 p-6 space-y-4">
+          <FInput label="Name" value={name} onChange={setName} placeholder="HQ / Branch – London" />
+          <FInput label="Location" value={location} onChange={setLocation} placeholder="New York, US" />
+          <FInput label="Description" value={description} onChange={setDescription} placeholder="Optional notes about this site" />
 
           <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">Role</label>
-            <select
-              value={role}
-              onChange={e => setRole(e.target.value)}
-              disabled={isSelf}
-              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm text-slate-700 focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:opacity-50 disabled:cursor-not-allowed"
-            >
-              {ROLES.map(r => <option key={r} value={r}>{r}</option>)}
-            </select>
-            {isSelf && <p className="text-[10px] text-slate-400 mt-1">Cannot change your own role</p>}
+            <label className="block text-xs font-medium text-slate-600 mb-1.5">Devices</label>
+            <div className="border border-slate-200 rounded-xl overflow-hidden">
+              <div className="p-2 border-b border-slate-100 bg-slate-50">
+                <input value={devSearch} onChange={e => setDevSearch(e.target.value)}
+                  placeholder="Filter devices…"
+                  className="w-full text-xs bg-white border border-slate-200 rounded-lg px-2.5 py-1.5 focus:outline-none focus:ring-2 focus:ring-blue-500" />
+              </div>
+              <div className="max-h-52 overflow-y-auto divide-y divide-slate-50">
+                {filtered.length === 0 ? (
+                  <p className="px-3 py-4 text-xs text-slate-400 text-center">No unassigned devices</p>
+                ) : filtered.map(d => (
+                  <label key={d.id} className="flex items-center gap-3 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                    <input type="checkbox" checked={assigned.has(d.id)} onChange={() => toggleDevice(d.id)}
+                      className="rounded border-slate-300 text-blue-600" />
+                    <span className="flex-1 min-w-0">
+                      <span className="block text-xs font-medium text-slate-800 truncate">{d.fqdn ?? d.hostname}</span>
+                      {d.mgmt_ip && <span className="text-[10px] text-slate-400 font-mono">{d.mgmt_ip}</span>}
+                    </span>
+                    {d.vendor && <span className="text-[10px] text-slate-400 shrink-0">{d.vendor}</span>}
+                  </label>
+                ))}
+              </div>
+            </div>
+            <p className="text-[10px] text-slate-400 mt-1">{assigned.size} device{assigned.size !== 1 ? 's' : ''} selected</p>
           </div>
 
-          {isNew && (
-            <FInput label="Password" value={password} onChange={setPassword} type="password" placeholder="Min. 8 characters" />
-          )}
-
-          {error && <p className="text-xs text-red-500">{error}</p>}
+          {errMsg && <p className="text-xs text-red-600">{errMsg}</p>}
         </div>
 
-        <div className="px-6 pb-5 flex items-center justify-between gap-3">
-          {!isNew && (
-            <div className="flex items-center gap-2 flex-1">
-              <input
-                type="password"
-                value={password}
-                onChange={e => setPassword(e.target.value)}
-                placeholder="New password…"
-                className="flex-1 border border-slate-200 rounded-lg px-3 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
-              />
-              <button
-                onClick={() => password.length >= 8 ? resetMut.mutate() : setError('Password must be at least 8 characters')}
-                disabled={resetMut.isPending}
-                className="px-3 py-1.5 text-xs font-medium border border-slate-200 rounded-lg hover:bg-slate-50 text-slate-600 transition-colors disabled:opacity-50"
-              >
-                Reset
-              </button>
-            </div>
-          )}
-          <div className="flex gap-2 shrink-0 ml-auto">
-            <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 rounded-xl transition-colors">Cancel</button>
-            <button
-              onClick={() => saveMut.mutate()}
-              disabled={saveMut.isPending}
-              className="px-4 py-2 text-sm font-medium bg-slate-800 text-white rounded-xl hover:bg-slate-700 transition-colors disabled:opacity-50"
-            >
-              {saveMut.isPending ? 'Saving…' : isNew ? 'Create' : 'Save'}
-            </button>
-          </div>
+        <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3 shrink-0">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 rounded-xl">Cancel</button>
+          <button onClick={() => saveMut.mutate()} disabled={!name || saveMut.isPending}
+            className="px-4 py-2 text-sm font-medium bg-slate-800 text-white rounded-xl hover:bg-slate-700 disabled:opacity-50 transition-colors">
+            {saveMut.isPending ? 'Saving…' : isNew ? 'Create site' : 'Save'}
+          </button>
         </div>
       </div>
     </div>
   )
 }
 
-function UsersTab() {
+function SitesTab() {
   const qc = useQueryClient()
-  const [modal, setModal] = useState<'new' | UserRecord | null>(null)
+  const [modal, setModal] = useState<'new' | SiteRecord | null>(null)
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
 
-  const { data: users = [], isLoading } = useQuery<UserRecord[]>({
-    queryKey: ['users'],
-    queryFn:  () => api.get<UserRecord[]>('/users').then(r => r.data),
+  const { data: sites = [], isLoading } = useQuery<SiteRecord[]>({
+    queryKey: ['admin-sites'],
+    queryFn:  () => api.get<SiteRecord[]>('/admin/sites').then(r => r.data),
+  })
+  const { data: allDevices = [] } = useQuery<DeviceRecord[]>({
+    queryKey: ['admin-all-devices'],
+    queryFn:  () => api.get<DeviceRecord[]>('/admin/devices/unassigned').then(r => r.data),
   })
 
-  const { data: me } = useQuery({
-    queryKey: ['me'],
-    queryFn:  () => api.get<{ id: string; username: string; role: string }>('/auth/me').then(r => r.data),
+  const deleteMut = useMutation({
+    mutationFn: (id: string) => api.delete(`/admin/sites/${id}`),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['admin-sites'] }); qc.invalidateQueries({ queryKey: ['admin-all-devices'] }); setConfirmDelete(null) },
   })
 
-  const toggleMut = useMutation({
-    mutationFn: (u: UserRecord) => api.patch(`/users/${u.id}`, { is_active: !u.is_active }),
-    onSuccess:  () => qc.invalidateQueries({ queryKey: ['users'] }),
-  })
+  const unassigned = allDevices.filter(d => !d.site_id)
 
   return (
-    <div className="p-6 max-w-4xl">
+    <div className="p-6 max-w-3xl">
       <div className="flex items-center justify-between mb-5">
         <div>
-          <h2 className="text-sm font-semibold text-slate-800">Users</h2>
-          <p className="text-xs text-slate-400 mt-0.5">Manage who has access to this tenant</p>
+          <h2 className="text-sm font-semibold text-slate-800">Sites</h2>
+          <p className="text-xs text-slate-400 mt-0.5">Group devices by physical location or logical grouping</p>
         </div>
-        <button
-          onClick={() => setModal('new')}
-          className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 text-white text-xs font-medium rounded-xl hover:bg-slate-700 transition-colors"
-        >
-          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path d="M12 5v14M5 12h14" /></svg>
-          New user
+        <button onClick={() => setModal('new')}
+          className="flex items-center gap-1.5 px-3 py-2 bg-slate-800 text-white text-xs font-medium rounded-xl hover:bg-slate-700 transition-colors">
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg>
+          New site
         </button>
       </div>
 
       {isLoading ? (
         <div className="text-slate-400 text-sm">Loading…</div>
+      ) : sites.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center">
+          <svg className="w-8 h-8 text-slate-300 mx-auto mb-3" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+          <p className="text-slate-400 text-sm mb-3">No sites yet.</p>
+          <button onClick={() => setModal('new')} className="text-sm text-blue-600 hover:underline">Create your first site</button>
+        </div>
       ) : (
-        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-slate-50 border-b border-slate-100">
-                <th className="text-left px-4 py-2.5 font-medium text-slate-600">User</th>
-                <th className="text-left px-4 py-2.5 font-medium text-slate-600">Role</th>
-                <th className="text-left px-4 py-2.5 font-medium text-slate-600">Last login</th>
-                <th className="text-left px-4 py-2.5 font-medium text-slate-600">Status</th>
-                <th className="px-4 py-2.5" />
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-50">
-              {users.map(u => (
-                <tr key={u.id} className="hover:bg-slate-50 transition-colors">
-                  <td className="px-4 py-3">
-                    <div className="font-medium text-slate-800">{u.username}</div>
-                    <div className="text-xs text-slate-400">{u.full_name ?? u.email}</div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full ${ROLE_STYLE[u.role] ?? ROLE_STYLE.readonly}`}>
-                      {u.role}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-xs text-slate-500">{fmtLoginAge(u.last_login)}</td>
-                  <td className="px-4 py-3">
-                    <span className={`text-[10px] font-medium px-2 py-0.5 rounded-full ${u.is_active ? 'bg-green-100 text-green-700' : 'bg-slate-100 text-slate-400'}`}>
-                      {u.is_active ? 'Active' : 'Inactive'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center justify-end gap-1">
-                      <button
-                        onClick={() => setModal(u)}
-                        className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors"
-                        title="Edit"
-                      >
-                        <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
-                      </button>
-                      {u.id !== me?.id && (
-                        <button
-                          onClick={() => toggleMut.mutate(u)}
-                          disabled={toggleMut.isPending}
-                          className={`p-1.5 rounded-lg transition-colors disabled:opacity-50 ${u.is_active ? 'text-slate-400 hover:text-amber-600 hover:bg-amber-50' : 'text-slate-400 hover:text-green-600 hover:bg-green-50'}`}
-                          title={u.is_active ? 'Deactivate' : 'Activate'}
-                        >
-                          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                            {u.is_active
-                              ? <path d="M18.364 18.364A9 9 0 0 0 5.636 5.636m12.728 12.728A9 9 0 0 1 5.636 5.636m12.728 12.728L5.636 5.636" />
-                              : <path d="M9 12l2 2 4-4m6 2a9 9 0 1 1-18 0 9 9 0 0 1 18 0z" />
-                            }
-                          </svg>
-                        </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+        <div className="space-y-3">
+          {sites.map(site => (
+            <div key={site.id} className="bg-white rounded-2xl border border-slate-200 px-5 py-4 flex items-center gap-4">
+              <div className="w-9 h-9 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
+                <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-semibold text-slate-800">{site.name}</p>
+                <div className="flex items-center gap-3 mt-0.5 flex-wrap">
+                  {site.location && <span className="text-xs text-slate-400">{site.location}</span>}
+                  {site.description && <span className="text-xs text-slate-400 truncate max-w-xs">{site.description}</span>}
+                </div>
+              </div>
+              <span className="text-xs text-slate-500 shrink-0">
+                {site.device_count} device{site.device_count !== 1 ? 's' : ''}
+              </span>
+              <div className="flex items-center gap-2 shrink-0">
+                <button onClick={() => setModal(site)}
+                  className="text-xs text-blue-600 hover:underline">Edit</button>
+                {confirmDelete === site.id ? (
+                  <>
+                    <button onClick={() => deleteMut.mutate(site.id)} className="text-xs text-red-600 font-medium hover:underline">Confirm</button>
+                    <button onClick={() => setConfirmDelete(null)} className="text-xs text-slate-400 hover:underline">Cancel</button>
+                  </>
+                ) : (
+                  <button onClick={() => setConfirmDelete(site.id)} className="text-xs text-slate-400 hover:text-red-600">Delete</button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Unassigned devices callout */}
+      {unassigned.length > 0 && (
+        <div className="mt-4 bg-slate-50 border border-slate-200 rounded-2xl px-5 py-3 flex items-center gap-3">
+          <span className="text-xs text-slate-500">{unassigned.length} device{unassigned.length !== 1 ? 's' : ''} not assigned to any site</span>
         </div>
       )}
 
       {modal !== null && (
-        <UserModal
+        <SiteModal
           editing={modal === 'new' ? null : modal}
+          allDevices={allDevices}
           onClose={() => setModal(null)}
-          currentUserId={me?.id ?? ''}
         />
       )}
     </div>
@@ -592,6 +770,7 @@ interface PlatformSettings {
   default_renotify_s:             number
   max_alerts_per_device_per_hour: number
   auto_close_stale_days:          number
+  device_down_stale_min_s:        number
   notifications_paused:           boolean
   notifications_paused_until:     string | null
   business_hours_enabled:         boolean
@@ -745,6 +924,13 @@ function AlertingEngineTab() {
           <div className="flex items-center gap-2">
             {num('max_alerts_per_device_per_hour', '0 = unlimited')}
             <span className="text-xs text-slate-400 shrink-0">/hr</span>
+          </div>
+        </SettingRow>
+        <SettingRow label="Device-down stale floor"
+          description="Minimum seconds without a successful poll before a device is considered unreachable. Actual threshold is max(this, 2.5× poll interval).">
+          <div className="flex items-center gap-2">
+            {num('device_down_stale_min_s')}
+            <span className="text-xs text-slate-400 shrink-0">seconds</span>
           </div>
         </SettingRow>
         <SettingRow label="Stale alert auto-close"
@@ -1473,13 +1659,26 @@ function ApiMethodsTab() {
 }
 
 type Tab =
+  | 'tenant' | 'sites'
   | 'general' | 'alerting-engine'
-  | 'users'
   | 'smtp' | 'channels' | 'template'
   | 'api-methods'
   | 'storage' | 'integrations'
 
 const ADMIN_NAV: { section: string; items: { id: Tab; label: string; icon: React.ReactNode }[] }[] = [
+  {
+    section: 'Tenant',
+    items: [
+      {
+        id: 'tenant', label: 'Tenant',
+        icon: <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>,
+      },
+      {
+        id: 'sites', label: 'Sites',
+        icon: <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
+      },
+    ],
+  },
   {
     section: 'Platform',
     items: [
@@ -1490,15 +1689,6 @@ const ADMIN_NAV: { section: string; items: { id: Tab; label: string; icon: React
       {
         id: 'alerting-engine', label: 'Alerting Engine',
         icon: <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>,
-      },
-    ],
-  },
-  {
-    section: 'Access',
-    items: [
-      {
-        id: 'users', label: 'Users',
-        icon: <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
       },
     ],
   },
@@ -1545,7 +1735,9 @@ const ADMIN_NAV: { section: string; items: { id: Tab; label: string; icon: React
 
 export default function AdminPage() {
   const role = useRole()
-  const [tab, setTab] = useState<Tab>('general')
+  const [searchParams] = useSearchParams()
+  const initialTab = (searchParams.get('tab') as Tab | null) ?? 'tenant'
+  const [tab, setTab] = useState<Tab>(initialTab)
 
   useQuery({ queryKey: ['smtp-settings'], queryFn: fetchSmtpSettings })
   useQuery({ queryKey: ['channels'],      queryFn: fetchChannels })
@@ -1596,9 +1788,10 @@ export default function AdminPage() {
 
       {/* Content area */}
       <div className={`flex-1 min-w-0 bg-white ${tab === 'template' ? 'flex flex-col overflow-hidden' : 'overflow-y-auto'}`}>
+        {tab === 'tenant'           && <TenantTab />}
+        {tab === 'sites'            && <SitesTab />}
         {tab === 'general'          && <GeneralTab />}
         {tab === 'alerting-engine'  && <AlertingEngineTab />}
-        {tab === 'users'            && <UsersTab />}
         {tab === 'smtp'             && <SmtpTab />}
         {tab === 'channels'         && <ChannelsTab />}
         {tab === 'template'         && <EmailTemplateTab />}

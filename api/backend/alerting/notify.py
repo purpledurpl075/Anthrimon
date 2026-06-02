@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac as _hmac
+import json
 import re
 import smtplib
 import ssl
@@ -9,12 +12,13 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import TYPE_CHECKING, Optional
 
+import httpx
 import structlog
 from sqlalchemy import select
 
 from .. import crypto
 from ..database import AsyncSessionLocal
-from ..models.alert import NotificationChannel
+from ..models.alert import NotificationChannel, NotificationSendLog
 from ..models.settings import SystemSetting
 
 if TYPE_CHECKING:
@@ -33,19 +37,61 @@ _SEVERITY_COLOR = {
     "info":     "#2563eb",
 }
 
+_PD_SEVERITY = {
+    "critical": "critical",
+    "major":    "error",
+    "minor":    "warning",
+    "warning":  "warning",
+    "info":     "info",
+}
+
 
 def _render(template: str, ctx: dict) -> str:
     return re.sub(r'\{\{(\w+)\}\}', lambda m: str(ctx.get(m.group(1), '')), template)
 
 
-async def _load_smtp(db: AsyncSession) -> Optional[dict]:
+async def _with_retry(fn, max_attempts: int = 3) -> tuple[bool, Optional[str], int]:
+    """Call async fn() up to max_attempts times with exponential backoff.
+    Returns (success, error_str, attempts_used)."""
+    last_exc: Optional[Exception] = None
+    for attempt in range(max_attempts):
+        try:
+            await fn()
+            return True, None, attempt + 1
+        except Exception as exc:
+            last_exc = exc
+            if attempt < max_attempts - 1:
+                await asyncio.sleep(2 ** attempt)
+    return False, str(last_exc), max_attempts
+
+
+async def _log_send(
+    channel_id, tenant_id, alert_id,
+    event: str, status: str, error: Optional[str], attempts: int,
+) -> None:
+    try:
+        async with AsyncSessionLocal() as db:
+            db.add(NotificationSendLog(
+                channel_id=channel_id,
+                tenant_id=tenant_id,
+                alert_id=alert_id,
+                event=event,
+                status=status,
+                error=error,
+                attempts=attempts,
+            ))
+            await db.commit()
+    except Exception as exc:
+        logger.error("notify_log_write_failed", error=str(exc))
+
+
+async def _load_smtp(db) -> Optional[dict]:
     """Load and decrypt SMTP server config from system_settings."""
     try:
         row = (await db.execute(
             select(SystemSetting).where(SystemSetting.key == _SMTP_KEY)
         )).scalar_one_or_none()
     except Exception:
-        # Table doesn't exist yet (migration pending) — treat as unconfigured.
         return None
     if row is None or not row.value.get("host"):
         return None
@@ -56,6 +102,49 @@ async def _load_smtp(db: AsyncSession) -> Optional[dict]:
         except Exception:
             cfg["password"] = ""
     return cfg
+
+
+def _build_ctx(alert: Alert, rule: AlertRule, resolved: bool, platform: Optional[dict] = None) -> dict:
+    """Build common notification context dict shared by all channel types."""
+    import zoneinfo
+    platform  = platform or {}
+    tag       = "RESOLVED" if resolved else alert.severity.upper()
+    alert_ctx = alert.context or {}
+    sev_color = _SEVERITY_COLOR.get(alert.severity, "#475569")
+    base_url  = platform.get("base_url", "").rstrip("/")
+
+    try:
+        tz = zoneinfo.ZoneInfo(platform.get("timezone", "UTC"))
+    except Exception:
+        tz = zoneinfo.ZoneInfo("UTC")
+
+    def _fmt_ts(dt: Optional[datetime]) -> str:
+        if not dt:
+            return "—"
+        return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
+
+    return {
+        "tag":            tag,
+        "title":          alert.title,
+        "metric":         alert_ctx.get("metric", rule.metric),
+        "severity":       alert.severity,
+        "severity_color": sev_color,
+        "status":         "resolved" if resolved else alert.status,
+        "rule_name":      rule.name,
+        "description":    rule.description or "",
+        "device_name":    alert_ctx.get("device_name", ""),
+        "value":          str(alert_ctx["value"])     if alert_ctx.get("value")     is not None else "—",
+        "threshold":      str(alert_ctx["threshold"]) if alert_ctx.get("threshold") is not None else "—",
+        "interface_name": alert_ctx.get("interface_name", ""),
+        "prefix":         alert_ctx.get("prefix", ""),
+        "neighbor":       alert_ctx.get("neighbor", ""),
+        "ospf_state":     alert_ctx.get("ospf_state", ""),
+        "triggered_at":   _fmt_ts(alert.triggered_at),
+        "resolved_at":    _fmt_ts(alert.resolved_at),
+        "alert_url":      f"{base_url}/alerts/{alert.id}" if base_url else "",
+        "alert_id":       str(alert.id),
+        "platform_name":  platform.get("platform_name", "Anthrimon"),
+    }
 
 
 async def dispatch(alert: Alert, rule: AlertRule, *, resolved: bool = False) -> None:
@@ -71,38 +160,31 @@ async def dispatch(alert: Alert, rule: AlertRule, *, resolved: bool = False) -> 
             )
         )).scalars().all()
 
-        email_channels = [c for c in channels if c.type == "email"]
-        other_channels = [c for c in channels if c.type != "email"]
-
-        for c in other_channels:
-            logger.debug("notify_channel_type_not_implemented", type=c.type)
-
-        if not email_channels:
+        if not channels:
             return
 
-        smtp = await _load_smtp(db)
+        email_channels = [c for c in channels if c.type == "email"]
+        smtp = await _load_smtp(db) if email_channels else None
 
-    if smtp is None:
-        logger.warning("notify_smtp_not_configured", alert_id=str(alert.id))
-        return
-
-    async with AsyncSessionLocal() as tdb:
-        # Try metric-specific template first, fall back to global default
-        metric_key = f"{_TEMPLATE_KEY}_{rule.metric}"
-        mrow = (await tdb.execute(
-            select(SystemSetting).where(SystemSetting.key == metric_key)
-        )).scalar_one_or_none()
-        if mrow and mrow.value.get("html"):
-            tmpl_subject = mrow.value.get("subject")
-            tmpl_html    = mrow.value.get("html")
-        else:
-            trow = (await tdb.execute(
-                select(SystemSetting).where(SystemSetting.key == _TEMPLATE_KEY)
+        # Email template
+        tmpl_subject: Optional[str] = None
+        tmpl_html:    Optional[str] = None
+        if email_channels:
+            metric_key = f"{_TEMPLATE_KEY}_{rule.metric}"
+            mrow = (await db.execute(
+                select(SystemSetting).where(SystemSetting.key == metric_key)
             )).scalar_one_or_none()
-            tmpl_subject = trow.value.get("subject") if trow else None
-            tmpl_html    = trow.value.get("html")    if trow else None
+            if mrow and mrow.value.get("html"):
+                tmpl_subject = mrow.value.get("subject")
+                tmpl_html    = mrow.value.get("html")
+            else:
+                trow = (await db.execute(
+                    select(SystemSetting).where(SystemSetting.key == _TEMPLATE_KEY)
+                )).scalar_one_or_none()
+                tmpl_subject = trow.value.get("subject") if trow else None
+                tmpl_html    = trow.value.get("html")    if trow else None
 
-        prow = (await tdb.execute(
+        prow = (await db.execute(
             select(SystemSetting).where(SystemSetting.key == "platform")
         )).scalar_one_or_none()
         platform = prow.value if prow else {}
@@ -127,91 +209,332 @@ async def dispatch(alert: Alert, rule: AlertRule, *, resolved: bool = False) -> 
     if platform.get("business_hours_enabled") and not resolved:
         try:
             import zoneinfo
-            tz_name = platform.get("timezone", "UTC")
-            tz = zoneinfo.ZoneInfo(tz_name)
+            tz_name  = platform.get("timezone", "UTC")
+            tz       = zoneinfo.ZoneInfo(tz_name)
             now_local = datetime.now(tz)
-            bh_start   = int(platform.get("business_hours_start", 8))
-            bh_end     = int(platform.get("business_hours_end",   18))
-            biz_days   = platform.get("business_days", [0, 1, 2, 3, 4])
-            weekday    = now_local.weekday()  # Mon=0, Sun=6
-            hour       = now_local.hour
-            in_hours   = weekday in biz_days and bh_start <= hour < bh_end
+            bh_start  = int(platform.get("business_hours_start", 8))
+            bh_end    = int(platform.get("business_hours_end",   18))
+            biz_days  = platform.get("business_days", [0, 1, 2, 3, 4])
+            in_hours  = now_local.weekday() in biz_days and bh_start <= now_local.hour < bh_end
             if not in_hours:
                 logger.info("notify_skipped_outside_business_hours", alert_id=str(alert.id))
                 return
         except Exception:
             pass
 
-    subject, plain, html = _build_email(alert, rule, resolved, tmpl_subject, tmpl_html, platform)
-    loop = asyncio.get_running_loop()
+    ctx   = _build_ctx(alert, rule, resolved, platform)
+    loop  = asyncio.get_running_loop()
+    event = "alert.resolved" if resolved else "alert.fired"
 
-    for channel in email_channels:
-        recipients: list[str] = channel.config.get("to", [])
-        if not recipients:
+    for channel in channels:
+        send_fn: Optional[object] = None
+
+        if channel.type == "email":
+            if smtp is None:
+                logger.warning("notify_smtp_not_configured", alert_id=str(alert.id))
+                continue
+            recipients: list[str] = channel.config.get("to", [])
+            if not recipients:
+                continue
+            subject, plain, html = _build_email(alert, rule, resolved, tmpl_subject, tmpl_html, platform, ctx)
+            async def _send_email_fn(s=smtp, r=recipients, su=subject, p=plain, h=html):
+                await loop.run_in_executor(None, _send_smtp, s, r, su, p, h)
+            send_fn = _send_email_fn
+
+        elif channel.type == "slack":
+            webhook_url = channel.config.get("webhook_url", "")
+            if not webhook_url:
+                logger.warning("notify_slack_no_webhook", channel_id=str(channel.id))
+                continue
+            async def _send_slack_fn(u=webhook_url, c=ctx):
+                await _send_slack(u, c)
+            send_fn = _send_slack_fn
+
+        elif channel.type == "webhook":
+            url = channel.config.get("url", "")
+            if not url:
+                logger.warning("notify_webhook_no_url", channel_id=str(channel.id))
+                continue
+            async def _send_webhook_fn(u=url, s=channel.config.get("secret"), c=ctx):
+                await _send_webhook(u, s, c)
+            send_fn = _send_webhook_fn
+
+        elif channel.type == "pagerduty":
+            key = channel.config.get("integration_key", "")
+            if not key:
+                logger.warning("notify_pagerduty_no_key", channel_id=str(channel.id))
+                continue
+            async def _send_pd_fn(k=key, c=ctx, aid=str(alert.id), r=resolved):
+                await _send_pagerduty(k, c, aid, r)
+            send_fn = _send_pd_fn
+
+        elif channel.type == "teams":
+            webhook_url = channel.config.get("webhook_url", "")
+            if not webhook_url:
+                logger.warning("notify_teams_no_webhook", channel_id=str(channel.id))
+                continue
+            async def _send_teams_fn(u=webhook_url, c=ctx):
+                await _send_teams(u, c)
+            send_fn = _send_teams_fn
+
+        if send_fn is None:
             continue
-        try:
-            await loop.run_in_executor(None, _send_smtp, smtp, recipients, subject, plain, html)
-            logger.info("notify_sent", channel_id=str(channel.id), type="email",
-                        alert_id=str(alert.id), resolved=resolved)
-        except Exception as exc:
-            logger.error("notify_dispatch_error", channel_id=str(channel.id),
-                         alert_id=str(alert.id), error=str(exc))
 
+        ok, err, attempts = await _with_retry(send_fn)
+        await _log_send(channel.id, channel.tenant_id, alert.id, event,
+                        "success" if ok else "failure", err, attempts)
+        if ok:
+            logger.info("notify_sent", channel_id=str(channel.id), type=channel.type,
+                        alert_id=str(alert.id), resolved=resolved)
+        else:
+            logger.error("notify_dispatch_error", channel_id=str(channel.id),
+                         type=channel.type, alert_id=str(alert.id),
+                         attempts=attempts, error=err)
+
+
+# ── Slack ──────────────────────────────────────────────────────────────────────
+
+async def _send_slack(webhook_url: str, ctx: dict) -> None:
+    tag   = ctx["tag"]
+    color = "#16a34a" if ctx["tag"] == "RESOLVED" else ctx["severity_color"]
+
+    fields = []
+    if ctx.get("device_name"):
+        fields.append({"type": "mrkdwn", "text": f"*Device:*\n{ctx['device_name']}"})
+    fields.append({"type": "mrkdwn", "text": f"*Severity:*\n{ctx['severity'].capitalize()}"})
+    fields.append({"type": "mrkdwn", "text": f"*Rule:*\n{ctx['rule_name']}"})
+    if ctx["value"] != "—":
+        fields.append({"type": "mrkdwn", "text": f"*Value:*\n{ctx['value']}"})
+    if ctx["threshold"] != "—":
+        fields.append({"type": "mrkdwn", "text": f"*Threshold:*\n{ctx['threshold']}"})
+    if ctx.get("interface_name"):
+        fields.append({"type": "mrkdwn", "text": f"*Interface:*\n{ctx['interface_name']}"})
+
+    blocks: list[dict] = [
+        {"type": "header", "text": {"type": "plain_text", "text": f"[{tag}] {ctx['title']}", "emoji": True}},
+    ]
+    if fields:
+        blocks.append({"type": "section", "fields": fields[:10]})
+    if ctx.get("description"):
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": ctx["description"]}})
+    if ctx.get("alert_url"):
+        blocks.append({
+            "type": "actions",
+            "elements": [{"type": "button", "text": {"type": "plain_text", "text": "View Alert"},
+                          "url": ctx["alert_url"]}],
+        })
+
+    payload = {"blocks": blocks, "text": f"[{tag}] {ctx['title']}"}
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(webhook_url, json=payload)
+        resp.raise_for_status()
+
+
+async def _test_slack(webhook_url: str, platform_name: str = "Anthrimon") -> None:
+    payload = {
+        "text": f"[TEST] {platform_name} notification test",
+        "blocks": [{"type": "section", "text": {
+            "type": "mrkdwn",
+            "text": f"*[TEST]* _{platform_name}_ — if you see this, the Slack channel is configured correctly.",
+        }}],
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(webhook_url, json=payload)
+        resp.raise_for_status()
+
+
+# ── Generic webhook ────────────────────────────────────────────────────────────
+
+async def _send_webhook(url: str, secret: Optional[str], ctx: dict) -> None:
+    payload: dict = {
+        "event":        "alert.resolved" if ctx["tag"] == "RESOLVED" else "alert.fired",
+        "alert_id":     ctx["alert_id"],
+        "title":        ctx["title"],
+        "rule_name":    ctx["rule_name"],
+        "severity":     ctx["severity"],
+        "status":       ctx["status"],
+        "metric":       ctx["metric"],
+        "triggered_at": ctx["triggered_at"],
+    }
+    if ctx["value"] != "—":
+        payload["value"] = ctx["value"]
+    if ctx["threshold"] != "—":
+        payload["threshold"] = ctx["threshold"]
+    if ctx.get("device_name"):
+        payload["device_name"] = ctx["device_name"]
+    if ctx.get("interface_name"):
+        payload["interface_name"] = ctx["interface_name"]
+    if ctx["tag"] == "RESOLVED":
+        payload["resolved_at"] = ctx["resolved_at"]
+    if ctx.get("alert_url"):
+        payload["alert_url"] = ctx["alert_url"]
+
+    body_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if secret:
+        sig = _hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
+        headers["X-Anthrimon-Signature"] = f"sha256={sig}"
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(url, content=body_bytes, headers=headers)
+        resp.raise_for_status()
+
+
+async def _test_webhook(url: str, secret: Optional[str], platform_name: str = "Anthrimon") -> None:
+    payload = {"event": "test", "source": platform_name,
+               "message": "Webhook test — if you receive this, the endpoint is reachable."}
+    body_bytes = json.dumps(payload, separators=(",", ":")).encode()
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if secret:
+        sig = _hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
+        headers["X-Anthrimon-Signature"] = f"sha256={sig}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(url, content=body_bytes, headers=headers)
+        resp.raise_for_status()
+
+
+# ── PagerDuty Events API v2 ────────────────────────────────────────────────────
+
+_PD_ENQUEUE = "https://events.pagerduty.com/v2/enqueue"
+
+
+async def _send_pagerduty(integration_key: str, ctx: dict, alert_id: str, resolved: bool) -> None:
+    event_action = "resolve" if resolved else "trigger"
+    dedup_key    = f"anthrimon-{alert_id}"
+
+    custom: dict = {
+        "rule":        ctx["rule_name"],
+        "metric":      ctx["metric"],
+        "triggered_at": ctx["triggered_at"],
+    }
+    if ctx.get("device_name"):
+        custom["device"] = ctx["device_name"]
+    if ctx["value"] != "—":
+        custom["value"] = ctx["value"]
+    if ctx["threshold"] != "—":
+        custom["threshold"] = ctx["threshold"]
+    if ctx.get("interface_name"):
+        custom["interface"] = ctx["interface_name"]
+
+    body: dict = {
+        "routing_key":  integration_key,
+        "event_action": event_action,
+        "dedup_key":    dedup_key,
+    }
+
+    if not resolved:
+        body["payload"] = {
+            "summary":        f"[{ctx['tag']}] {ctx['title']}",
+            "severity":       _PD_SEVERITY.get(ctx["severity"], "warning"),
+            "source":         ctx.get("device_name") or "anthrimon",
+            "custom_details": custom,
+        }
+        if ctx.get("alert_url"):
+            body["links"] = [{"href": ctx["alert_url"], "text": "View in Anthrimon"}]
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(_PD_ENQUEUE, json=body)
+        resp.raise_for_status()
+
+
+async def _test_pagerduty(integration_key: str, platform_name: str = "Anthrimon") -> None:
+    """Trigger a test incident then immediately resolve it."""
+    dedup_key = f"anthrimon-test-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}"
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        trigger = {
+            "routing_key":  integration_key,
+            "event_action": "trigger",
+            "dedup_key":    dedup_key,
+            "payload": {
+                "summary":  f"[TEST] {platform_name} notification test",
+                "severity": "info",
+                "source":   "anthrimon",
+            },
+        }
+        resp = await client.post(_PD_ENQUEUE, json=trigger)
+        resp.raise_for_status()
+        resolve = {"routing_key": integration_key, "event_action": "resolve", "dedup_key": dedup_key}
+        await client.post(_PD_ENQUEUE, json=resolve)
+
+
+# ── Microsoft Teams ────────────────────────────────────────────────────────────
+
+async def _send_teams(webhook_url: str, ctx: dict) -> None:
+    resolved   = ctx["tag"] == "RESOLVED"
+    hex_color  = ("#16a34a" if resolved else ctx["severity_color"]).lstrip("#")
+
+    facts = [{"name": "Rule", "value": ctx["rule_name"]}]
+    if ctx.get("device_name"):
+        facts.append({"name": "Device", "value": ctx["device_name"]})
+    facts.append({"name": "Severity", "value": ctx["severity"].capitalize()})
+    if ctx["value"] != "—":
+        facts.append({"name": "Value", "value": ctx["value"]})
+    if ctx["threshold"] != "—":
+        facts.append({"name": "Threshold", "value": ctx["threshold"]})
+    if ctx.get("interface_name"):
+        facts.append({"name": "Interface", "value": ctx["interface_name"]})
+    facts.append({"name": "Triggered", "value": ctx["triggered_at"]})
+    if resolved:
+        facts.append({"name": "Resolved", "value": ctx["resolved_at"]})
+
+    tag   = ctx["tag"]
+    title = ctx["title"]
+    card: dict = {
+        "@type":       "MessageCard",
+        "@context":    "https://schema.org/extensions",
+        "themeColor":  hex_color,
+        "summary":     f"[{tag}] {title}",
+        "sections": [{
+            "activityTitle":    f"**[{tag}]** {title}",
+            "activitySubtitle": ctx.get("description") or "",
+            "facts":            facts,
+        }],
+    }
+    if ctx.get("alert_url"):
+        card["potentialAction"] = [{
+            "@type": "OpenUri",
+            "name":  "View Alert",
+            "targets": [{"os": "default", "uri": ctx["alert_url"]}],
+        }]
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(webhook_url, json=card)
+        resp.raise_for_status()
+
+
+async def _test_teams(webhook_url: str, platform_name: str = "Anthrimon") -> None:
+    card = {
+        "@type":      "MessageCard",
+        "@context":   "https://schema.org/extensions",
+        "themeColor": "2563eb",
+        "summary":    f"[TEST] {platform_name} notification test",
+        "sections": [{"activityTitle": f"[TEST] {platform_name}",
+                      "activitySubtitle": "If you see this, the Teams channel is configured correctly."}],
+    }
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        resp = await client.post(webhook_url, json=card)
+        resp.raise_for_status()
+
+
+# ── Email ──────────────────────────────────────────────────────────────────────
 
 def _build_email(
     alert: Alert, rule: AlertRule, resolved: bool,
     tmpl_subject: Optional[str] = None,
     tmpl_html: Optional[str] = None,
     platform: Optional[dict] = None,
+    ctx: Optional[dict] = None,
 ) -> tuple[str, str, str]:
     from ..routers.admin import DEFAULT_SUBJECT, DEFAULT_HTML
 
-    import zoneinfo
-    platform      = platform or {}
-    tag           = "RESOLVED" if resolved else alert.severity.upper()
-    alert_ctx     = alert.context or {}
-    sev_color     = _SEVERITY_COLOR.get(alert.severity, "#475569")
-    base_url      = platform.get("base_url", "").rstrip("/")
-    platform_name = platform.get("platform_name", "Anthrimon")
+    platform = platform or {}
+    if ctx is None:
+        ctx = _build_ctx(alert, rule, resolved, platform)
 
-    try:
-        tz = zoneinfo.ZoneInfo(platform.get("timezone", "UTC"))
-    except Exception:
-        tz = zoneinfo.ZoneInfo("UTC")
-
-    def _fmt_ts(dt: Optional[datetime]) -> str:
-        if not dt:
-            return "—"
-        return dt.astimezone(tz).strftime("%Y-%m-%d %H:%M %Z")
-
-    ctx = {
-        "tag":            tag,
-        "title":          alert.title,
-        "metric":         alert_ctx.get("metric", rule.metric),
-        "severity":       alert.severity,
-        "severity_color": sev_color,
-        "status":         "resolved" if resolved else alert.status,
-        "rule_name":      rule.name,
-        "description":    rule.description or "",
-        "device_name":    alert_ctx.get("device_name", ""),
-        "value":          str(alert_ctx["value"])     if alert_ctx.get("value")     is not None else "—",
-        "threshold":      str(alert_ctx["threshold"]) if alert_ctx.get("threshold") is not None else "—",
-        "interface_name": alert_ctx.get("interface_name", ""),
-        "prefix":         alert_ctx.get("prefix", ""),
-        "neighbor":       alert_ctx.get("neighbor", ""),
-        "ospf_state":     alert_ctx.get("ospf_state", ""),
-        "triggered_at":   _fmt_ts(alert.triggered_at),
-        "resolved_at":    _fmt_ts(alert.resolved_at),
-        "alert_url":      f"{base_url}/alerts/{alert.id}" if base_url else "",
-        "alert_id":       str(alert.id),
-        "platform_name":  platform_name,
-    }
-
-    # ── Pre-render conditional HTML blocks ────────────────────────────────────
-    # Header uses green for resolved, severity color for active alerts.
+    alert_ctx  = alert.context or {}
+    sev_color  = ctx["severity_color"]
     header_color = "#16a34a" if resolved else sev_color
 
-    # Human-readable duration for resolved alerts.
     duration = ""
     if resolved and alert.triggered_at and alert.resolved_at:
         secs = int((alert.resolved_at - alert.triggered_at).total_seconds())
@@ -220,7 +543,6 @@ def _build_email(
         elif secs < 86400: duration = f"{secs // 3600}h {(secs % 3600) // 60}m"
         else:              duration = f"{secs // 86400}d {(secs % 86400) // 3600}h"
 
-    # Value/threshold card: only render when both values are present.
     _card_cell = "padding:14px 20px;"
     _card_lbl  = "margin:0;font-size:10px;font-weight:700;letter-spacing:1px;color:#94a3b8;text-transform:uppercase;"
     _card_val  = "margin:4px 0 0;font-size:22px;font-weight:700;color:#0f172a;"
@@ -240,7 +562,6 @@ def _build_email(
     else:
         value_card = ""
 
-    # Extra detail rows: description + type-specific fields, only when non-empty.
     _lbl  = 'style="font-size:13px;color:#64748b;padding:5px 0;width:110px;vertical-align:top;"'
     _cell = 'style="font-size:13px;color:#1e293b;font-weight:500;padding:5px 0;"'
     _mono = 'style="font-size:12px;color:#1e293b;font-weight:500;padding:5px 0;font-family:ui-monospace,monospace;"'
@@ -257,7 +578,6 @@ def _build_email(
         _extra.append(f'<tr><td {_lbl}>OSPF State</td><td {_mono}>{ctx["ospf_state"]}</td></tr>')
     extra_rows = "\n        ".join(_extra)
 
-    # Resolved row: only shown when the alert is actually resolved.
     if resolved:
         dur_span = (f" &nbsp;<span style='color:#94a3b8;font-size:11px;font-weight:400;'>({duration})</span>"
                     if duration else "")
@@ -265,20 +585,14 @@ def _build_email(
     else:
         resolved_row = ""
 
-    ctx.update({
-        "header_color": header_color,
-        "value_card":   value_card,
-        "extra_rows":   extra_rows,
-        "resolved_row": resolved_row,
-        "duration":     duration,
-    })
+    ctx = {**ctx, "header_color": header_color, "value_card": value_card,
+           "extra_rows": extra_rows, "resolved_row": resolved_row, "duration": duration}
 
     subject = _render(tmpl_subject or DEFAULT_SUBJECT, ctx)
     html    = _render(tmpl_html    or DEFAULT_HTML,    ctx)
 
-    # ── Plain-text fallback ────────────────────────────────────────────────────
     plain_lines = [
-        f"[{tag}] {ctx['title']}",
+        f"[{ctx['tag']}] {ctx['title']}",
         f"Device:    {ctx['device_name']}" if ctx["device_name"] else "",
         "",
         f"Rule:      {ctx['rule_name']}",

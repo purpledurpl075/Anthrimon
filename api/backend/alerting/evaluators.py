@@ -39,7 +39,9 @@ class Breach:
 async def resolve_devices(db: AsyncSession, tenant_id: str, selector: Optional[dict]) -> list[dict]:
     """Return rows of {id, hostname, vendor, tags, polling_interval_s} matching the selector."""
     base = """
-        SELECT id::text, hostname, vendor::text, tags, polling_interval_s,
+        SELECT id::text,
+               COALESCE(NULLIF(hostname, ''), host(mgmt_ip)) AS hostname,
+               vendor::text, tags, polling_interval_s,
                host(mgmt_ip) AS mgmt_ip, alert_exclusions,
                collector_id::text AS collector_id
         FROM devices
@@ -122,11 +124,11 @@ async def eval_mem(db: AsyncSession, device: dict, condition: str, threshold: fl
     return None
 
 
-async def eval_device_down(db: AsyncSession, device: dict) -> Optional[Breach]:
+async def eval_device_down(db: AsyncSession, device: dict, platform: dict | None = None) -> Optional[Breach]:
     """Fire if the device status is not 'up' or last_polled is stale.
 
-    Stale threshold = 2.5× the device's own poll interval (minimum 90s).
-    This prevents false positives on devices with longer poll intervals.
+    Stale threshold = 2.5× the device's own poll interval, floored at
+    device_down_stale_min_s (platform setting, default 45 s).
     """
     row = (await db.execute(
         text("SELECT status, last_polled FROM devices WHERE id = :did"),
@@ -137,7 +139,8 @@ async def eval_device_down(db: AsyncSession, device: dict) -> Optional[Breach]:
     status = row["status"]
     last_polled = row["last_polled"]
     poll_interval = int(device.get("polling_interval_s") or 15)
-    stale_seconds = max(90, int(poll_interval * 2.5))
+    stale_min = int((platform or {}).get("device_down_stale_min_s", 45))
+    stale_seconds = max(stale_min, int(poll_interval * 2.5))
     stale = (
         last_polled is None or
         (datetime.now(timezone.utc) - last_polled).total_seconds() > stale_seconds

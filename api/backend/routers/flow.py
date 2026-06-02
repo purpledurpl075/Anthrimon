@@ -9,10 +9,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..dependencies import get_current_user, get_db
+from ..dependencies import get_db, get_current_principal, accessible_device_ids_subquery, Principal, assert_device_access
 from ..models.device import Device
 from ..models.interface import Interface
-from ..models.tenant import User
 from ..models.settings import SystemSetting
 from ..intel import enrich_ips, get_intel, is_private
 
@@ -48,21 +47,18 @@ async def _ch(query: str) -> list[dict]:
 
 # ── Tenant device helpers ─────────────────────────────────────────────────────
 
-async def _tenant_device_ids(tenant_id, db: AsyncSession) -> list[str]:
-    """Return all active device UUIDs for this tenant as strings."""
+async def _tenant_device_ids(principal: Principal, db: AsyncSession) -> list[str]:
+    """Return accessible active device UUIDs for this principal as strings."""
     rows = (await db.execute(
-        select(Device.id).where(Device.tenant_id == tenant_id, Device.is_active == True)  # noqa: E712
+        accessible_device_ids_subquery(principal)
+        .where(Device.is_active == True)  # noqa: E712
     )).scalars().all()
     return [str(r) for r in rows]
 
 
-async def _assert_device_in_tenant(device_id: str, tenant_id, db: AsyncSession) -> Device:
-    dev = (await db.execute(
-        select(Device).where(Device.id == device_id, Device.tenant_id == tenant_id, Device.is_active == True)  # noqa: E712
-    )).scalar_one_or_none()
-    if dev is None:
-        raise HTTPException(status_code=404, detail="Device not found")
-    return dev
+async def _assert_device_in_tenant(device_id: str, principal: Principal, db: AsyncSession) -> None:
+    import uuid as _uuid
+    await assert_device_access(principal, _uuid.UUID(device_id), "readonly", db)
 
 
 def _device_filter(device_ids: list[str], alias: str = "") -> str:
@@ -133,14 +129,14 @@ def _private_clause(v4_col: str, v6_col: str | None = None) -> str:
 async def flow_summary(
     device_id:      Optional[str] = Query(default=None),
     minutes:        int           = Query(default=60, ge=1, le=10080),
-    current_user:   User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:             AsyncSession  = Depends(get_db),
 ) -> dict:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
 
     if not device_ids:
         return {"bytes_total": 0, "packets_total": 0, "flows_total": 0,
@@ -192,14 +188,14 @@ async def top_talkers(
     minutes:        int           = Query(default=60,  ge=1, le=10080),
     limit:          int           = Query(default=20,  ge=1, le=100),
     protocol:       Optional[int] = Query(default=None, description="IANA protocol number"),
-    current_user:   User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:             AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
 
     if not device_ids:
         return []
@@ -256,14 +252,14 @@ async def top_ports(
     device_id:      Optional[str] = Query(default=None),
     minutes:        int           = Query(default=60,  ge=1, le=10080),
     limit:          int           = Query(default=20,  ge=1, le=100),
-    current_user:   User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:             AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
 
     if not device_ids:
         return []
@@ -302,14 +298,14 @@ async def top_ports(
 async def protocol_breakdown(
     device_id:      Optional[str] = Query(default=None),
     minutes:        int           = Query(default=60, ge=5, le=10080),
-    current_user:   User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:             AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
 
     if not device_ids:
         return []
@@ -343,10 +339,10 @@ async def protocol_breakdown(
 async def interface_breakdown(
     device_id:      str           = Query(...),
     hours:          int           = Query(default=24, ge=1, le=720),
-    current_user:   User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:             AsyncSession  = Depends(get_db),
 ) -> list[dict]:
-    await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+    await _assert_device_in_tenant(device_id, principal, db)
 
     rows = await _ch(f"""
         SELECT
@@ -388,10 +384,10 @@ async def interface_breakdown(
 async def top_devices(
     minutes:        int  = Query(default=60, ge=1, le=10080),
     limit:          int  = Query(default=10, ge=1, le=50),
-    current_user:   User = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:             AsyncSession = Depends(get_db),
 ) -> list[dict]:
-    device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+    device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return []
 
@@ -412,7 +408,7 @@ async def top_devices(
     # Enrich with device names from PostgreSQL
     dev_rows = (await db.execute(
         select(Device.id, Device.hostname, Device.fqdn, Device.device_type)
-        .where(Device.tenant_id == current_user.tenant_id, Device.is_active == True)  # noqa: E712
+        .where(Device.tenant_id == principal.active_tenant_id, Device.is_active == True)  # noqa: E712
     )).all()
     dev_info = {str(r.id): {"hostname": r.fqdn or r.hostname, "device_type": r.device_type} for r in dev_rows}
 
@@ -439,14 +435,14 @@ async def search_flows(
     dst_port:       Optional[int] = Query(default=None),
     minutes:        int           = Query(default=10, ge=1, le=1440),
     limit:          int           = Query(default=200, ge=1, le=1000),
-    current_user:   User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:             AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
 
     if not device_ids:
         return []
@@ -521,14 +517,14 @@ async def flow_timeseries(
     src_ip:         Optional[str] = Query(default=None),
     dst_ip:         Optional[str] = Query(default=None),
     minutes:        int           = Query(default=60, ge=5, le=10080),
-    current_user:   User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:             AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
 
     if not device_ids:
         return []
@@ -580,10 +576,10 @@ async def interface_flow_timeseries(
     device_id:      str           = Query(...),
     if_index:       int           = Query(...),
     minutes:        int           = Query(default=60, ge=5, le=10080),
-    current_user:   User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:             AsyncSession  = Depends(get_db),
 ) -> list[dict]:
-    await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+    await _assert_device_in_tenant(device_id, principal, db)
 
     rows = await _ch(f"""
         SELECT
@@ -618,10 +614,10 @@ async def interface_top_talkers(
     if_index:       int           = Query(...),
     minutes:        int           = Query(default=60, ge=5, le=10080),
     limit:          int           = Query(default=10, ge=1, le=50),
-    current_user:   User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:             AsyncSession  = Depends(get_db),
 ) -> list[dict]:
-    await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+    await _assert_device_in_tenant(device_id, principal, db)
 
     rows = await _ch(f"""
         SELECT
@@ -659,16 +655,16 @@ async def ip_detail(
     ip:             str           = Query(...),
     minutes:        int           = Query(default=60, ge=1, le=10080),
     device_id:      Optional[str] = Query(default=None),
-    current_user:   User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:             AsyncSession  = Depends(get_db),
 ) -> dict:
     ver = _ip_version(ip)  # validate and get address family
 
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
 
     if not device_ids:
         return {}
@@ -878,14 +874,14 @@ async def asn_summary(
     minutes:      int           = Query(default=60, ge=1, le=10080),
     direction:    str           = Query(default="src", description="src | dst | both"),
     limit:        int           = Query(default=25, ge=1, le=100),
-    current_user: User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return []
 
@@ -1002,14 +998,14 @@ async def application_summary(
     device_id:    Optional[str] = Query(default=None),
     minutes:      int           = Query(default=60, ge=1, le=10080),
     limit:        int           = Query(default=30, ge=1, le=100),
-    current_user: User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return []
 
@@ -1083,14 +1079,14 @@ async def application_summary(
 async def direction_summary(
     device_id:    Optional[str] = Query(default=None),
     minutes:      int           = Query(default=60, ge=1, le=10080),
-    current_user: User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> dict:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return {}
 
@@ -1184,14 +1180,14 @@ async def elephant_flows(
     minutes:      int           = Query(default=60, ge=1, le=10080),
     min_mb:       float         = Query(default=5.0, ge=0.1, le=10000, description="Minimum flow size in MB"),
     limit:        int           = Query(default=50, ge=1, le=200),
-    current_user: User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return []
 
@@ -1224,7 +1220,7 @@ async def elephant_flows(
 
     dev_rows = (await db.execute(
         select(Device.id, Device.hostname, Device.fqdn)
-        .where(Device.tenant_id == current_user.tenant_id)
+        .where(Device.tenant_id == principal.active_tenant_id)
     )).all()
     dev_names = {str(r.id): r.fqdn or r.hostname for r in dev_rows}
 
@@ -1258,14 +1254,14 @@ async def subnet_summary(
     minutes:      int           = Query(default=60, ge=1, le=10080),
     direction:    str           = Query(default="src", description="src | dst"),
     limit:        int           = Query(default=25, ge=1, le=100),
-    current_user: User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return []
 
@@ -1302,14 +1298,14 @@ async def subnet_summary(
 async def tcp_flags_summary(
     device_id:    Optional[str] = Query(default=None),
     minutes:      int           = Query(default=60, ge=1, le=10080),
-    current_user: User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> dict:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return {}
 
@@ -1434,14 +1430,14 @@ async def geo_summary(
     device_id:    Optional[str] = Query(default=None),
     minutes:      int           = Query(default=60, ge=1, le=10080),
     limit:        int           = Query(default=30, ge=1, le=100),
-    current_user: User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return []
 
@@ -1499,14 +1495,14 @@ async def flow_threats(
     minutes:      int           = Query(default=60, ge=1, le=10080),
     min_score:    int           = Query(default=25, ge=1, le=100),
     limit:        int           = Query(default=50, ge=1, le=200),
-    current_user: User          = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:           AsyncSession  = Depends(get_db),
 ) -> list[dict]:
     if device_id:
-        await _assert_device_in_tenant(device_id, current_user.tenant_id, db)
+        await _assert_device_in_tenant(device_id, principal, db)
         device_ids = [device_id]
     else:
-        device_ids = await _tenant_device_ids(current_user.tenant_id, db)
+        device_ids = await _tenant_device_ids(principal, db)
     if not device_ids:
         return []
 
@@ -1575,7 +1571,7 @@ async def flow_threats(
 async def ip_intel_batch(
     ips:          str  = Query(..., description="Comma-separated IP addresses"),
     enrich:       bool = Query(default=False, description="Trigger background enrichment for stale entries"),
-    current_user: User = Depends(get_current_user),
+    principal:       Principal     = Depends(get_current_principal),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     ip_list = [ip.strip() for ip in ips.split(",") if ip.strip()][:50]

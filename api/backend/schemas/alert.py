@@ -144,6 +144,19 @@ class NotificationChannelRead(BaseModel):
     updated_at: datetime
 
 
+class NotificationSendLogRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    channel_id: uuid.UUID
+    alert_id: Optional[uuid.UUID]
+    event: str
+    status: str
+    error: Optional[str]
+    attempts: int
+    sent_at: datetime
+
+
 class AlertPolicyCreate(BaseModel):
     name: str
     description: Optional[str] = None

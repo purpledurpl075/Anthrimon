@@ -15,8 +15,9 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
-from ..dependencies import get_current_user, get_db
-from ..models.tenant import ApiToken, User
+from ..dependencies import get_current_principal, get_current_user, get_db, Principal
+from ..models.tenant import ApiToken, Tenant, User, UserSiteRole, UserTenantAccess
+from ..models.site import Site
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -48,6 +49,7 @@ class TokenResponse(BaseModel):
 class CreateApiTokenRequest(BaseModel):
     name: str
     scopes: list[str] = []
+    site_ids: list[uuid.UUID] = []
     expires_days: Optional[int] = None
 
 
@@ -56,8 +58,15 @@ class ApiTokenResponse(BaseModel):
     name: str
     token: str          # Only returned at creation — never stored in plain text.
     scopes: list
+    site_ids: list[uuid.UUID] = []
     expires_at: Optional[datetime] = None
     created_at: datetime
+
+
+class SiteMembership(BaseModel):
+    site_id: uuid.UUID
+    site_name: str
+    role: str
 
 
 class MeResponse(BaseModel):
@@ -66,6 +75,21 @@ class MeResponse(BaseModel):
     email: str
     full_name: Optional[str]
     role: str
+    is_platform_admin: bool = False
+    platform_role: Optional[str] = None
+    tenant_id: uuid.UUID
+    tenant_name: str
+    site_memberships: list[SiteMembership] = []
+
+
+class TenantSummary(BaseModel):
+    id: uuid.UUID
+    name: str
+    slug: str
+    is_active: bool
+
+
+class SwitchTenantRequest(BaseModel):
     tenant_id: uuid.UUID
 
 
@@ -78,14 +102,56 @@ class UpdateMeRequest(BaseModel):
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
-def _create_jwt(user_id: uuid.UUID) -> tuple[str, datetime]:
+def _create_jwt(
+    user: User,
+    active_tenant_id: Optional[uuid.UUID] = None,
+) -> tuple[str, datetime]:
+    """Issue a JWT with platform/tenant role claims.
+    active_tenant_id may differ from user.tenant_id when a platform_admin switches tenants."""
+    from ..dependencies import _normalize_tenant_role
     expire = datetime.now(timezone.utc) + timedelta(minutes=_settings.jwt_expire_minutes)
-    token = _jwt.encode(
-        {"sub": str(user_id), "exp": expire},
-        _settings.jwt_secret_key,
-        algorithm=_settings.jwt_algorithm,
-    )
+    claims: dict = {
+        "sub": str(user.id),
+        "exp": expire,
+        "tid": str(active_tenant_id or user.tenant_id),
+        "tr":  _normalize_tenant_role(user.role),
+    }
+    if user.platform_role:
+        claims["pr"] = user.platform_role
+    token = _jwt.encode(claims, _settings.jwt_secret_key, algorithm=_settings.jwt_algorithm)
     return token, expire
+
+
+# ── Shared response builder ────────────────────────────────────────────────────
+
+async def _me_response(user: User, db: AsyncSession) -> MeResponse:
+    """Build a MeResponse including tenant name and site memberships."""
+    tenant = (await db.execute(
+        select(Tenant).where(Tenant.id == user.tenant_id)
+    )).scalar_one()
+
+    membership_rows = (await db.execute(
+        select(UserSiteRole.site_id, UserSiteRole.role, Site.name)
+        .join(Site, Site.id == UserSiteRole.site_id)
+        .where(UserSiteRole.user_id == user.id, UserSiteRole.tenant_id == user.tenant_id)
+        .order_by(Site.name)
+    )).all()
+
+    return MeResponse(
+        id=user.id,
+        username=user.username,
+        email=user.email,
+        full_name=user.full_name,
+        role=user.role,
+        is_platform_admin=user.is_platform_admin,
+        platform_role=user.platform_role,
+        tenant_id=user.tenant_id,
+        tenant_name=tenant.name,
+        site_memberships=[
+            SiteMembership(site_id=r.site_id, site_name=r.name, role=r.role)
+            for r in membership_rows
+        ],
+    )
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -109,7 +175,7 @@ async def login(
         logger.warning("login_failed", username=body.username, ip=request.client.host if request.client else "unknown")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
 
-    token, expire = _create_jwt(user.id)
+    token, expire = _create_jwt(user)
 
     await db.execute(
         update(User).where(User.id == user.id).values(last_login=datetime.now(timezone.utc))
@@ -124,15 +190,11 @@ async def login(
 
 
 @router.get("/me", response_model=MeResponse, summary="Return the authenticated user's profile")
-async def me(current_user: User = Depends(get_current_user)) -> MeResponse:
-    return MeResponse(
-        id=current_user.id,
-        username=current_user.username,
-        email=current_user.email,
-        full_name=current_user.full_name,
-        role=current_user.role,
-        tenant_id=current_user.tenant_id,
-    )
+async def me(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> MeResponse:
+    return await _me_response(current_user, db)
 
 
 @router.patch("/me", response_model=MeResponse, summary="Update the authenticated user's profile")
@@ -158,14 +220,7 @@ async def update_me(
     await db.commit()
     await db.refresh(current_user)
     logger.info("user_updated", user_id=str(current_user.id))
-    return MeResponse(
-        id=current_user.id,
-        username=current_user.username,
-        email=current_user.email,
-        full_name=current_user.full_name,
-        role=current_user.role,
-        tenant_id=current_user.tenant_id,
-    )
+    return await _me_response(current_user, db)
 
 
 @router.post("/tokens", response_model=ApiTokenResponse, summary="Create a long-lived API token")
@@ -187,6 +242,7 @@ async def create_api_token(
         name=body.name,
         token_hash=token_hash,
         scopes=body.scopes,
+        site_ids=body.site_ids,
         expires_at=expires_at,
     )
     db.add(api_token)
@@ -199,6 +255,7 @@ async def create_api_token(
         name=api_token.name,
         token=raw_token,
         scopes=api_token.scopes,
+        site_ids=api_token.site_ids or [],
         expires_at=api_token.expires_at,
         created_at=api_token.created_at,
     )
@@ -220,10 +277,61 @@ async def revoke_api_token(
     if token is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Token not found")
 
-    # Only the owner or an admin may revoke.
-    if token.user_id != current_user.id and current_user.role not in ("admin", "superadmin"):
+    # Only the owner, a tenant admin, or a platform admin may revoke.
+    if token.user_id != current_user.id and current_user.role not in ("admin", "superadmin") and not current_user.is_platform_admin:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Not permitted")
 
     await db.delete(token)
     await db.commit()
     logger.info("api_token_revoked", token_id=str(token_id), by_user=str(current_user.id))
+
+
+@router.get("/tenants", response_model=list[TenantSummary], summary="List tenants accessible to this user")
+async def list_tenants(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> list[TenantSummary]:
+    if current_user.is_platform_admin:
+        rows = (await db.execute(select(Tenant).order_by(Tenant.name))).scalars().all()
+    else:
+        # Home tenant + any explicitly granted additional tenants
+        granted_tenant_ids = (await db.execute(
+            select(UserTenantAccess.tenant_id).where(UserTenantAccess.user_id == current_user.id)
+        )).scalars().all()
+        ids = {current_user.tenant_id} | set(granted_tenant_ids)
+        rows = (await db.execute(
+            select(Tenant).where(Tenant.id.in_(ids)).order_by(Tenant.name)
+        )).scalars().all()
+    return [TenantSummary(id=t.id, name=t.name, slug=t.slug, is_active=t.is_active) for t in rows]
+
+
+@router.post("/switch-tenant", response_model=TokenResponse, summary="Switch active tenant")
+async def switch_tenant(
+    body: SwitchTenantRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    # Platform admins can switch to any tenant; regular users need an explicit grant
+    if not current_user.is_platform_admin:
+        if body.tenant_id != current_user.tenant_id:
+            grant = (await db.execute(
+                select(UserTenantAccess).where(
+                    UserTenantAccess.user_id   == current_user.id,
+                    UserTenantAccess.tenant_id == body.tenant_id,
+                )
+            )).scalar_one_or_none()
+            if grant is None:
+                raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to that tenant")
+
+    target = (await db.execute(
+        select(Tenant).where(Tenant.id == body.tenant_id, Tenant.is_active == True)  # noqa: E712
+    )).scalar_one_or_none()
+    if target is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Tenant not found")
+
+    token, expire = _create_jwt(current_user, active_tenant_id=body.tenant_id)
+    logger.info("tenant_switched", user_id=str(current_user.id), target_tenant=str(body.tenant_id))
+    return TokenResponse(
+        access_token=token,
+        expires_in=_settings.jwt_expire_minutes * 60,
+    )

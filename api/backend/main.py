@@ -32,11 +32,11 @@ from .configmgmt.rest_state import start_rest_state_collector
 from .configmgmt.api_orchestrator import start_api_probe_loop
 from .configmgmt.eapi_collector import start_eapi_isis_collector
 from .collectors.monitor import start_collector_monitor
-from .routers import (admin_router, alerts_router, api_methods_router, auth_router, channels_router,
-                      bgp_router, collectors_router, config_router, credentials_router, devices_router,
-                      discovery_router, flow_router, syslog_router, interfaces_router,
-                      maintenance_router, overview_router, policies_router, topology_router,
-                      users_router)
+from .routers import (admin_router, platform_router, alerts_router, api_methods_router, auth_router,
+                      channels_router, bgp_router, clients_router, collectors_router, config_router,
+                      credentials_router, devices_router, discovery_router, flow_router,
+                      syslog_router, interfaces_router, maintenance_router, overview_router,
+                      policies_router, search_router, topology_router, users_router)
 from .routers.topology import start_topology_refresh_loop
 
 configure_logging()
@@ -215,6 +215,7 @@ async def health_check() -> dict:
 PREFIX = "/api/v1"
 
 app.include_router(admin_router,       prefix=PREFIX)
+app.include_router(platform_router,    prefix=PREFIX)
 app.include_router(auth_router,        prefix=PREFIX)
 app.include_router(devices_router,     prefix=PREFIX)
 app.include_router(interfaces_router,  prefix=PREFIX)
@@ -233,3 +234,5 @@ app.include_router(collectors_router,  prefix=PREFIX)
 app.include_router(policies_router,    prefix=PREFIX)
 app.include_router(topology_router,    prefix=PREFIX)
 app.include_router(users_router,       prefix=PREFIX)
+app.include_router(clients_router,     prefix=PREFIX)
+app.include_router(search_router,      prefix=PREFIX)

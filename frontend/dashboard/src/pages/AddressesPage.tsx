@@ -2,6 +2,7 @@ import { useState, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { fetchAllAddresses, fetchDevices } from '../api/devices'
+import { macToUrl } from '../api/clients'
 
 export default function AddressesPage() {
   const [search, setSearch]         = useState('')
@@ -103,7 +104,6 @@ export default function AddressesPage() {
                     <th className="text-left px-4 py-3 font-medium text-slate-600">IP</th>
                     <th className="text-left px-4 py-3 font-medium text-slate-600">Device</th>
                     <th className="text-left px-4 py-3 font-medium text-slate-600">Port</th>
-                    <th className="text-left px-4 py-3 font-medium text-slate-600 w-16">VLAN</th>
                     <th className="text-left px-4 py-3 font-medium text-slate-600 w-20">Status</th>
                     <th className="text-left px-4 py-3 font-medium text-slate-600 w-32">Last seen</th>
                   </tr>
@@ -116,8 +116,16 @@ export default function AddressesPage() {
                           e.type === 'arp' ? 'bg-cyan-600' : 'bg-violet-600'
                         }`}>{e.type.toUpperCase()}</span>
                       </td>
-                      <td className="px-4 py-2.5 font-mono text-slate-700 text-xs">{e.mac}</td>
-                      <td className="px-4 py-2.5 font-mono text-slate-600 text-xs">{e.ip ?? <span className="text-slate-300">—</span>}</td>
+                      <td className="px-4 py-2.5 font-mono text-xs">
+                        <Link to={`/clients/${macToUrl(e.mac)}`}
+                          className="text-blue-600 hover:underline">{e.mac}</Link>
+                      </td>
+                      <td className="px-4 py-2.5 font-mono text-xs">
+                        {e.ip
+                          ? <Link to={`/clients/${macToUrl(e.mac)}`}
+                              className="text-slate-700 hover:text-blue-600 hover:underline">{e.ip}</Link>
+                          : <span className="text-slate-300">—</span>}
+                      </td>
                       <td className="px-4 py-2.5 text-xs">
                         <Link to={`/devices/${e.device_id}`}
                           className="text-blue-600 hover:underline">{e.device_name}</Link>
@@ -132,7 +140,6 @@ export default function AddressesPage() {
                           <span className="ml-1.5 text-[10px] text-slate-400 font-mono">({e.vlan_interface})</span>
                         )}
                       </td>
-                      <td className="px-4 py-2.5 text-slate-500 text-xs">{e.vlan ?? <span className="text-slate-300">—</span>}</td>
                       <td className="px-4 py-2.5 text-slate-400 text-xs">{e.entry_type}</td>
                       <td className="px-4 py-2.5 text-slate-400 text-xs">{new Date(e.updated_at).toLocaleTimeString()}</td>
                     </tr>

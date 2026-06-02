@@ -22,6 +22,9 @@ import ConfigPage from './pages/ConfigPage'
 import CollectorsPage from './pages/CollectorsPage'
 import RoutingPage from './pages/RoutingPage'
 import WikiPage from './pages/WikiPage'
+import ClientPage from './pages/ClientPage'
+import PlatformPage from './pages/PlatformPage'
+import UsersPage from './pages/UsersPage'
 import Layout from './components/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
 
@@ -61,6 +64,9 @@ export default function App() {
             <Route path="/bgp"            element={<Navigate to="/routing" replace />} />
             <Route path="/wiki"           element={<WikiPage />} />
             <Route path="/wiki/:slug"     element={<WikiPage />} />
+            <Route path="/clients/:mac"   element={<ClientPage />} />
+            <Route path="/platform"       element={<PlatformPage />} />
+            <Route path="/users"          element={<UsersPage />} />
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
