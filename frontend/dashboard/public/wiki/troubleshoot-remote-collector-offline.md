@@ -5,8 +5,8 @@
 SSH to the remote host and check the service:
 
 ```bash
-sudo systemctl status anthrimon-remote-collector
-journalctl -u anthrimon-remote-collector -n 50 --no-pager
+sudo systemctl status anthrimon-collector
+journalctl -u anthrimon-collector -n 50 --no-pager
 ```
 
 ## 2. Check the WireGuard tunnel
@@ -30,7 +30,7 @@ The collector authenticates to the hub using an API key. If the key was revoked:
 
 1. Go to **Collectors** on the hub
 2. Find the collector — if it shows `key_revoked`, regenerate the key
-3. On the remote host, update `/etc/anthrimon-collector/config.yaml` with the new key and restart the service
+3. On the remote host, update `/etc/anthrimon/collector.yaml` with the new key and restart the service
 
 ## 4. Re-installing the collector
 
@@ -38,17 +38,23 @@ If the collector needs to be reinstalled, go to **Collectors** → **Add Collect
 
 ## 5. Hub certificate issues
 
-The remote collector validates the hub's TLS certificate. If the cert was replaced:
+The remote collector validates the hub's TLS certificate using the CA cert at `/etc/anthrimon/ca.crt`. If the hub cert was replaced:
 
-- Update the CA cert on the remote host at the path specified in `/etc/anthrimon-collector/config.yaml`
-- Restart the collector
+```bash
+# Copy the new CA cert from the hub
+scp user@hub:/etc/anthrimon/tls/ca.crt /tmp/ca.crt
+sudo install -m 644 /tmp/ca.crt /etc/anthrimon/ca.crt
+sudo systemctl restart anthrimon-collector
+```
+
+The CA cert must be world-readable (`644`) so the trap handler can also load it.
 
 ## 6. Collector heartbeat
 
 The hub marks a collector offline if it has not sent a heartbeat in the last 90 seconds. The collector sends a heartbeat every 30 seconds. If the WireGuard tunnel is up but the collector is still offline in the UI:
 
 ```bash
-journalctl -u anthrimon-remote-collector -n 20 --no-pager | grep -i "heartbeat\|health\|error"
+journalctl -u anthrimon-collector -n 20 --no-pager | grep -i "heartbeat\|health\|error"
 ```
 
 Look for HTTP errors posting to the hub API — this indicates the WireGuard tunnel is up but the API is not responding or is returning auth errors.

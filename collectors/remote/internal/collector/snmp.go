@@ -23,8 +23,9 @@ import (
 const (
 	// System
 	oidSysUpTime = "1.3.6.1.2.1.1.3.0"
-	oidSysDescr  = "1.3.6.1.2.1.1.1.0"
-	oidSysName   = "1.3.6.1.2.1.1.5.0"
+	oidSysDescr     = "1.3.6.1.2.1.1.1.0"
+	oidSysObjectID  = "1.3.6.1.2.1.1.2.0"
+	oidSysName      = "1.3.6.1.2.1.1.5.0"
 
 	// IF-MIB — ifTable (32-bit counters, admin/oper status, speed, descr)
 	oidIfTable      = "1.3.6.1.2.1.2.2.1"
@@ -68,14 +69,27 @@ type SNMPCollector struct {
 
 	mu      sync.RWMutex
 	devices []hub.Device
+
+	pollNowCh chan string // device ID to repoll immediately; "" = all devices
 }
 
 // NewSNMPCollector creates a new SNMPCollector.
 func NewSNMPCollector(hubClient *hub.Client, cfg config.SNMPConfig, log zerolog.Logger) *SNMPCollector {
 	return &SNMPCollector{
-		hub: hubClient,
-		cfg: cfg,
-		log: log.With().Str("component", "snmp_collector").Logger(),
+		hub:       hubClient,
+		cfg:       cfg,
+		log:       log.With().Str("component", "snmp_collector").Logger(),
+		pollNowCh: make(chan string, 16),
+	}
+}
+
+// TriggerPoll queues an immediate SNMP poll for one device (by ID) or all
+// devices (empty string).  Non-blocking: if the channel is full the trigger
+// is silently dropped since a poll is already queued.
+func (c *SNMPCollector) TriggerPoll(deviceID string) {
+	select {
+	case c.pollNowCh <- deviceID:
+	default:
 	}
 }
 
@@ -107,7 +121,45 @@ func (c *SNMPCollector) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			c.pollAll(ctx)
+		case deviceID := <-c.pollNowCh:
+			go c.pollOneByID(ctx, deviceID)
 		}
+	}
+}
+
+// pollOneByID polls a single device by ID and posts its metrics immediately.
+// Used for trap-triggered re-polls.
+func (c *SNMPCollector) pollOneByID(ctx context.Context, deviceID string) {
+	c.mu.RLock()
+	var dev *hub.Device
+	for i := range c.devices {
+		if c.devices[i].ID == deviceID {
+			d := c.devices[i]
+			dev = &d
+			break
+		}
+	}
+	c.mu.RUnlock()
+
+	if dev == nil {
+		c.log.Warn().Str("device_id", deviceID).Msg("trap repoll: device not found")
+		return
+	}
+
+	lines, err := c.pollDevice(*dev)
+	ts := time.Now().UnixMilli()
+	if err != nil || len(lines) == 0 {
+		if err != nil {
+			c.log.Warn().Err(err).Str("device_id", deviceID).Msg("trap repoll failed")
+		}
+		lines = []string{fmt.Sprintf(`anthrimon_device_unreachable{device_id=%q} 1 %d`, deviceID, ts)}
+	}
+
+	text := strings.Join(lines, "\n") + "\n"
+	if err := c.hub.PostMetrics(ctx, text); err != nil {
+		c.log.Error().Err(err).Str("device_id", deviceID).Msg("trap repoll: failed to post metrics")
+	} else {
+		c.log.Debug().Str("device_id", deviceID).Msg("trap repoll metrics posted")
 	}
 }
 
@@ -209,16 +261,20 @@ func (c *SNMPCollector) pollDevice(dev hub.Device) ([]string, error) {
 				dev.ID, uptime/100, ts))
 	}
 
-	// sysName + sysDescr — emitted once per cycle so the hub can backfill
-	// the hostname for devices that were registered without one.
-	sysInfoResult, sysErr := g.Get([]string{oidSysName, oidSysDescr})
-	if sysErr == nil && len(sysInfoResult.Variables) == 2 {
+	// sysName + sysDescr + sysObjectID — emitted once per cycle so the hub
+	// can backfill hostname, vendor, and device_type for newly-added devices.
+	sysInfoResult, sysErr := g.Get([]string{oidSysName, oidSysDescr, oidSysObjectID})
+	if sysErr == nil && len(sysInfoResult.Variables) >= 2 {
 		sysName  := strings.TrimSpace(pduString(sysInfoResult.Variables[0]))
 		sysDescr := strings.TrimSpace(pduString(sysInfoResult.Variables[1]))
+		sysOID   := ""
+		if len(sysInfoResult.Variables) >= 3 {
+			sysOID = strings.TrimPrefix(pduString(sysInfoResult.Variables[2]), ".")
+		}
 		if sysName != "" {
 			lines = append(lines,
-				fmt.Sprintf(`anthrimon_device_info{device_id=%q,sysname=%q,sysdescr=%q} 1 %d`,
-					dev.ID, sysName, sysDescr, ts))
+				fmt.Sprintf(`anthrimon_device_info{device_id=%q,sysname=%q,sysdescr=%q,sysobjectid=%q} 1 %d`,
+					dev.ID, sysName, sysDescr, sysOID, ts))
 		}
 	}
 

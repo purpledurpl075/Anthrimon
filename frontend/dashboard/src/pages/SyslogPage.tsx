@@ -6,7 +6,7 @@ import {
   fetchSyslogTopPrograms, fetchSyslogTopDevices,
   type SyslogMessage,
 } from '../api/syslog'
-import { fetchDevices } from '../api/devices'
+import { fetchDevices, fetchTraps, type TrapEvent } from '../api/devices'
 import { DEVICE_TYPE_COLOR, DeviceTypeIcon } from '../components/DeviceTypeIcon'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -19,6 +19,13 @@ function fmtNum(n: number): string {
 
 function fmtTs(ms: number): string {
   return new Date(ms).toLocaleString(undefined, {
+    month: 'short', day: 'numeric',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+  })
+}
+
+function fmtIso(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, {
     month: 'short', day: 'numeric',
     hour: '2-digit', minute: '2-digit', second: '2-digit',
   })
@@ -43,7 +50,6 @@ const SEV_BG: Record<SevName, string> = {
   debug:     'bg-slate-50 text-slate-400',
 }
 
-// severity number → max severity filter value (show this severity and above)
 const SEV_MAX: Record<SevName, number> = {
   emergency: 0, alert: 1, critical: 2, error: 3,
   warning: 4, notice: 5, info: 6, debug: 7,
@@ -56,6 +62,12 @@ const TIME_WINDOWS = [
   { label: '24h', minutes: 1440 },
   { label: '7d',  minutes: 10080 },
 ]
+
+const TRAP_SEV_BG: Record<string, string> = {
+  critical: 'bg-red-100 text-red-700',
+  warning:  'bg-yellow-100 text-yellow-700',
+  info:     'bg-slate-100 text-slate-600',
+}
 
 // ── Log rate mini chart ───────────────────────────────────────────────────────
 
@@ -82,10 +94,8 @@ function LogRateChart({ hours, deviceId }: { hours: number; deviceId: string }) 
     </div>
   )
 
-  // Stacked bar chart — one bar per hour, stacked by severity
   const maxTotal = Math.max(...byHour.map(([, sevs]) => Object.values(sevs).reduce((a, b) => a + b, 0)), 1)
   const barW = 100 / byHour.length
-
   const sevToDraw = ['error','warning','notice','info','debug'] as const
 
   return (
@@ -306,7 +316,6 @@ function MessageTable({ minutes, deviceId, severityMax, program, query }: {
   const [page, setPage] = useState(0)
   const LIMIT = 100
 
-  // Reset page when filters change
   useEffect(() => { setPage(0) }, [minutes, deviceId, severityMax, program, query])
 
   const [expanded, setExpanded] = useState<string | null>(null)
@@ -362,24 +371,19 @@ function MessageTable({ minutes, deviceId, severityMax, program, query }: {
                     onClick={() => setExpanded(isOpen ? null : key)}
                     className="w-full flex items-start gap-3 px-4 py-2.5 hover:bg-slate-50 transition-colors text-left group"
                   >
-                    {/* Severity badge */}
                     <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded mt-0.5 capitalize min-w-[4.5rem] text-center ${SEV_BG[sev] ?? SEV_BG.info}`}>
                       {m.severity_name}
                     </span>
-                    {/* Timestamp */}
                     <span className="shrink-0 text-[11px] font-mono text-slate-400 mt-0.5 w-36 hidden md:block">
                       {fmtTs(m.ts_ms)}
                     </span>
-                    {/* Device + program */}
                     <span className="shrink-0 text-[11px] text-slate-500 mt-0.5 w-28 truncate hidden lg:block">
                       {m.device_name}
                     </span>
                     <span className="shrink-0 text-[11px] font-mono text-slate-500 mt-0.5 w-20 truncate hidden lg:block">
                       {m.program}{m.pid ? `[${m.pid}]` : ''}
                     </span>
-                    {/* Message */}
                     <span className="flex-1 text-xs text-slate-700 truncate">{m.message}</span>
-                    {/* Expand indicator */}
                     <svg className={`w-3.5 h-3.5 text-slate-300 shrink-0 mt-0.5 transition-transform ${isOpen ? 'rotate-90' : ''}`}
                       fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
                   </button>
@@ -403,7 +407,6 @@ function MessageTable({ minutes, deviceId, severityMax, program, query }: {
             })}
           </div>
 
-          {/* Pagination */}
           {pages > 1 && (
             <div className="px-5 py-3 border-t border-slate-100 flex items-center justify-between">
               <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
@@ -423,21 +426,188 @@ function MessageTable({ minutes, deviceId, severityMax, program, query }: {
   )
 }
 
-// ── Page ──────────────────────────────────────────────────────────────────────
+// ── Traps tab ─────────────────────────────────────────────────────────────────
 
-export default function SyslogPage() {
+const TRAP_DAYS = [
+  { label: '1d', days: 1 },
+  { label: '7d', days: 7 },
+  { label: '30d', days: 30 },
+]
+
+function TrapsTab({ devices }: { devices: any[] }) {
+  const [days,      setDays]      = useState(7)
+  const [deviceId,  setDeviceId]  = useState('')
+  const [trapType,  setTrapType]  = useState('')
+  const [page,      setPage]      = useState(0)
+  const [expanded,  setExpanded]  = useState<string | null>(null)
+  const LIMIT = 200
+
+  useEffect(() => { setPage(0) }, [days, deviceId, trapType])
+
+  const { data, isLoading, isFetching } = useQuery({
+    queryKey:        ['traps', days, deviceId, trapType, page],
+    queryFn:         () => fetchTraps({
+      days,
+      device_id: deviceId || undefined,
+      trap_type: trapType || undefined,
+      limit:     LIMIT,
+      offset:    page * LIMIT,
+    }),
+    refetchInterval: 30_000,
+    placeholderData: (prev) => prev,
+  })
+
+  const items = data?.items ?? []
+  const total = data?.total ?? 0
+  const pages = Math.ceil(total / LIMIT)
+
+  // Collect unique trap types from results for the filter dropdown
+  const trapTypes = useMemo(() => {
+    const seen = new Set<string>()
+    items.forEach(t => seen.add(t.trap_type))
+    return [...seen].sort()
+  }, [items])
+
+  return (
+    <div className="flex-1 overflow-y-auto p-3 md:p-6 space-y-4">
+      {/* Filters */}
+      <div className="flex items-center gap-3 flex-wrap">
+        {/* Device filter */}
+        <select value={deviceId} onChange={e => setDeviceId(e.target.value)}
+          className="border border-slate-200 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-600">
+          <option value="">All devices</option>
+          {devices.map((d: any) => <option key={d.id} value={d.id}>{d.fqdn ?? d.hostname}</option>)}
+        </select>
+
+        {/* Trap type filter */}
+        {trapTypes.length > 0 && (
+          <select value={trapType} onChange={e => setTrapType(e.target.value)}
+            className="border border-slate-200 rounded-lg px-3 py-1.5 text-xs bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 text-slate-600">
+            <option value="">All trap types</option>
+            {trapTypes.map(t => <option key={t} value={t}>{t}</option>)}
+          </select>
+        )}
+
+        {/* Time window */}
+        <div className="flex rounded-lg overflow-hidden border border-slate-200 ml-auto">
+          {TRAP_DAYS.map(w => (
+            <button key={w.days} onClick={() => setDays(w.days)}
+              className={`px-3 py-1.5 text-xs font-medium transition-colors ${
+                days === w.days ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-50'
+              } ${w.days !== 1 ? 'border-l border-slate-200' : ''}`}>
+              {w.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Table */}
+      <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <div className="px-5 py-3.5 border-b border-slate-100 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <h2 className="text-sm font-semibold text-slate-800">SNMP Traps</h2>
+            {isFetching && <span className="w-3 h-3 rounded-full border-2 border-blue-400 border-t-transparent animate-spin" />}
+          </div>
+          <span className="text-xs text-slate-400">{fmtNum(total)} total</span>
+        </div>
+
+        {isLoading ? (
+          <div className="px-5 py-8 text-center text-xs text-slate-400">Loading…</div>
+        ) : items.length === 0 ? (
+          <div className="px-5 py-10 text-center">
+            <p className="text-sm text-slate-400">No traps received in this window</p>
+            <p className="text-xs text-slate-300 mt-1">Configure SNMP trap destination to this host on UDP :162</p>
+          </div>
+        ) : (
+          <>
+            <div className="divide-y divide-slate-50">
+              {items.map(trap => {
+                const isOpen = expanded === trap.id
+                const sevBg  = TRAP_SEV_BG[trap.severity] ?? TRAP_SEV_BG.info
+                return (
+                  <div key={trap.id}>
+                    <button
+                      onClick={() => setExpanded(isOpen ? null : trap.id)}
+                      className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-slate-50 transition-colors text-left group"
+                    >
+                      <span className={`shrink-0 text-[10px] font-semibold px-1.5 py-0.5 rounded capitalize min-w-[4rem] text-center ${sevBg}`}>
+                        {trap.severity}
+                      </span>
+                      <span className="shrink-0 text-[11px] font-mono text-slate-400 w-36 hidden md:block">
+                        {fmtIso(trap.received_at)}
+                      </span>
+                      <span className="shrink-0 text-[11px] text-slate-600 w-28 truncate hidden lg:block font-medium">
+                        {trap.hostname || trap.source_ip}
+                      </span>
+                      <span className="shrink-0 text-[11px] font-mono text-indigo-600 w-36 truncate hidden xl:block">
+                        {trap.trap_type}
+                      </span>
+                      <span className="flex-1 text-xs text-slate-500 truncate font-mono">
+                        {trap.oid}
+                      </span>
+                      <span className="shrink-0 text-[10px] text-slate-400 hidden sm:block">
+                        {trap.snmp_version}
+                      </span>
+                      <svg className={`w-3.5 h-3.5 text-slate-300 shrink-0 transition-transform ${isOpen ? 'rotate-90' : ''}`}
+                        fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>
+                    </button>
+
+                    {isOpen && (
+                      <div className="px-4 pb-3 bg-slate-50 border-t border-slate-100">
+                        <div className="grid grid-cols-2 md:grid-cols-3 gap-x-4 gap-y-1 text-[11px] mt-2 mb-2">
+                          <div><span className="text-slate-400">Device</span> <Link to={`/devices/${trap.device_id}`} className="text-blue-600 hover:underline font-medium">{trap.hostname || '—'}</Link></div>
+                          <div><span className="text-slate-400">Source IP</span> <span className="text-slate-700 font-mono">{trap.source_ip}</span></div>
+                          <div><span className="text-slate-400">SNMP</span> <span className="text-slate-700">{trap.snmp_version}</span></div>
+                          <div><span className="text-slate-400">Trap type</span> <span className="text-slate-700">{trap.trap_type}</span></div>
+                          <div className="col-span-2 md:col-span-3"><span className="text-slate-400">OID</span> <span className="text-slate-700 font-mono">{trap.oid}</span></div>
+                          <div className="col-span-2 md:col-span-3"><span className="text-slate-400">Time</span> <span className="text-slate-700 font-mono">{fmtIso(trap.received_at)}</span></div>
+                        </div>
+                        {trap.varbinds && trap.varbinds.length > 0 && (
+                          <div className="mt-1">
+                            <p className="text-[10px] text-slate-400 mb-1">Varbinds</p>
+                            <div className="bg-slate-900 text-green-400 font-mono text-[11px] rounded-lg px-3 py-2 space-y-0.5">
+                              {trap.varbinds.map((v: any, i: number) => (
+                                <div key={i}><span className="text-slate-400">{v.oid}</span> <span className="text-slate-300">=</span> {String(v.value)}</div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+
+            {pages > 1 && (
+              <div className="px-5 py-3 border-t border-slate-100 flex items-center justify-between">
+                <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
+                  className="text-xs text-slate-500 hover:text-slate-800 disabled:opacity-30 transition-colors">
+                  ← Previous
+                </button>
+                <span className="text-xs text-slate-400">Page {page + 1} of {pages}</span>
+                <button onClick={() => setPage(p => Math.min(pages - 1, p + 1))} disabled={page >= pages - 1}
+                  className="text-xs text-slate-500 hover:text-slate-800 disabled:opacity-30 transition-colors">
+                  Next →
+                </button>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+// ── Syslog tab content ────────────────────────────────────────────────────────
+
+function SyslogTab({ devices }: { devices: any[] }) {
   const [deviceId,    setDeviceId]    = useState('')
   const [windowMins,  setWindowMins]  = useState(1440)
   const [severityMax, setSeverityMax] = useState<number | null>(null)
   const [program,     setProgram]     = useState('')
   const [query,       setQuery]       = useState('')
   const [queryInput,  setQueryInput]  = useState('')
-
-  const { data: devicesResp } = useQuery({
-    queryKey: ['devices-list'],
-    queryFn:  () => fetchDevices({ limit: 500 }),
-  })
-  const devices: any[] = (devicesResp as any)?.items ?? devicesResp ?? []
 
   const hasFilters = severityMax !== null || !!program || !!query
 
@@ -449,15 +619,10 @@ export default function SyslogPage() {
   }
 
   return (
-    <div className="flex flex-col h-full">
-      {/* Title bar */}
-      <div className="px-6 py-4 border-b border-slate-200 bg-white shrink-0">
+    <>
+      {/* Syslog filter bar */}
+      <div className="px-6 py-3 border-b border-slate-100 bg-white shrink-0">
         <div className="flex items-center gap-4 flex-wrap">
-          <div className="flex-1 min-w-0">
-            <h1 className="text-base font-semibold text-slate-800">Syslog</h1>
-            <p className="text-xs text-slate-400 mt-0.5">RFC 3164 · RFC 5424 · UDP/TCP :514</p>
-          </div>
-
           {/* Search */}
           <form onSubmit={e => { e.preventDefault(); setQuery(queryInput) }} className="flex items-center gap-1.5">
             <input
@@ -491,7 +656,6 @@ export default function SyslogPage() {
           </div>
         </div>
 
-        {/* Active filter chips */}
         {hasFilters && (
           <div className="flex items-center gap-2 mt-2.5 flex-wrap">
             {severityMax !== null && (
@@ -518,7 +682,6 @@ export default function SyslogPage() {
       </div>
 
       <div className="flex-1 overflow-y-auto p-3 md:p-6 space-y-4">
-
         <SummaryCards minutes={windowMins} deviceId={deviceId} />
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
@@ -540,6 +703,55 @@ export default function SyslogPage() {
           severityMax={severityMax} program={program} query={query}
         />
       </div>
+    </>
+  )
+}
+
+// ── Page ──────────────────────────────────────────────────────────────────────
+
+type LogTab = 'syslog' | 'traps'
+
+export default function SyslogPage() {
+  const [activeTab, setActiveTab] = useState<LogTab>('syslog')
+
+  const { data: devicesResp } = useQuery({
+    queryKey: ['devices-list'],
+    queryFn:  () => fetchDevices({ limit: 500 }),
+  })
+  const devices: any[] = (devicesResp as any)?.items ?? devicesResp ?? []
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Title bar */}
+      <div className="px-6 py-4 border-b border-slate-200 bg-white shrink-0">
+        <div className="flex items-center gap-6">
+          <div className="flex-1 min-w-0">
+            <h1 className="text-base font-semibold text-slate-800">Logging</h1>
+            <p className="text-xs text-slate-400 mt-0.5">Syslog · SNMP Traps</p>
+          </div>
+
+          {/* Tabs */}
+          <div className="flex rounded-lg overflow-hidden border border-slate-200">
+            <button
+              onClick={() => setActiveTab('syslog')}
+              className={`px-4 py-1.5 text-xs font-medium transition-colors ${
+                activeTab === 'syslog' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-50'
+              }`}>
+              Syslog
+            </button>
+            <button
+              onClick={() => setActiveTab('traps')}
+              className={`px-4 py-1.5 text-xs font-medium transition-colors border-l border-slate-200 ${
+                activeTab === 'traps' ? 'bg-slate-800 text-white' : 'text-slate-500 hover:bg-slate-50'
+              }`}>
+              Traps
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {activeTab === 'syslog' && <SyslogTab devices={devices} />}
+      {activeTab === 'traps'  && <TrapsTab  devices={devices} />}
     </div>
   )
 }

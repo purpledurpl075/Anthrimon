@@ -144,6 +144,7 @@ def _build_ctx(alert: Alert, rule: AlertRule, resolved: bool, platform: Optional
         "alert_url":      f"{base_url}/alerts/{alert.id}" if base_url else "",
         "alert_id":       str(alert.id),
         "platform_name":  platform.get("platform_name", "Anthrimon"),
+        "base_url":       base_url,
     }
 
 

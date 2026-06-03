@@ -701,7 +701,7 @@ export default function Sidebar() {
           <Section label="Observability" icon={I.observability}>
             <Item to="/alerts"  label="Alerts"  icon={I.bell}   badge={openAlerts} />
             <Item to="/flow"    label="Flow"    icon={I.flow} />
-            <Item to="/syslog"  label="Syslog"  icon={I.syslog} />
+            <Item to="/syslog"  label="Logging" icon={I.syslog} />
           </Section>
 
           {/* Analysis — deeper investigation */}

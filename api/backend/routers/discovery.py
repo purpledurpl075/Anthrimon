@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import ipaddress
-import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
+import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, text
@@ -15,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..dependencies import get_current_user, get_db, require_role
 from ..models.tenant import User
 from ..schemas.discovery import DiscoveredDevice, SweepJob, SweepRequest
+from ..snmp_probe import probe_v2c as _probe_v2c, probe_v3 as _probe_v3
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["discovery"])
@@ -25,106 +29,25 @@ _jobs_lock = asyncio.Lock()
 
 JOB_EXPIRE_MINUTES = 60
 
-_VENDOR_PREFIXES: list[tuple[str, str]] = [
-    ("1.3.6.1.4.1.2636.",   "juniper"),
-    ("1.3.6.1.4.1.30065.",  "arista"),
-    ("1.3.6.1.4.1.12356.",  "fortios"),
-    ("1.3.6.1.4.1.47196.",  "aruba_cx"),
-    ("1.3.6.1.4.1.11.",     "procurve"),
-    ("1.3.6.1.4.1.9.12.",   "cisco_nxos"),
-    ("1.3.6.1.4.1.9.6.",    "cisco_iosxe"),
-    ("1.3.6.1.4.1.9.1.",    "cisco_ios"),
-    ("1.3.6.1.4.1.9.",      "cisco_ios"),
-]
-_SYSDESCR_OVERRIDES: list[tuple[str, str, str]] = [
-    ("cisco_ios", r"NX-OS",  "cisco_nxos"),
-    ("cisco_ios", r"IOS-XR", "cisco_iosxr"),
-]
+_WG_SUBNET = ipaddress.ip_network("10.100.0.0/24")
 
 
-def _detect_vendor(sys_object_id: str, sys_descr: str) -> str:
-    vendor = "unknown"
-    for prefix, v in _VENDOR_PREFIXES:
-        if sys_object_id.startswith(prefix):
-            vendor = v
-            break
-    for oid_vendor, pattern, corrected in _SYSDESCR_OVERRIDES:
-        if vendor == oid_vendor and re.search(pattern, sys_descr, re.IGNORECASE):
-            vendor = corrected
-            break
-    return vendor
+def _control_token(api_key_hash: str) -> str:
+    minute = str(int(time.time()) // 60)
+    return hmac.new(api_key_hash.encode(), minute.encode(), hashlib.sha256).hexdigest()
 
 
-_SYS_DESCR     = "1.3.6.1.2.1.1.1.0"
-_SYS_OBJECT_ID = "1.3.6.1.2.1.1.2.0"
-_SYS_NAME      = "1.3.6.1.2.1.1.5.0"
-
-
-async def _probe_v2c(ip: str, community: str, port: int, timeout: int) -> Optional[DiscoveredDevice]:
-    from pysnmp.hlapi.v3arch.asyncio import (
-        CommunityData, ContextData, ObjectIdentity, ObjectType,
-        SnmpEngine, UdpTransportTarget, get_cmd,
-    )
-    engine = SnmpEngine()
-    try:
-        transport = await UdpTransportTarget.create((ip, port), timeout=timeout, retries=0)
-        err_indication, err_status, _, var_binds = await get_cmd(
-            engine, CommunityData(community, mpModel=1), transport, ContextData(),
-            ObjectType(ObjectIdentity(_SYS_DESCR)),
-            ObjectType(ObjectIdentity(_SYS_OBJECT_ID)),
-            ObjectType(ObjectIdentity(_SYS_NAME)),
-        )
-        if err_indication or err_status:
-            return None
-        sys_descr = str(var_binds[0][1]) if len(var_binds) > 0 else ""
-        sys_oid   = str(var_binds[1][1]) if len(var_binds) > 1 else ""
-        sys_name  = str(var_binds[2][1]) if len(var_binds) > 2 else ip
-        return DiscoveredDevice(ip=ip, hostname=sys_name, vendor=_detect_vendor(sys_oid, sys_descr),
-                                sys_descr=sys_descr, sys_object_id=sys_oid, already_in_db=False)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        return None
-
-
-_AUTH_PROTO_MAP = {"md5": "usmHMACMD5AuthProtocol", "sha": "usmHMACSHAAuthProtocol",
-                   "sha256": "usmHMAC192SHA256AuthProtocol", "sha512": "usmHMAC384SHA512AuthProtocol"}
-_PRIV_PROTO_MAP = {"des": "usmDESPrivProtocol", "aes": "usmAesCfb128Protocol",
-                   "aes192": "usmAesCfb192Protocol", "aes256": "usmAesCfb256Protocol"}
-
-
-async def _probe_v3(ip: str, cred_data: dict, port: int, timeout: int) -> Optional[DiscoveredDevice]:
-    from pysnmp.hlapi.v3arch.asyncio import (
-        ContextData, ObjectIdentity, ObjectType, SnmpEngine,
-        UdpTransportTarget, UsmUserData, get_cmd,
-    )
-    import pysnmp.hlapi.v3arch.asyncio as hlapi
-    auth_proto = getattr(hlapi, _AUTH_PROTO_MAP.get(cred_data.get("auth_protocol", "sha256").lower(), "usmHMAC192SHA256AuthProtocol"))
-    priv_proto = getattr(hlapi, _PRIV_PROTO_MAP.get(cred_data.get("priv_protocol", "aes").lower(), "usmAesCfb128Protocol"))
-    engine = SnmpEngine()
-    try:
-        transport = await UdpTransportTarget.create((ip, port), timeout=timeout, retries=0)
-        err_indication, err_status, _, var_binds = await get_cmd(
-            engine,
-            UsmUserData(cred_data["username"], authKey=cred_data.get("auth_key", ""),
-                        privKey=cred_data.get("priv_key", ""),
-                        authProtocol=auth_proto, privProtocol=priv_proto),
-            transport, ContextData(),
-            ObjectType(ObjectIdentity(_SYS_DESCR)),
-            ObjectType(ObjectIdentity(_SYS_OBJECT_ID)),
-            ObjectType(ObjectIdentity(_SYS_NAME)),
-        )
-        if err_indication or err_status:
-            return None
-        sys_descr = str(var_binds[0][1]) if len(var_binds) > 0 else ""
-        sys_oid   = str(var_binds[1][1]) if len(var_binds) > 1 else ""
-        sys_name  = str(var_binds[2][1]) if len(var_binds) > 2 else ip
-        return DiscoveredDevice(ip=ip, hostname=sys_name, vendor=_detect_vendor(sys_oid, sys_descr),
-                                sys_descr=sys_descr, sys_object_id=sys_oid, already_in_db=False)
-    except asyncio.CancelledError:
-        raise
-    except Exception:
-        return None
+def _cred_to_spec(cred_data: dict, cred_type: str) -> dict:
+    if cred_type == "snmp_v3":
+        return {
+            "version":    "snmp_v3",
+            "username":   cred_data.get("username", ""),
+            "auth_key":   cred_data.get("auth_key", ""),
+            "priv_key":   cred_data.get("priv_key", ""),
+            "auth_proto": cred_data.get("auth_protocol", "sha256"),
+            "priv_proto": cred_data.get("priv_protocol", "aes"),
+        }
+    return {"version": "snmp_v2c", "community": cred_data.get("community", "public")}
 
 
 async def _run_sweep(
@@ -208,6 +131,101 @@ async def _run_sweep(
                 found=len(_jobs[job_id].found), scanned=len(hosts))
 
 
+async def _run_remote_sweep(
+    job_id: uuid.UUID, req: SweepRequest,
+    tenant_id: uuid.UUID,
+    creds: list[tuple[uuid.UUID, dict, str]],
+) -> None:
+    """Forward a sweep to a remote collector and translate results back into the job."""
+    from ..database import AsyncSessionLocal
+    from ..models.site import RemoteCollector
+
+    async with _jobs_lock:
+        _jobs[job_id].status = "running"
+
+    cred_specs = [_cred_to_spec(cd, ct) for _, cd, ct in creds]
+
+    existing_ips: dict[str, uuid.UUID] = {}
+    col = None
+    async with AsyncSessionLocal() as db:
+        col = (await db.execute(
+            select(RemoteCollector).where(
+                RemoteCollector.id == str(req.collector_id),
+                RemoteCollector.tenant_id == tenant_id,
+            )
+        )).scalar_one_or_none()
+
+        rows = await db.execute(
+            text("SELECT id, host(mgmt_ip) FROM devices WHERE tenant_id = :tid"),
+            {"tid": str(tenant_id)},
+        )
+        for row in rows:
+            existing_ips[row[1]] = row[0]
+
+    wg_ip = str(col.wg_ip).split("/")[0] if col and col.wg_ip else None
+    if col is None or not wg_ip or ipaddress.ip_address(wg_ip) not in _WG_SUBNET:
+        async with _jobs_lock:
+            _jobs[job_id].status      = "error"
+            _jobs[job_id].error       = "Collector not found or not connected to WireGuard"
+            _jobs[job_id].finished_at = datetime.now(timezone.utc)
+        return
+    network = ipaddress.ip_network(req.cidr, strict=False)
+    n_hosts = max(network.num_addresses - 2, 1)
+    timeout = max(req.timeout_s * n_hosts / max(req.max_concurrent, 1) * 2 + 30, 60)
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as hc:
+            resp = await hc.post(
+                f"http://{wg_ip}:9090/sweep",
+                json={
+                    "cidr":           req.cidr,
+                    "port":           req.port,
+                    "creds":          cred_specs,
+                    "timeout_s":      req.timeout_s,
+                    "max_concurrent": req.max_concurrent,
+                },
+                headers={"Authorization": f"Bearer {_control_token(col.api_key_hash)}"},
+            )
+        if resp.status_code != 200:
+            raise Exception(f"Collector returned HTTP {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+    except asyncio.CancelledError:
+        async with _jobs_lock:
+            _jobs[job_id].status      = "cancelled"
+            _jobs[job_id].finished_at = datetime.now(timezone.utc)
+        return
+    except Exception as exc:
+        async with _jobs_lock:
+            _jobs[job_id].status      = "error"
+            _jobs[job_id].error       = str(exc)
+            _jobs[job_id].finished_at = datetime.now(timezone.utc)
+        return
+
+    found_devices: list[DiscoveredDevice] = []
+    for item in data.get("found", []):
+        ip = item.get("ip", "")
+        found_devices.append(DiscoveredDevice(
+            ip=ip,
+            hostname=item.get("hostname", ip),
+            vendor=item.get("vendor", "unknown"),
+            sys_descr=item.get("sys_descr", ""),
+            sys_object_id=item.get("sys_object_id", ""),
+            already_in_db=(ip in existing_ips),
+            device_id=existing_ips.get(ip),
+        ))
+
+    async with _jobs_lock:
+        if _jobs[job_id].status != "cancelled":
+            _jobs[job_id].total       = data.get("total", 0)
+            _jobs[job_id].scanned     = data.get("scanned", 0)
+            _jobs[job_id].found       = found_devices
+            _jobs[job_id].status      = "done"
+            _jobs[job_id].finished_at = datetime.now(timezone.utc)
+
+    logger.info("remote_sweep_complete", job_id=str(job_id), cidr=req.cidr,
+                found=len(found_devices), collector_id=str(req.collector_id))
+
+
 def _expire_jobs() -> None:
     cutoff = datetime.now(timezone.utc) - timedelta(minutes=JOB_EXPIRE_MINUTES)
     to_del = [
@@ -235,6 +253,22 @@ async def start_sweep(
         raise HTTPException(status_code=400, detail="Invalid CIDR notation")
     if network.num_addresses > 1024:
         raise HTTPException(status_code=400, detail="CIDR too large — max /22 (1022 hosts)")
+
+    # Validate collector_id at the API boundary (not inside the background task).
+    if req.collector_id is not None:
+        from ..models.site import RemoteCollector
+        col_row = (await db.execute(
+            select(RemoteCollector).where(
+                RemoteCollector.id == str(req.collector_id),
+                RemoteCollector.tenant_id == current_user.tenant_id,
+            )
+        )).scalar_one_or_none()
+        if col_row is None:
+            raise HTTPException(status_code=404, detail="Collector not found")
+        if not col_row.wg_ip:
+            raise HTTPException(status_code=409, detail="Collector has no WireGuard IP — bootstrap it first")
+        if ipaddress.ip_address(str(col_row.wg_ip).split("/")[0]) not in _WG_SUBNET:
+            raise HTTPException(status_code=409, detail="Collector WireGuard IP is outside expected subnet")
 
     from ..models.credential import Credential
     cred_rows = (await db.execute(
@@ -265,13 +299,16 @@ async def start_sweep(
         _expire_jobs()
         _jobs[job_id] = job
 
-    task = asyncio.create_task(
-        _run_sweep(job_id, req, current_user.tenant_id, creds),
-        name=f"sweep-{job_id}",
-    )
+    if req.collector_id is None:
+        run_fn = _run_sweep(job_id, req, current_user.tenant_id, creds)
+    else:
+        run_fn = _run_remote_sweep(job_id, req, current_user.tenant_id, creds)
+
+    task = asyncio.create_task(run_fn, name=f"sweep-{job_id}")
     _job_tasks[job_id] = task
 
-    logger.info("sweep_started", job_id=str(job_id), cidr=req.cidr)
+    logger.info("sweep_started", job_id=str(job_id), cidr=req.cidr,
+                remote=(req.collector_id is not None))
     return job
 
 

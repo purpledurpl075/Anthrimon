@@ -43,8 +43,8 @@ export interface SweepJobSummary {
 export const fetchCredentials = () =>
   api.get<Credential[]>('/credentials', { params: { all: true } }).then(r => r.data)
 
-export const startSweep = (cidr: string, credential_ids: string[], timeout_s = 3) =>
-  api.post<SweepJob>('/discovery/sweep', { cidr, credential_ids, timeout_s }).then(r => r.data)
+export const startSweep = (cidr: string, credential_ids: string[], timeout_s = 3, collector_id?: string) =>
+  api.post<SweepJob>('/discovery/sweep', { cidr, credential_ids, timeout_s, ...(collector_id ? { collector_id } : {}) }).then(r => r.data)
 
 export const getSweepJob    = (job_id: string) =>
   api.get<SweepJob>(`/discovery/sweep/${job_id}`).then(r => r.data)

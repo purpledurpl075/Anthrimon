@@ -36,7 +36,7 @@ import (
 	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/tunnel"
 )
 
-const version = "0.2.8"
+const version = "0.3.5"
 
 func main() {
 	cfgPath := flag.String("config", "", "path to config file (default: /etc/anthrimon/remote-collector.yaml)")
@@ -134,6 +134,11 @@ func run(cfgPath string) error {
 		Str("version", version).
 		Logger()
 
+	// ── Trap handler ─────────────────────────────────────────────────────────
+	// Install (or refresh) the snmptrapd exec handler binary on every startup.
+	// Non-fatal: the collector still runs if this fails.
+	installTrapHandler(ctx, hubClient, logger)
+
 	// ── Collectors ────────────────────────────────────────────────────────────
 
 	snmpCol    := collector.NewSNMPCollector(hubClient, cfg.SNMP, logger)
@@ -143,8 +148,8 @@ func run(cfgPath string) error {
 	probeCol   := collector.NewProbeCollector(hubClient, logger)
 
 	devicesByIP := make(map[string]string)
-	flowCol   := collector.NewFlowCollector(hubClient, cfg.Flow, cfg.Forward, devicesByIP, logger)
-	syslogCol := collector.NewSyslogCollector(hubClient, cfg.Syslog, cfg.Forward, devicesByIP, logger)
+	flowCol    := collector.NewFlowCollector(hubClient, cfg.Flow, cfg.Forward, devicesByIP, logger)
+	syslogCol  := collector.NewSyslogCollector(hubClient, cfg.Syslog, cfg.Forward, devicesByIP, logger)
 
 	// Initial config fetch.
 	if err := refreshDevices(ctx, hubClient, snmpCol, sshCfgCol, restCol, eapiCol, probeCol, flowCol, syslogCol, logger); err != nil {
@@ -284,9 +289,46 @@ func run(cfgPath string) error {
 
 // ─── Self-update ──────────────────────────────────────────────────────────────
 
+const trapHandlerPath = "/usr/local/bin/anthrimon-traphandler"
+
+// installTrapHandler downloads the trap-handler binary from the hub and
+// installs it at trapHandlerPath.  Called on first boot and on self-update.
+// A failure is logged but never fatal — trap collection is optional.
+func installTrapHandler(ctx context.Context, hubClient *hub.Client, logger zerolog.Logger) {
+	log := logger.With().Str("op", "install_trap_handler").Logger()
+
+	data, expectedSHA, err := hubClient.DownloadTrapHandler(ctx, runtime.GOARCH)
+	if err != nil {
+		log.Warn().Err(err).Msg("could not download trap-handler (trap collection unavailable)")
+		return
+	}
+
+	if expectedSHA != "" {
+		actual := fmt.Sprintf("%x", sha256.Sum256(data))
+		if actual != expectedSHA {
+			log.Error().Str("expected", expectedSHA).Str("actual", actual).
+				Msg("trap-handler SHA-256 mismatch — skipping install")
+			return
+		}
+	}
+
+	tmpPath := trapHandlerPath + ".new"
+	if err := os.WriteFile(tmpPath, data, 0755); err != nil { //nolint:gosec
+		log.Error().Err(err).Msg("write trap-handler failed")
+		return
+	}
+	if err := os.Rename(tmpPath, trapHandlerPath); err != nil {
+		_ = os.Remove(tmpPath)
+		log.Error().Err(err).Msg("install trap-handler failed")
+		return
+	}
+	log.Info().Int("bytes", len(data)).Str("path", trapHandlerPath).Msg("trap-handler installed")
+}
+
 // selfUpdate downloads the latest binary from the hub, verifies its SHA-256,
 // atomically replaces the running executable, sends the new path on restartCh,
 // and cancels the context to trigger graceful shutdown → re-exec.
+// The trap-handler binary is also updated before the restart.
 func selfUpdate(
 	hubClient *hub.Client,
 	cancel    context.CancelFunc,
@@ -324,6 +366,9 @@ func selfUpdate(
 		}
 		log.Info().Str("sha256", actual).Msg("SHA-256 verified")
 	}
+
+	// Also update the trap-handler binary.
+	installTrapHandler(dlCtx, hubClient, logger)
 
 	// Write to a temp file adjacent to the current binary.
 	tmpPath := exePath + ".new"

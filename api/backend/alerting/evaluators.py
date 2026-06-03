@@ -902,6 +902,58 @@ async def eval_device_latency(
     return breaches
 
 
+async def eval_snmp_trap(
+    db: AsyncSession,
+    device: dict,
+    trap_type: str,
+    threshold: float,
+    duration_seconds: int,
+) -> Optional[Breach]:
+    """Alert when a matching SNMP trap type is received at least `threshold` times
+    within the last `duration_seconds` window.
+
+    `trap_type` may be an exact trap name (e.g. "linkDown") or a SQL LIKE pattern
+    (e.g. "cisco.bgp%").
+    """
+    did      = device["id"]
+    minutes  = max(1, duration_seconds // 60)
+    count_q  = text("""
+        SELECT count(*) FROM trap_events
+        WHERE device_id = CAST(:did AS uuid)
+          AND received_at >= now() - make_interval(mins => :mins)
+          AND trap_type LIKE :pattern
+    """)
+    count_row = (await db.execute(count_q, {"did": did, "mins": minutes, "pattern": trap_type})).one_or_none()
+    count = int(count_row[0]) if count_row else 0
+    if count < int(threshold):
+        return None
+
+    # Fetch the most recent matching trap for context.
+    latest_q = text("""
+        SELECT trap_type, oid, severity, received_at::text
+        FROM trap_events
+        WHERE device_id = CAST(:did AS uuid)
+          AND received_at >= now() - make_interval(mins => :mins)
+          AND trap_type LIKE :pattern
+        ORDER BY received_at DESC LIMIT 1
+    """)
+    latest_row = (await db.execute(latest_q, {"did": did, "mins": minutes, "pattern": trap_type})).mappings().one_or_none()
+    extra: dict = {
+        "trap_type_pattern": trap_type,
+        "count":             count,
+        "window_minutes":    minutes,
+    }
+    if latest_row:
+        extra.update({
+            "trap_type":   latest_row["trap_type"],
+            "oid":         latest_row["oid"],
+            "severity":    latest_row["severity"],
+            "received_at": latest_row["received_at"],
+        })
+
+    return Breach(device["id"], device["hostname"], value=float(count), extra=extra)
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 def _check(value: float, condition: str, threshold: float) -> bool:

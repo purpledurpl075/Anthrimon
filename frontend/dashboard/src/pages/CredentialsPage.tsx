@@ -187,6 +187,49 @@ function DataForm({ type, data, onChange }: {
   }
 }
 
+// ── Validation ─────────────────────────────────────────────────────────────────
+
+function validateCredentialData(type: string, data: Record<string, unknown>): string | null {
+  const str = (k: string) => String(data[k] ?? '').trim()
+  switch (type) {
+    case 'snmp_v2c':
+      if (!str('community')) return 'Community string is required'
+      break
+    case 'snmp_v3': {
+      if (!str('username')) return 'Username is required'
+      const level = str('security_level') || 'authPriv'
+      if (level !== 'noAuthNoPriv') {
+        if (!str('auth_key')) return 'Auth key is required'
+        if (str('auth_key').length < 8) return 'Auth key must be at least 8 characters'
+      }
+      if (level === 'authPriv') {
+        if (!str('priv_key')) return 'Priv key is required'
+        if (str('priv_key').length < 8) return 'Priv key must be at least 8 characters'
+      }
+      break
+    }
+    case 'ssh':
+      if (!str('username')) return 'Username is required'
+      if (!str('password') && !str('private_key')) return 'A password or private key is required'
+      break
+    case 'api_token':
+      if (!str('token')) return 'Token is required'
+      break
+    case 'netconf':
+      if (!str('username')) return 'Username is required'
+      if (!str('password')) return 'Password is required'
+      break
+  }
+  return null
+}
+
+function apiError(e: any): string {
+  const detail = e?.response?.data?.detail
+  if (Array.isArray(detail)) return detail.map((d: any) => d?.msg ?? String(d)).join('; ')
+  if (typeof detail === 'string') return detail
+  return e?.message ?? 'Save failed'
+}
+
 // ── Add / edit modal ───────────────────────────────────────────────────────────
 
 function CredentialModal({ editing, onClose }: { editing: Credential | null; onClose: () => void }) {
@@ -201,7 +244,7 @@ function CredentialModal({ editing, onClose }: { editing: Credential | null; onC
       ? updateCredential(editing.id, { name, data })
       : createCredential({ name, type, data }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['credentials-all'] }); onClose() },
-    onError: () => setError('Save failed — check all required fields.'),
+    onError: (e: any) => setError(apiError(e)),
   })
 
   return (
@@ -241,7 +284,12 @@ function CredentialModal({ editing, onClose }: { editing: Credential | null; onC
 
         <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3">
           <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800">Cancel</button>
-          <button onClick={() => save.mutate()} disabled={!name || save.isPending}
+          <button onClick={() => {
+              if (!name.trim()) { setError('Name is required'); return }
+              const err = validateCredentialData(editing?.type ?? type, data)
+              if (err) { setError(err); return }
+              save.mutate()
+            }} disabled={save.isPending}
             className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors">
             {save.isPending ? 'Saving…' : 'Save'}
           </button>

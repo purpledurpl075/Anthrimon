@@ -200,6 +200,14 @@ func (c *Client) PostSTPPorts(ctx context.Context, ports []map[string]any) error
 	return c.postJSON(ctx, "/api/v1/collectors/stp-ports", ports, nil)
 }
 
+// PostTraps sends a batch of decoded SNMP trap events to the hub.
+func (c *Client) PostTraps(ctx context.Context, collectorID string, events []map[string]any) error {
+	return c.postJSON(ctx, "/api/v1/collectors/traps", map[string]any{
+		"collector_id": collectorID,
+		"events":       events,
+	}, nil)
+}
+
 // DownloadBinary fetches the latest collector binary for the given architecture
 // from the hub.  Returns the raw bytes and the expected SHA-256 hex digest
 // from the X-Binary-SHA256 response header (empty string if the hub did not
@@ -230,6 +238,31 @@ func (c *Client) DownloadBinary(ctx context.Context, arch string) ([]byte, strin
 
 	sha256hex := resp.Header.Get("X-Binary-SHA256")
 	return data, sha256hex, nil
+}
+
+// DownloadTrapHandler fetches the pre-built anthrimon-traphandler binary.
+// Same semantics as DownloadBinary.
+func (c *Client) DownloadTrapHandler(ctx context.Context, arch string) ([]byte, string, error) {
+	req, err := c.newRequest(ctx, http.MethodGet,
+		"/api/v1/collectors/trap-handler-binary?arch="+arch, nil)
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("GET /collectors/trap-handler-binary: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, "", fmt.Errorf("GET /collectors/trap-handler-binary: HTTP %d: %s",
+			resp.StatusCode, string(body))
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 32<<20))
+	if err != nil {
+		return nil, "", fmt.Errorf("read trap-handler body: %w", err)
+	}
+	return data, resp.Header.Get("X-Binary-SHA256"), nil
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

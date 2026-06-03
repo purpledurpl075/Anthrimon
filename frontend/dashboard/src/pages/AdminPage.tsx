@@ -6,6 +6,13 @@ import { fetchChannels, createChannel, updateChannel, deleteChannel, testChannel
 import api from '../api/client'
 import { useRole, hasRole } from '../hooks/useCurrentUser'
 
+function apiError(e: any): string {
+  const detail = e?.response?.data?.detail
+  if (Array.isArray(detail)) return detail.map((d: any) => d?.msg ?? String(d)).join('; ')
+  if (typeof detail === 'string') return detail
+  return e?.message ?? 'Save failed'
+}
+
 // ── Shared form controls ───────────────────────────────────────────────────────
 
 function FInput({ label, value, onChange, type = 'text', placeholder, hint }: {
@@ -64,14 +71,16 @@ function SmtpTab() {
   }, [data])
 
   const save = useMutation({
-    mutationFn: () => saveSmtpSettings({
-      host, port: Number(port), user,
-      password: password || null,
-      from_addr: fromAddr, ssl,
-    }),
+    mutationFn: () => {
+      if (!host.trim()) throw new Error('Host is required')
+      if (!fromAddr.trim()) throw new Error('From address is required')
+      const portNum = Number(port)
+      if (!port || isNaN(portNum) || portNum < 1 || portNum > 65535) throw new Error('Port must be between 1 and 65535')
+      return saveSmtpSettings({ host, port: portNum, user, password: password || null, from_addr: fromAddr, ssl })
+    },
     onMutate: () => { setStatus('saving'); setErrMsg('') },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['smtp-settings'] }); setStatus('saved'); setPassword('') },
-    onError: (e: any) => { setStatus('error'); setErrMsg(e?.response?.data?.detail ?? 'Save failed') },
+    onError: (e: any) => { setStatus('error'); setErrMsg(apiError(e)) },
   })
 
   const test = useMutation({
@@ -250,13 +259,18 @@ function ChannelModal({ editing, onClose }: { editing: NotificationChannel | nul
 
   const save = useMutation({
     mutationFn: () => {
+      if (!name.trim()) throw new Error('Name is required')
+      if (currentType === 'email' && !recipients.trim()) throw new Error('At least one recipient is required')
+      if ((currentType === 'slack' || currentType === 'teams') && !webhookUrl.trim()) throw new Error('Webhook URL is required')
+      if (currentType === 'webhook' && !webhookTargetUrl.trim()) throw new Error('URL is required')
+      if (currentType === 'pagerduty' && !integrationKey.trim()) throw new Error('Integration key is required')
       const config = buildConfig()
       return editing
         ? updateChannel(editing.id, { name, config, is_enabled: enabled })
         : createChannel({ name, type, config, is_enabled: enabled })
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['channels'] }); onClose() },
-    onError: (e: any) => setErrMsg(e?.response?.data?.detail ?? 'Save failed'),
+    onError: (e: any) => setErrMsg(apiError(e)),
   })
 
   return (
@@ -339,7 +353,7 @@ function ChannelModal({ editing, onClose }: { editing: NotificationChannel | nul
 
         <div className="px-6 py-4 border-t border-slate-100 flex justify-end gap-3">
           <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:text-slate-800">Cancel</button>
-          <button onClick={() => save.mutate()} disabled={!name || save.isPending}
+          <button onClick={() => save.mutate()} disabled={save.isPending}
             className="px-4 py-2 text-sm bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors">
             {save.isPending ? 'Saving…' : 'Save'}
           </button>
@@ -494,7 +508,7 @@ function TenantTab() {
       setSaved(true); setErrMsg('')
       setTimeout(() => setSaved(false), 2000)
     },
-    onError: (e: any) => setErrMsg(e?.response?.data?.detail ?? 'Save failed'),
+    onError: (e: any) => setErrMsg(apiError(e)),
   })
 
   if (isLoading || !f) return <div className="p-6 text-slate-400 text-sm">Loading…</div>
@@ -596,7 +610,7 @@ function SiteModal({ editing, allDevices, onClose }: {
       await api.put(`/admin/sites/${site.id}/devices`, { device_ids: [...assigned] })
     },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['admin-sites'] }); qc.invalidateQueries({ queryKey: ['admin-all-devices'] }); onClose() },
-    onError: (e: any) => setErrMsg(e?.response?.data?.detail ?? 'Save failed'),
+    onError: (e: any) => setErrMsg(apiError(e)),
   })
 
   // Devices available: all devices not assigned to another site, plus those already in this site
@@ -1287,7 +1301,7 @@ function EmailTemplateTab() {
             </div>
             <iframe
               srcDoc={renderPreview(html, selectedMetric)}
-              sandbox="allow-same-origin"
+              sandbox="allow-scripts"
               className="flex-1 w-full border-none bg-white"
               title="Email preview"
             />

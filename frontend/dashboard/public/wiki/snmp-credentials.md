@@ -9,9 +9,9 @@ Go to **Credentials** and click **Add Credential**. Choose the SNMP version:
 
 ### SNMPv3
 - **Username** — the security name configured on the device
-- **Auth protocol** — MD5 or SHA
+- **Auth protocol** — SHA or SHA-256 (MD5 is accepted but not recommended)
 - **Auth password**
-- **Privacy protocol** — DES or AES
+- **Privacy protocol** — AES (DES is accepted but not recommended)
 - **Privacy password**
 - **Security level** — `noAuthNoPriv`, `authNoPriv`, or `authPriv`
 
@@ -23,6 +23,12 @@ Go to **Credentials** and click **Add Credential**. Choose the SNMP version:
 4. Set **priority** — lower number = tried first (1 = highest priority)
 
 The SNMP collector tries credentials in priority order and uses the first one that responds.
+
+## SNMPv3 and SNMP traps
+
+When a device has SNMPv3 credentials linked, the hub automatically pushes those credentials to any remote collector responsible for that device's site. The remote collector's `snmptrapd` is reconfigured with the v3 user keys so that authenticated traps (`authPriv`) from the device are accepted and forwarded to the hub.
+
+This means: saving a v3 credential and linking it to a device is all you need to do — trap auth is configured automatically.
 
 ## Testing credentials
 

@@ -15,8 +15,9 @@
 #   9.  Builds the SNMP collector (Go) + installs systemd unit
 #   10. Builds the flow collector (Go) + installs systemd unit
 #   11. Builds the syslog collector (Go) + installs systemd unit
-#   12. Builds the remote collector binary (no service — needs token first)
-#   13. Builds the frontend production bundle (npm)
+#   12. Builds the hub SNMP trap receiver + installs systemd unit
+#   13. Builds the remote collector + trap-handler binaries (no service — needs token first)
+#   14. Builds the frontend production bundle (npm)
 #   14. Generates TLS certificate (self-signed CA + server cert)
 #   15. Configures nginx with HTTPS
 #   16. Sets up WireGuard hub interface (wg0)
@@ -562,7 +563,88 @@ systemctl enable syslog-collector
 systemctl restart syslog-collector
 ok "syslog-collector service running"
 
-# ── 12. Remote collector (build only) ────────────────────────────────────────
+# ── 12. Hub SNMP trap receiver ────────────────────────────────────────────────
+
+hdr "Hub SNMP trap receiver"
+TRAP_BIN="/usr/local/bin/anthrimon-trap-receiver"
+TRAP_ENV="/etc/anthrimon/trap-receiver.env"
+REMOTE_COL_DIR="${REPO_DIR}/collectors/remote"
+
+info "Building anthrimon-trap-receiver..."
+sudo -u "${REAL_USER}" bash -c \
+  "cd '${REMOTE_COL_DIR}' && /usr/local/go/bin/go build -o /tmp/anthrimon-trap-receiver-build ./cmd/trap-receiver/"
+install -m 755 /tmp/anthrimon-trap-receiver-build "${TRAP_BIN}"
+rm -f /tmp/anthrimon-trap-receiver-build
+ok "anthrimon-trap-receiver installed to ${TRAP_BIN}"
+
+mkdir -p /etc/anthrimon
+
+if [[ -f "${TRAP_ENV}" ]] && grep -q "ANTHRIMON_TRAP_API_KEY=" "${TRAP_ENV}"; then
+    ok "Hub trap receiver API key already provisioned — skipping"
+else
+    TRAP_API_KEY=$(openssl rand -hex 32)
+    TRAP_KEY_HASH=$(printf '%s' "${TRAP_API_KEY}" | sha256sum | awk '{print $1}')
+    TENANT_ID=$(pg_su -d "${DB_NAME}" -tAc "SELECT id FROM tenants LIMIT 1" 2>/dev/null | tr -d '[:space:]')
+
+    if [[ -z "${TENANT_ID}" ]]; then
+        warn "No tenant found — cannot provision trap receiver API key (run after first login)"
+    else
+        pg_su -d "${DB_NAME}" -c "
+            INSERT INTO remote_collectors
+                (tenant_id, name, token_hash, api_key_hash, status, capabilities, registered_at)
+            VALUES
+                ('${TENANT_ID}', 'hub-trap-receiver',
+                 '$(openssl rand -hex 32)',
+                 '${TRAP_KEY_HASH}',
+                 'online',
+                 '[\"traps\"]',
+                 NOW())
+            ON CONFLICT (tenant_id, name) DO UPDATE
+                SET api_key_hash = EXCLUDED.api_key_hash,
+                    status       = 'online',
+                    updated_at   = NOW();
+        " 2>/dev/null
+        cat > "${TRAP_ENV}" <<EOF
+ANTHRIMON_TRAP_API_KEY=${TRAP_API_KEY}
+EOF
+        chmod 600 "${TRAP_ENV}"
+        ok "Hub trap receiver API key provisioned"
+    fi
+fi
+
+cat > /etc/systemd/system/anthrimon-trap-receiver.service <<EOF
+[Unit]
+Description=Anthrimon Hub SNMP Trap Receiver
+After=network-online.target anthrimon-api.service
+Wants=network-online.target
+
+[Service]
+User=root
+EnvironmentFile=${TRAP_ENV}
+Environment="ANTHRIMON_TRAP_HUB_URL=http://127.0.0.1:${API_PORT}"
+Environment="ANTHRIMON_TRAP_ADDR=:162"
+ExecStart=${TRAP_BIN}
+Restart=on-failure
+RestartSec=10
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+systemctl daemon-reload
+if [[ -f "${TRAP_ENV}" ]] && grep -q "ANTHRIMON_TRAP_API_KEY=" "${TRAP_ENV}"; then
+    systemctl enable anthrimon-trap-receiver
+    systemctl restart anthrimon-trap-receiver
+    ok "anthrimon-trap-receiver service running on :162"
+else
+    warn "anthrimon-trap-receiver NOT started — no API key yet (re-run install or set ${TRAP_ENV} manually)"
+fi
+
+# ── 13. Remote collector (build only) ────────────────────────────────────────
 # Builds linux/amd64 and linux/arm64 binaries.  The hub-local binary (amd64)
 # is installed system-wide so the hub itself can run a collector if needed.
 # Both binaries are also stored in COLLECTOR_DIST so the API can serve them as
@@ -576,24 +658,43 @@ mkdir -p "${COLLECTOR_DIST}"
 chown "${REAL_USER}":"${REAL_USER}" /var/lib/anthrimon
 chown "${REAL_USER}":"${REAL_USER}" "${COLLECTOR_DIST}"
 
-info "Building anthrimon-collector (linux/amd64)..."
+info "Building anthrimon-remote-collector (linux/amd64)..."
 sudo -u "${REAL_USER}" bash -c \
   "cd '${REMOTE_DIR}' && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
    /usr/local/go/bin/go build -trimpath -ldflags='-s -w' \
-   -o /tmp/anthrimon-collector-linux-amd64 ./cmd/remote-collector/"
-install -m 755 /tmp/anthrimon-collector-linux-amd64 "${COLLECTOR_DIST}/anthrimon-collector-linux-amd64"
-install -m 755 /tmp/anthrimon-collector-linux-amd64 /usr/local/bin/anthrimon-collector
-rm -f /tmp/anthrimon-collector-linux-amd64
-ok "linux/amd64 → ${COLLECTOR_DIST}/anthrimon-collector-linux-amd64"
+   -o /tmp/anthrimon-remote-collector-linux-amd64 ./cmd/remote-collector/"
+install -m 755 /tmp/anthrimon-remote-collector-linux-amd64 "${COLLECTOR_DIST}/anthrimon-remote-collector-linux-amd64"
+install -m 755 /tmp/anthrimon-remote-collector-linux-amd64 /usr/local/bin/anthrimon-collector
+rm -f /tmp/anthrimon-remote-collector-linux-amd64
+ok "linux/amd64 → ${COLLECTOR_DIST}/anthrimon-remote-collector-linux-amd64"
 
-info "Building anthrimon-collector (linux/arm64)..."
+info "Building anthrimon-remote-collector (linux/arm64)..."
 sudo -u "${REAL_USER}" bash -c \
   "cd '${REMOTE_DIR}' && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
    /usr/local/go/bin/go build -trimpath -ldflags='-s -w' \
-   -o /tmp/anthrimon-collector-linux-arm64 ./cmd/remote-collector/"
-install -m 755 /tmp/anthrimon-collector-linux-arm64 "${COLLECTOR_DIST}/anthrimon-collector-linux-arm64"
-rm -f /tmp/anthrimon-collector-linux-arm64
-ok "linux/arm64 → ${COLLECTOR_DIST}/anthrimon-collector-linux-arm64"
+   -o /tmp/anthrimon-remote-collector-linux-arm64 ./cmd/remote-collector/"
+install -m 755 /tmp/anthrimon-remote-collector-linux-arm64 "${COLLECTOR_DIST}/anthrimon-remote-collector-linux-arm64"
+rm -f /tmp/anthrimon-remote-collector-linux-arm64
+ok "linux/arm64 → ${COLLECTOR_DIST}/anthrimon-remote-collector-linux-arm64"
+
+info "Building anthrimon-trap-handler (linux/amd64)..."
+sudo -u "${REAL_USER}" bash -c \
+  "cd '${REMOTE_DIR}' && GOOS=linux GOARCH=amd64 CGO_ENABLED=0 \
+   /usr/local/go/bin/go build -trimpath -ldflags='-s -w' \
+   -o /tmp/anthrimon-trap-handler-linux-amd64 ./cmd/trap-handler/"
+install -m 755 /tmp/anthrimon-trap-handler-linux-amd64 "${COLLECTOR_DIST}/anthrimon-trap-handler-linux-amd64"
+install -m 755 /tmp/anthrimon-trap-handler-linux-amd64 /usr/local/bin/anthrimon-traphandler
+rm -f /tmp/anthrimon-trap-handler-linux-amd64
+ok "linux/amd64 → ${COLLECTOR_DIST}/anthrimon-trap-handler-linux-amd64"
+
+info "Building anthrimon-trap-handler (linux/arm64)..."
+sudo -u "${REAL_USER}" bash -c \
+  "cd '${REMOTE_DIR}' && GOOS=linux GOARCH=arm64 CGO_ENABLED=0 \
+   /usr/local/go/bin/go build -trimpath -ldflags='-s -w' \
+   -o /tmp/anthrimon-trap-handler-linux-arm64 ./cmd/trap-handler/"
+install -m 755 /tmp/anthrimon-trap-handler-linux-arm64 "${COLLECTOR_DIST}/anthrimon-trap-handler-linux-arm64"
+rm -f /tmp/anthrimon-trap-handler-linux-arm64
+ok "linux/arm64 → ${COLLECTOR_DIST}/anthrimon-trap-handler-linux-arm64"
 
 mkdir -p /etc/anthrimon
 if [[ ! -f "/etc/anthrimon/remote-collector.yaml" ]]; then
@@ -779,6 +880,7 @@ echo -e "    ${BOLD}systemctl status anthrimon-api${RESET}"
 echo -e "    ${BOLD}systemctl status snmp-collector${RESET}"
 echo -e "    ${BOLD}systemctl status flow-collector${RESET}"
 echo -e "    ${BOLD}systemctl status syslog-collector${RESET}"
+echo -e "    ${BOLD}systemctl status anthrimon-trap-receiver${RESET}"
 echo -e "    ${BOLD}systemctl status nginx${RESET}"
 echo -e "    ${BOLD}systemctl status victoria-metrics${RESET}"
 echo -e "    ${BOLD}systemctl status clickhouse-server${RESET}"
@@ -789,9 +891,12 @@ echo -e "  Flow / syslog export targets:"
 echo -e "    NetFlow / IPFIX  ${BOLD}${IP}:${NETFLOW_PORT}${RESET} (UDP)"
 echo -e "    sFlow            ${BOLD}${IP}:${SFLOW_PORT}${RESET} (UDP)"
 echo -e "    Syslog           ${BOLD}${IP}:514${RESET} (UDP/TCP)"
+echo -e "    SNMP traps       ${BOLD}${IP}:162${RESET} (UDP)"
 echo ""
 echo -e "  Remote collector:"
-echo -e "    Binary  ${BOLD}/usr/local/bin/anthrimon-collector${RESET}"
+echo -e "    Collector  ${BOLD}/usr/local/bin/anthrimon-collector${RESET}"
+echo -e "    Trap hdlr  ${BOLD}/usr/local/bin/anthrimon-traphandler${RESET}"
+echo -e "    Dist dir   ${BOLD}${COLLECTOR_DIST}/${RESET}"
 echo -e "    To deploy at a remote site:"
 echo -e "      1. Register in UI → Configuration → Collectors → New"
 echo -e "      2. Set ANTHRIMON_TOKEN in /etc/anthrimon/collector.env"

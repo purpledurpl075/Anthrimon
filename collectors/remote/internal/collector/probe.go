@@ -125,6 +125,13 @@ func (c *ProbeCollector) probeAll(ctx context.Context) {
 					fmt.Sprintf(`anthrimon_device_rtt_ms{%s,stat="max"} %.3f %d`, base, rttMax, ts),
 				)
 			}
+			if lossPct == 100.0 {
+				// Device is completely unreachable via ICMP — tell the hub not to
+				// stamp last_seen or status='up' for this device this cycle.
+				lines = append(lines,
+					fmt.Sprintf(`anthrimon_device_unreachable{%s} 1 %d`, base, ts),
+				)
+			}
 			mu.Unlock()
 		}()
 	}

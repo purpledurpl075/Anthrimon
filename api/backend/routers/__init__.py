@@ -20,10 +20,11 @@ from .bgp import router as bgp_router
 from .api_methods import router as api_methods_router
 from .clients import router as clients_router
 from .search import router as search_router
+from .traps import router as traps_router
 
 __all__ = ["admin_router", "platform_router", "auth_router", "bgp_router", "collectors_router", "config_router",
            "flow_router", "syslog_router", "topology_router", "channels_router",
            "credentials_router", "maintenance_router", "devices_router",
            "discovery_router", "interfaces_router", "alerts_router",
            "overview_router", "policies_router", "users_router", "api_methods_router",
-           "clients_router", "search_router"]
+           "clients_router", "search_router", "traps_router"]

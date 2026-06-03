@@ -379,7 +379,15 @@ function RuleModal({ editing, onClose }: { editing: AlertRule | null; onClose: (
 
   const save = useMutation({
     mutationFn: () => {
+      if (!f.name.trim()) throw new Error('Name is required')
       const m = meta(f.metric)
+      if (m.hasThreshold) {
+        const t = Number(f.threshold)
+        if (f.threshold === '' || isNaN(t)) throw new Error('Threshold must be a number')
+      }
+      if (f.metric === 'custom_oid' && !f.custom_oid.trim()) throw new Error('OID is required for custom OID rules')
+      if (f.metric === 'route_missing' && !f.custom_oid.trim()) throw new Error('Route prefix is required')
+      if (f.metric === 'syslog_match' && !f.custom_oid.trim()) throw new Error('Syslog pattern is required')
       const body: Record<string, unknown> = {
         name: f.name,
         description: f.description || null,
@@ -407,7 +415,10 @@ function RuleModal({ editing, onClose }: { editing: AlertRule | null; onClose: (
       qc.invalidateQueries({ queryKey: ['alert-rules'] })
       onClose()
     },
-    onError: (e: any) => setError(e?.response?.data?.detail ?? 'Save failed'),
+    onError: (e: any) => {
+      const detail = e?.response?.data?.detail
+      setError(Array.isArray(detail) ? detail.map((d: any) => d?.msg ?? String(d)).join('; ') : typeof detail === 'string' ? detail : e?.message ?? 'Save failed')
+    },
   })
 
   const m = meta(f.metric)

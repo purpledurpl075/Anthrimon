@@ -36,7 +36,7 @@ from .routers import (admin_router, platform_router, alerts_router, api_methods_
                       channels_router, bgp_router, clients_router, collectors_router, config_router,
                       credentials_router, devices_router, discovery_router, flow_router,
                       syslog_router, interfaces_router, maintenance_router, overview_router,
-                      policies_router, search_router, topology_router, users_router)
+                      policies_router, search_router, topology_router, traps_router, users_router)
 from .routers.topology import start_topology_refresh_loop
 
 configure_logging()
@@ -236,3 +236,4 @@ app.include_router(topology_router,    prefix=PREFIX)
 app.include_router(users_router,       prefix=PREFIX)
 app.include_router(clients_router,     prefix=PREFIX)
 app.include_router(search_router,      prefix=PREFIX)
+app.include_router(traps_router,       prefix=PREFIX)

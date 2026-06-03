@@ -17,7 +17,7 @@ _VALID_DEVICE_TYPES = frozenset({
 
 
 class DeviceCreate(BaseModel):
-    hostname: str
+    hostname: Optional[str] = None
     mgmt_ip: IPvAnyAddress
     vendor: str = "unknown"
     device_type: str = "unknown"

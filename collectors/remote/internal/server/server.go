@@ -11,6 +11,8 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 	"sync"
@@ -115,6 +117,10 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/refresh", s.handleRefresh)
 	mux.HandleFunc("/update", s.handleUpdate)
 	mux.HandleFunc("/live", s.handleLive)
+	mux.HandleFunc("/probe", s.handleProbe)
+	mux.HandleFunc("/sweep", s.handleSweep)
+	mux.HandleFunc("/poll", s.handlePoll)
+	mux.HandleFunc("/trap-config", s.handleTrapConfig)
 
 	addr := net.JoinHostPort(s.wgIP, fmt.Sprintf("%d", s.port))
 	srv := &http.Server{
@@ -272,4 +278,258 @@ func (s *Server) handleLive(w http.ResponseWriter, r *http.Request) {
 
 	fmt.Fprintf(w, "data: {\"done\":true}\n\n")
 	flusher.Flush()
+}
+
+// ─── trap-triggered repoll ────────────────────────────────────────────────────
+
+type pollReq struct {
+	DeviceID string `json:"device_id"`
+}
+
+// handlePoll triggers an immediate SNMP poll for a specific device.
+// Called by the hub after a qualifying trap is received for that device.
+func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAuth(w, r) {
+		return
+	}
+	if s.snmpCol == nil {
+		http.Error(w, "snmp collector not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req pollReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.DeviceID == "" {
+		http.Error(w, "device_id is required", http.StatusBadRequest)
+		return
+	}
+
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
+
+	s.snmpCol.TriggerPoll(req.DeviceID)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "queued", "device_id": req.DeviceID})
+}
+
+// ─── on-demand probe / sweep ──────────────────────────────────────────────────
+
+type probeReq struct {
+	IP       string                `json:"ip"`
+	Port     int                   `json:"port"`
+	Creds    []collector.CredSpec  `json:"creds"`
+	TimeoutS int                   `json:"timeout_s"`
+}
+
+type sweepReq struct {
+	CIDR          string               `json:"cidr"`
+	Port          int                  `json:"port"`
+	Creds         []collector.CredSpec `json:"creds"`
+	TimeoutS      int                  `json:"timeout_s"`
+	MaxConcurrent int                  `json:"max_concurrent"`
+}
+
+// handleProbe tries each credential against a single IP and returns the first
+// successful ProbeResult as JSON, or 404 if the device does not respond.
+func (s *Server) handleProbe(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAuth(w, r) {
+		return
+	}
+
+	var req probeReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.IP == "" || len(req.Creds) == 0 {
+		http.Error(w, "ip and creds are required", http.StatusBadRequest)
+		return
+	}
+	if req.Port == 0 {
+		req.Port = 161
+	}
+	if req.TimeoutS <= 0 || req.TimeoutS > 10 {
+		req.TimeoutS = 3
+	}
+
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Now().Add(time.Duration(req.TimeoutS)*time.Second*time.Duration(len(req.Creds)) + 2*time.Second))
+
+	result, _ := collector.ProbeOne(req.IP, req.Port, req.Creds, time.Duration(req.TimeoutS)*time.Second)
+
+	w.Header().Set("Content-Type", "application/json")
+	if result == nil {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(map[string]string{"detail": "device did not respond"})
+		return
+	}
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+// handleSweep probes every usable host in the requested CIDR and returns a
+// SweepResult JSON object when the sweep completes.  The request context
+// propagates to the sweep so the client can cancel by closing the connection.
+func (s *Server) handleSweep(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAuth(w, r) {
+		return
+	}
+
+	var req sweepReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if req.CIDR == "" || len(req.Creds) == 0 {
+		http.Error(w, "cidr and creds are required", http.StatusBadRequest)
+		return
+	}
+	if req.Port == 0 {
+		req.Port = 161
+	}
+	if req.TimeoutS <= 0 || req.TimeoutS > 10 {
+		req.TimeoutS = 3
+	}
+	if req.MaxConcurrent <= 0 || req.MaxConcurrent > 254 {
+		req.MaxConcurrent = 50
+	}
+
+	s.log.Info().Str("cidr", req.CIDR).Msg("sweep requested")
+
+	result, err := collector.SweepCIDR(
+		r.Context(), req.CIDR, req.Port, req.Creds,
+		time.Duration(req.TimeoutS)*time.Second, req.MaxConcurrent,
+	)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	s.log.Info().Str("cidr", req.CIDR).Int("found", len(result.Found)).Msg("sweep complete")
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(result)
+}
+
+// ─── snmptrapd v3 credential config ──────────────────────────────────────────
+
+type trapV3User struct {
+	Username  string `json:"username"`
+	AuthProto string `json:"auth_proto"` // SHA-256, SHA, MD5, etc.
+	AuthKey   string `json:"auth_key"`
+	PrivProto string `json:"priv_proto"` // AES, AES-256, DES, etc.
+	PrivKey   string `json:"priv_key"`
+}
+
+type trapConfigReq struct {
+	Users []trapV3User `json:"users"`
+}
+
+// snmptrapd config and persistent-user-DB paths — override via env.
+func snmptrapConf() string {
+	if v := os.Getenv("ANTHRIMON_SNMPTRAPD_CONF"); v != "" {
+		return v
+	}
+	return "/etc/snmp/snmptrapd.conf"
+}
+
+func snmptrapPersist() string {
+	if v := os.Getenv("ANTHRIMON_SNMPTRAPD_PERSIST"); v != "" {
+		return v
+	}
+	return "/var/lib/snmp/snmptrapd.conf"
+}
+
+func buildSnmptrapConf(users []trapV3User) string {
+	var b strings.Builder
+	b.WriteString("# Generated by Anthrimon — do not edit manually\n")
+	b.WriteString("# Regenerate: POST /trap-config on the collector control server\n\n")
+	b.WriteString("disableAuthorization yes\n\n")
+	b.WriteString("# Output numeric OIDs so the handler needs no MIB files\n")
+	b.WriteString("outputOption n\n\n")
+	b.WriteString("# Route all traps to the Anthrimon handler\n")
+	b.WriteString("traphandle default /usr/local/bin/anthrimon-traphandler\n")
+	if len(users) > 0 {
+		b.WriteString("\n# Authorize v3 users to trigger handlers\n")
+		for _, u := range users {
+			fmt.Fprintf(&b, "authUser execute,log,net %s\n", u.Username)
+		}
+		b.WriteString("\n# SNMPv3 users (plaintext; snmptrapd localizes keys on restart)\n")
+		for _, u := range users {
+			if u.PrivProto != "" && u.PrivKey != "" {
+				fmt.Fprintf(&b, "createUser %s %s \"%s\" %s \"%s\"\n",
+					u.Username, u.AuthProto, u.AuthKey, u.PrivProto, u.PrivKey)
+			} else if u.AuthProto != "" && u.AuthKey != "" {
+				fmt.Fprintf(&b, "createUser %s %s \"%s\"\n",
+					u.Username, u.AuthProto, u.AuthKey)
+			} else {
+				fmt.Fprintf(&b, "createUser %s\n", u.Username)
+			}
+		}
+	}
+	return b.String()
+}
+
+// handleTrapConfig receives a v3 user list from the hub, regenerates the
+// snmptrapd config, and restarts snmptrapd.
+func (s *Server) handleTrapConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !s.checkAuth(w, r) {
+		return
+	}
+
+	var req trapConfigReq
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	confPath := snmptrapConf()
+	persistPath := snmptrapPersist()
+	confContent := buildSnmptrapConf(req.Users)
+
+	if err := os.WriteFile(confPath, []byte(confContent), 0640); err != nil {
+		s.log.Error().Err(err).Str("path", confPath).Msg("trap-config: write snmptrapd.conf failed")
+		http.Error(w, "failed to write snmptrapd.conf: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Remove localized key DB so snmptrapd re-derives keys from the new createUser entries.
+	if err := os.Remove(persistPath); err != nil && !os.IsNotExist(err) {
+		s.log.Warn().Err(err).Str("path", persistPath).Msg("trap-config: could not remove persistent user DB")
+	}
+
+	if err := exec.Command("systemctl", "restart", "snmptrapd").Run(); err != nil {
+		s.log.Error().Err(err).Msg("trap-config: snmptrapd restart failed")
+		http.Error(w, "snmptrapd restart failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.log.Info().Int("v3_users", len(req.Users)).Msg("trap-config: snmptrapd restarted with updated users")
+
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"status":    "restarted",
+		"v3_users":  len(req.Users),
+	})
 }

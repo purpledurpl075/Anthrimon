@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import time
 import uuid
 from typing import List, Optional
@@ -24,21 +26,29 @@ from ..schemas.alert import AlertRead
 from ..schemas.common import PaginatedResponse
 from ..schemas.device import DeviceCreate, DeviceListRead, DeviceRead, DeviceUpdate
 from ..schemas.interface import InterfaceRead
+from ..snmp_probe import probe_v2c, probe_v3, VENDOR_DEVICE_TYPE as _VENDOR_DEVICE_TYPE
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/devices", tags=["devices"])
 
-_VENDOR_DEVICE_TYPE: dict[str, str] = {
-    "arista":       "switch",
-    "aruba_cx":     "switch",
-    "procurve":     "switch",
-    "cisco_nxos":   "switch",
-    "cisco_ios":    "router",
-    "cisco_iosxe":  "router",
-    "cisco_iosxr":  "router",
-    "juniper":      "router",
-    "fortios":      "firewall",
-}
+
+def _cred_to_spec(cred) -> dict:
+    """Translate a Credential row to the CredSpec JSON expected by the collector /probe endpoint."""
+    if cred.type == "snmp_v3":
+        return {
+            "version":    "snmp_v3",
+            "username":   cred.data.get("username", ""),
+            "auth_key":   cred.data.get("auth_key", ""),
+            "priv_key":   cred.data.get("priv_key", ""),
+            "auth_proto": cred.data.get("auth_protocol", "sha256"),
+            "priv_proto": cred.data.get("priv_protocol", "aes"),
+        }
+    return {"version": "snmp_v2c", "community": cred.data.get("community", "public")}
+
+
+def _collector_token(api_key_hash: str) -> str:
+    minute = str(int(time.time()) // 60)
+    return hmac.new(api_key_hash.encode(), minute.encode(), hashlib.sha256).hexdigest()
 
 
 # ── Global address table — must be registered before /{device_id} routes ──────
@@ -233,16 +243,34 @@ async def create_device(
     db: AsyncSession = Depends(get_db),
 ) -> DeviceRead:
     fields = body.model_dump(exclude_none=True, exclude={"mgmt_ip", "credential_id"})
+    fields.setdefault("hostname", str(body.mgmt_ip))
     if "device_type" not in fields and "vendor" in fields:
         fields.setdefault("device_type", _VENDOR_DEVICE_TYPE.get(fields["vendor"], "unknown"))
+
+    # Validate collector_id belongs to this tenant before writing anything,
+    # and fetch the full row so we can use wg_ip for the probe below.
+    _collector = None
+    if body.collector_id:
+        from ..models.site import RemoteCollector as _RC
+        _collector = (await db.execute(
+            select(_RC).where(
+                _RC.id == body.collector_id,
+                _RC.tenant_id == current_user.tenant_id,
+            )
+        )).scalar_one_or_none()
+        if _collector is None:
+            raise HTTPException(status_code=404, detail="Collector not found")
+
     device = Device(
         tenant_id=current_user.tenant_id,
         **fields,
         mgmt_ip=str(body.mgmt_ip),
     )
     db.add(device)
-    await db.flush()  # get device.id before linking credential
+    await db.flush()  # get device.id before probing and linking credential
 
+    # Resolve credential first (needed for both probe and linking).
+    cred = None
     if body.credential_id:
         cred = (await db.execute(
             select(Credential).where(
@@ -252,11 +280,66 @@ async def create_device(
         )).scalar_one_or_none()
         if cred is None:
             raise HTTPException(status_code=404, detail="Credential not found")
+
+    # Probe the device to fill in hostname/vendor/sys_description immediately.
+    # Hub-local: call probe functions directly.
+    # Remote-collector: forward to the collector's /probe control endpoint.
+    probed_data: dict | None = None
+    ip   = str(body.mgmt_ip)
+    port = body.snmp_port or 161
+
+    if not body.collector_id:
+        # Hub can reach the device directly.
+        result = None
+        if cred is not None and cred.type == "snmp_v3":
+            result = await probe_v3(ip, cred.data, port, timeout=3)
+        elif cred is not None and cred.type == "snmp_v2c":
+            result = await probe_v2c(ip, cred.data.get("community", "public"), port, timeout=3)
+        else:
+            result = await probe_v2c(ip, "public", port, timeout=3)
+        if result:
+            probed_data = {
+                "hostname": result.hostname,
+                "vendor":   result.vendor,
+                "sys_descr": result.sys_descr,
+            }
+    else:
+        # Route probe through the remote collector (_collector already validated above).
+        col = _collector
+        if col and col.wg_ip:
+            wg_ip = str(col.wg_ip).split("/")[0]
+            import ipaddress as _ip
+            if _ip.ip_address(wg_ip) in _ip.ip_network("10.100.0.0/24"):
+                cred_specs = [_cred_to_spec(cred)] if cred else []
+                try:
+                    async with httpx.AsyncClient(timeout=max(3 * len(cred_specs) + 2, 10)) as hc:
+                        resp = await hc.post(
+                            f"http://{wg_ip}:9090/probe",
+                            json={"ip": ip, "port": port, "creds": cred_specs, "timeout_s": 3},
+                            headers={"Authorization": f"Bearer {_collector_token(col.api_key_hash)}"},
+                        )
+                    if resp.status_code == 200:
+                        probed_data = resp.json()
+                except Exception:
+                    pass  # probe failure is not fatal; backfill happens on first poll
+
+    if probed_data:
+        if probed_data.get("hostname"):
+            device.hostname = probed_data["hostname"]
+        vendor = probed_data.get("vendor", "unknown")
+        if vendor and vendor != "unknown":
+            device.vendor      = vendor
+            device.device_type = _VENDOR_DEVICE_TYPE.get(vendor, "unknown")
+        if probed_data.get("sys_descr"):
+            device.sys_description = probed_data["sys_descr"]
+
+    if cred is not None:
         db.add(DeviceCredential(device_id=device.id, credential_id=body.credential_id, priority=0))
 
     await db.commit()
     await db.refresh(device)
-    logger.info("device_created", device_id=str(device.id), hostname=device.hostname)
+    logger.info("device_created", device_id=str(device.id), hostname=device.hostname,
+                probed=probed_data is not None)
     return DeviceRead.model_validate(device)
 
 
@@ -357,11 +440,10 @@ async def update_device(
 
 async def _nudge_collector(wg_ip: str, api_key_hash: str) -> None:
     """Fire-and-forget: ask the remote collector to refresh its device config."""
-    from .collectors import _control_token
     url = f"http://{wg_ip}:9090/refresh"
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            await client.post(url, headers={"Authorization": f"Bearer {_control_token(api_key_hash)}"})
+            await client.post(url, headers={"Authorization": f"Bearer {_collector_token(api_key_hash)}"})
         logger.debug("collector_nudged", wg_ip=wg_ip)
     except Exception as exc:
         # Non-fatal — collector will pick up the change on its next periodic refresh.
@@ -662,12 +744,13 @@ async def link_device_credential(
 ) -> None:
     await _assert_device_visible(device_id, current_user, db)
 
-    if (await db.execute(
+    cred = (await db.execute(
         select(Credential).where(
             Credential.id == body.credential_id,
             Credential.tenant_id == current_user.tenant_id,
         )
-    )).scalar_one_or_none() is None:
+    )).scalar_one_or_none()
+    if cred is None:
         raise HTTPException(status_code=404, detail="Credential not found")
 
     link = DeviceCredential(
@@ -682,6 +765,12 @@ async def link_device_credential(
         await db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Credential already linked to this device") from exc
 
+    if cred.type == "snmp_v3":
+        collector_id = await _device_collector_id(device_id, db)
+        from .collectors import _push_trap_config
+        import asyncio as _aio
+        _aio.create_task(_push_trap_config(collector_id, str(current_user.tenant_id)))
+
 
 @router.delete("/{device_id}/credentials/{credential_id}",
                status_code=status.HTTP_204_NO_CONTENT, response_model=None,
@@ -693,6 +782,11 @@ async def unlink_device_credential(
     db: AsyncSession = Depends(get_db),
 ) -> None:
     await _assert_device_visible(device_id, current_user, db)
+
+    cred = (await db.execute(
+        select(Credential).where(Credential.id == credential_id)
+    )).scalar_one_or_none()
+
     link = (await db.execute(
         select(DeviceCredential).where(
             DeviceCredential.device_id == device_id,
@@ -703,6 +797,12 @@ async def unlink_device_credential(
         raise HTTPException(status_code=404, detail="Credential not assigned to this device")
     await db.delete(link)
     await db.commit()
+
+    if cred and cred.type == "snmp_v3":
+        collector_id = await _device_collector_id(device_id, db)
+        from .collectors import _push_trap_config
+        import asyncio as _aio
+        _aio.create_task(_push_trap_config(collector_id, str(current_user.tenant_id)))
 
 
 # ── Global address table (all devices) ────────────────────────────────────────
@@ -1262,3 +1362,11 @@ async def _assert_device_visible(device_id: uuid.UUID, user: User, db: AsyncSess
     if device is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
     return device
+
+
+async def _device_collector_id(device_id: uuid.UUID, db: AsyncSession) -> str | None:
+    """Return the collector_id (as str) for a device, or None for hub-local."""
+    row = (await db.execute(
+        select(Device.collector_id).where(Device.id == device_id)
+    )).scalar_one_or_none()
+    return str(row) if row is not None else None

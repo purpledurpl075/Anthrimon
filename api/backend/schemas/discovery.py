@@ -13,6 +13,7 @@ class SweepRequest(BaseModel):
     port: int = Field(default=161, ge=1, le=65535)
     timeout_s: int = Field(default=3, ge=1, le=10)
     max_concurrent: int = Field(default=50, ge=1, le=254)
+    collector_id: Optional[uuid.UUID] = None  # None = hub; Phase 2 will dispatch to remote
 
 
 class DiscoveredDevice(BaseModel):

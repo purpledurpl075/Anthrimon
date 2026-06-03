@@ -23,13 +23,15 @@ SNMPv3 with authentication and privacy.
 | Field | Description |
 |-------|-------------|
 | Username | SNMPv3 security name |
-| Auth protocol | `MD5` or `SHA` |
+| Auth protocol | `SHA` (preferred) or `SHA-256`; `MD5` accepted but not recommended |
 | Auth password | Authentication password |
-| Privacy protocol | `DES`, `AES128`, `AES256` |
+| Privacy protocol | `AES` / `AES128` (preferred); `DES` accepted but deprecated |
 | Privacy password | Encryption password |
-| Security level | `noAuthNoPriv`, `authNoPriv`, `authPriv` |
+| Security level | `noAuthNoPriv`, `authNoPriv`, or `authPriv` |
 
 Used for: same as `snmp_v2c` but with encrypted transport. Preferred over v2c.
+
+SNMPv3 credentials are also used automatically for **SNMP trap authentication** on remote collectors. When a v3 credential is linked to a device, the hub pushes the user keys to the relevant remote collector's `snmptrapd` so that `authPriv` traps are accepted without any additional configuration.
 
 ---
 

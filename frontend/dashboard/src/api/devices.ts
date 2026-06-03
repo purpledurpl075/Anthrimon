@@ -174,6 +174,29 @@ export const fetchDeviceVlans = (deviceId: string) =>
 export const fetchDeviceStp = (deviceId: string) =>
   api.get<StpPort[]>(`/devices/${deviceId}/stp`).then(r => r.data)
 
+// ── Traps ─────────────────────────────────────────────────────────────────────
+
+export interface TrapEvent {
+  id:           string
+  device_id:    string
+  hostname:     string
+  source_ip:    string
+  trap_type:    string
+  oid:          string
+  severity:     string
+  varbinds:     { oid: string; type: string; value: string }[]
+  snmp_version: string
+  received_at:  string
+}
+
+export const fetchDeviceTraps = (deviceId: string, days = 7) =>
+  api.get<{ items: TrapEvent[] }>(`/traps/device/${deviceId}`, { params: { days } }).then(r => r.data)
+
+export const fetchTraps = (params: {
+  device_id?: string; trap_type?: string; days?: number; limit?: number; offset?: number
+}) =>
+  api.get<{ total: number; items: TrapEvent[] }>('/traps', { params }).then(r => r.data)
+
 // ── Baselines ──────────────────────────────────────────────────────────────────
 
 export interface BaselineRow {
@@ -213,6 +236,16 @@ export interface LatencyHistory {
 
 export const fetchDeviceLatency = (id: string, hours: number) =>
   api.get<LatencyHistory>(`/devices/${id}/latency`, { params: { hours } }).then(r => r.data)
+
+export interface CreateDevicePayload {
+  mgmt_ip: string
+  snmp_port: number
+  credential_id?: string
+  collector_id?: string
+}
+
+export const createDevice = (data: CreateDevicePayload) =>
+  api.post<{ id: string }>('/devices', data).then(r => r.data)
 
 export const overrideBaseline = (
   deviceId: string,

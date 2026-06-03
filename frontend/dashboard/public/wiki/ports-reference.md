@@ -5,6 +5,7 @@
 | Port | Protocol | Service | Source |
 |------|----------|---------|--------|
 | 443 | TCP | HTTPS — web UI and API | Browsers, remote collectors, API clients |
+| 162 | UDP | SNMP traps (anthrimon-trap-receiver) | Network devices |
 | 514 | UDP | Syslog (RFC 3164 + 5424) | Network devices |
 | 514 | TCP | Syslog (reliable delivery) | Network devices |
 | 2055 | UDP | NetFlow v5 / v9 / IPFIX | Network devices |
@@ -33,13 +34,14 @@
 
 ## Remote collector
 
-The remote collector connects **outbound** to the hub only. No inbound ports need to be opened on the remote host for normal operation.
+The remote collector connects **outbound** to the hub only. For SNMP trap collection, it also receives inbound UDP 162 from devices at the local site.
 
 | Connection | Port | Protocol | Direction |
 |-----------|------|----------|-----------|
 | WireGuard to hub | 51820 | UDP | Outbound from remote host |
 | API calls to hub (via WireGuard) | 443 | TCP | Outbound over wg0 |
-| SNMP to devices | 161 | UDP | Outbound to devices at the remote site |
+| SNMP polling to devices | 161 | UDP | Outbound to devices at the remote site |
 | SSH to devices | 22 | TCP | Outbound to devices at the remote site |
+| SNMP trap reception (snmptrapd) | 162 | UDP | Inbound from devices at the remote site |
 
 The collector's local HTTP server (used for hot-patch and health checks) listens on `wg0` only — not the public interface.

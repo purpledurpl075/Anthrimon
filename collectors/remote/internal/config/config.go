@@ -19,6 +19,7 @@ type Config struct {
 	SNMP    SNMPConfig    `yaml:"snmp"`
 	Flow    FlowConfig    `yaml:"flow"`
 	Syslog  SyslogConfig  `yaml:"syslog"`
+	Trap    TrapConfig    `yaml:"trap"`
 	Forward ForwardConfig `yaml:"forward"`
 	Server  ServerConfig  `yaml:"server"`
 	Log     LogConfig     `yaml:"log"`
@@ -43,6 +44,12 @@ type FlowConfig struct {
 type SyslogConfig struct {
 	UDPAddr string `yaml:"udp_addr"`
 	TCPAddr string `yaml:"tcp_addr"`
+}
+
+// TrapConfig holds the address for the SNMP trap listener.
+type TrapConfig struct {
+	UDPAddr string `yaml:"udp_addr"` // default ":162"
+	Enabled bool   `yaml:"enabled"`  // default true when addr is non-empty
 }
 
 // ForwardConfig controls how data is batched before being sent to the hub.
@@ -97,6 +104,9 @@ func defaults(c *Config) {
 	}
 	if c.Syslog.TCPAddr == "" {
 		c.Syslog.TCPAddr = ":514"
+	}
+	if c.Trap.UDPAddr == "" {
+		c.Trap.UDPAddr = ":162"
 	}
 	if c.Forward.BatchSize == 0 {
 		c.Forward.BatchSize = 500

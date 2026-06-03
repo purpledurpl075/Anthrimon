@@ -23,7 +23,7 @@ from .evaluators import (
     eval_uptime, eval_temperature, eval_interface_errors, eval_interface_util,
     eval_custom_oid, eval_ospf_state, eval_route_missing, eval_flow_bandwidth,
     eval_syslog_match, eval_bgp_session_down, eval_bgp_session_flapping,
-    eval_bgp_prefix_drop, eval_device_latency, fetch_syslog_context,
+    eval_bgp_prefix_drop, eval_device_latency, eval_snmp_trap, fetch_syslog_context,
     resolve_devices,
 )
 
@@ -122,6 +122,7 @@ def _build_title(rule: AlertRule, breach: Breach) -> str:
         "bgp_session_down":    f"BGP peer {breach.extra.get('peer_ip','?')} (AS{breach.extra.get('peer_asn','?')}) {breach.extra.get('session_state','down')}",
         "bgp_session_flapping":f"BGP peer {breach.extra.get('peer_ip','?')} (AS{breach.extra.get('peer_asn','?')}) flapped {breach.extra.get('flap_count',0)}× in {breach.extra.get('window_minutes',60)}m",
         "bgp_prefix_drop":     f"BGP peer {breach.extra.get('peer_ip','?')} (AS{breach.extra.get('peer_asn','?')}) prefix count dropped {breach.extra.get('drop_pct',0):.1f}% ({breach.extra.get('prefixes_now','?')} vs avg {breach.extra.get('prefixes_avg','?')})",
+        "snmp_trap":       f"SNMP trap {breach.extra.get('trap_type', breach.extra.get('trap_type_pattern','?'))} received {int(breach.value) if breach.value is not None else 0}× in {breach.extra.get('window_minutes','?')}m",
         "device_latency": (
             f"high RTT {breach.value:.1f} ms (threshold {breach.extra.get('threshold_ms','?')} ms)"
             if breach.extra.get("metric") == "rtt_ms"
@@ -393,6 +394,14 @@ class AlertEngine:
             elif rule.metric == "syslog_match" and rule.custom_oid:
                 b = await eval_syslog_match(
                     device, rule.custom_oid,
+                    rule.threshold or 1,
+                    rule.duration_seconds or 300,
+                )
+                if b: breaches.append(b)
+            elif rule.metric == "snmp_trap":
+                b = await eval_snmp_trap(
+                    db, device,
+                    rule.custom_oid or "%",
                     rule.threshold or 1,
                     rule.duration_seconds or 300,
                 )

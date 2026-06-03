@@ -46,6 +46,7 @@ from ..models.device import Device
 from ..models.health import DeviceHealthLatest
 from ..models.site import RemoteCollector, WgIpPool
 from ..models.tenant import User
+from ..snmp_probe import detect_vendor, VENDOR_DEVICE_TYPE as _VENDOR_DEVICE_TYPE
 from .admin import load_platform_settings
 
 logger = structlog.get_logger(__name__)
@@ -141,7 +142,12 @@ def _generate_token() -> tuple[str, str]:
 
 def _is_wg_ip(request: Request) -> bool:
     try:
-        return ipaddress.ip_address(request.client.host) in _WG_SUBNET
+        host = request.client.host
+        # Allow loopback so hub-local services (e.g. trap receiver) can call
+        # collector endpoints directly without going through WireGuard.
+        if host in ("127.0.0.1", "::1"):
+            return True
+        return ipaddress.ip_address(host) in _WG_SUBNET
     except Exception:
         return False
 
@@ -317,7 +323,16 @@ async def list_collectors(
 ) -> list[dict]:
     rows = (await db.execute(
         select(RemoteCollector)
-        .where(RemoteCollector.tenant_id == current_user.tenant_id)
+        .where(
+            RemoteCollector.tenant_id == current_user.tenant_id,
+            # Exclude hub-local service accounts (e.g. hub-trap-receiver) which
+            # authenticate via direct API key with no WireGuard IP.  Real collectors
+            # always acquire a wg_ip during bootstrap before going online.
+            ~(
+                (RemoteCollector.wg_ip == None) &
+                (RemoteCollector.status == "online")
+            ),
+        )
         .order_by(RemoteCollector.name)
     )).scalars().all()
     # Refresh online/offline status based on last_seen
@@ -363,7 +378,7 @@ async def create_collector(
 
 def _binary_info(arch: str) -> dict:
     """Return existence + metadata for a built binary."""
-    p = _COLLECTOR_DIST / f"anthrimon-collector-linux-{arch}"
+    p = _COLLECTOR_DIST / f"anthrimon-remote-collector-linux-{arch}"
     if p.exists():
         st = p.stat()
         return {
@@ -413,48 +428,100 @@ async def build_collector_binaries(
     loop   = asyncio.get_running_loop()
     results: dict[str, dict] = {}
 
+    # Each entry: (arch, cmd_package, output_filename)
+    _BINARIES = [
+        ("remote-collector", "./cmd/remote-collector/"),
+        ("trap-handler",     "./cmd/trap-handler/"),
+    ]
+
     for arch, extra_env in _BUILD_TARGETS:
-        out_path = _COLLECTOR_DIST / f"anthrimon-collector-linux-{arch}"
         env = {**os.environ, **extra_env}
+        arch_ok = True
+        arch_sizes: dict[str, int] = {}
 
-        def _run(src=str(_REMOTE_SRC), out=str(out_path), e=env):
-            return subprocess.run(
-                [
-                    str(_GO_BIN), "build",
-                    "-trimpath", "-ldflags=-s -w",
-                    "-o", out,
-                    "./cmd/remote-collector/",
-                ],
-                cwd=src, env=e,
-                capture_output=True, text=True,
-                timeout=300,
-            )
+        for bin_name, cmd_pkg in _BINARIES:
+            out_path = _COLLECTOR_DIST / f"anthrimon-{bin_name}-linux-{arch}"
 
-        logger.info("collector_build_start", arch=arch)
-        try:
-            proc = await loop.run_in_executor(None, _run)
-            if proc.returncode == 0:
-                out_path.chmod(0o755)
-                size = out_path.stat().st_size
-                results[arch] = {"success": True, "size_bytes": size}
-                logger.info("collector_build_ok", arch=arch, size=size)
-            else:
-                error = (proc.stderr or proc.stdout or "unknown error").strip()
-                results[arch] = {"success": False, "error": error}
-                logger.error("collector_build_failed", arch=arch, error=error)
-        except subprocess.TimeoutExpired:
-            results[arch] = {"success": False, "error": "Build timed out after 300 s"}
-            logger.error("collector_build_timeout", arch=arch)
-        except Exception as exc:
-            results[arch] = {"success": False, "error": str(exc)}
-            logger.error("collector_build_exception", arch=arch, exc=str(exc))
+            def _run(src=str(_REMOTE_SRC), out=str(out_path), e=env, pkg=cmd_pkg):
+                return subprocess.run(
+                    [str(_GO_BIN), "build", "-trimpath", "-ldflags=-s -w", "-o", out, pkg],
+                    cwd=src, env=e,
+                    capture_output=True, text=True,
+                    timeout=300,
+                )
+
+            logger.info("collector_build_start", arch=arch, binary=bin_name)
+            try:
+                proc = await loop.run_in_executor(None, _run)
+                if proc.returncode == 0:
+                    out_path.chmod(0o755)
+                    arch_sizes[bin_name] = out_path.stat().st_size
+                    logger.info("collector_build_ok", arch=arch, binary=bin_name,
+                                size=arch_sizes[bin_name])
+                else:
+                    error = (proc.stderr or proc.stdout or "unknown error").strip()
+                    arch_ok = False
+                    logger.error("collector_build_failed", arch=arch, binary=bin_name, error=error)
+                    results[arch] = {"success": False, "error": f"{bin_name}: {error}"}
+                    break
+            except subprocess.TimeoutExpired:
+                arch_ok = False
+                results[arch] = {"success": False, "error": f"{bin_name}: timed out after 300 s"}
+                logger.error("collector_build_timeout", arch=arch, binary=bin_name)
+                break
+            except Exception as exc:
+                arch_ok = False
+                results[arch] = {"success": False, "error": f"{bin_name}: {exc}"}
+                logger.error("collector_build_exception", arch=arch, binary=bin_name, exc=str(exc))
+                break
+
+        if arch_ok:
+            results[arch] = {"success": True, "size_bytes": arch_sizes}
 
     all_ok = all(r["success"] for r in results.values())
+
+    # Auto-install the trap-handler for the hub's own architecture so
+    # snmptrapd can invoke it immediately — no manual step required.
+    import platform as _platform
+    import shutil as _shutil
+    local_arch = "arm64" if _platform.machine() in ("arm64", "aarch64") else "amd64"
+    handler_src = _COLLECTOR_DIST / f"anthrimon-trap-handler-linux-{local_arch}"
+    handler_dst = Path("/usr/local/bin/anthrimon-traphandler")
+    if handler_src.exists():
+        try:
+            _shutil.copy2(str(handler_src), str(handler_dst))
+            handler_dst.chmod(0o755)
+            logger.info("trap_handler_installed", path=str(handler_dst), arch=local_arch)
+            results["_hub_trap_handler"] = {"installed": str(handler_dst)}
+        except Exception as exc:
+            logger.error("trap_handler_install_failed", error=str(exc))
+            results["_hub_trap_handler"] = {"installed": False, "error": str(exc)}
+
     return {"all_ok": all_ok, "arches": results}
 
 
 # ── Collector-facing routes (no JWT — use API key from WireGuard tunnel) ──────
 # These MUST be defined before /{collector_id} to avoid path-param shadowing.
+
+def _serve_binary(name: str, arch: str) -> Response:
+    """Read a built binary from _COLLECTOR_DIST and return it as a download response."""
+    binary_path = _COLLECTOR_DIST / f"anthrimon-{name}-linux-{arch}"
+    if not binary_path.exists():
+        raise HTTPException(
+            status_code=503,
+            detail=f"{name} binary for linux/{arch} not built yet — run POST /collectors/builds first.",
+        )
+    data = binary_path.read_bytes()
+    sha256_hex = hashlib.sha256(data).hexdigest()
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="anthrimon-{name}-linux-{arch}"',
+            "X-Binary-SHA256": sha256_hex,
+        },
+    )
+
 
 @router.get("/binary", summary="Download the collector binary (collector API-key auth)")
 async def download_binary_self_update(
@@ -462,38 +529,30 @@ async def download_binary_self_update(
     request: Request = None,
     db:      AsyncSession = Depends(get_db),
 ) -> Response:
-    """Serve the pre-built collector binary for the given architecture.
-
-    Called by the collector itself during a hub-triggered self-update.
-    Requires a valid collector API key over the WireGuard tunnel.
-    Sets X-Binary-SHA256 so the collector can verify integrity before replacing
-    its own binary on disk.
-    """
+    """Serve the pre-built remote-collector binary.  Called during self-update."""
     await _require_collector(request, db)
-
     if arch not in _VALID_ARCHES:
         raise HTTPException(status_code=400,
                             detail=f"arch must be one of: {', '.join(sorted(_VALID_ARCHES))}")
+    return _serve_binary("remote-collector", arch)
 
-    binary_path = _COLLECTOR_DIST / f"anthrimon-collector-linux-{arch}"
-    if not binary_path.exists():
-        raise HTTPException(
-            status_code=503,
-            detail=f"Binary for linux/{arch} not built yet. "
-                   "Run POST /collectors/builds on the hub first.",
-        )
 
-    data = binary_path.read_bytes()
-    sha256_hex = hashlib.sha256(data).hexdigest()
+@router.get("/trap-handler-binary", summary="Download the trap-handler binary (collector API-key auth)")
+async def download_trap_handler_binary(
+    arch:    str     = "amd64",
+    request: Request = None,
+    db:      AsyncSession = Depends(get_db),
+) -> Response:
+    """Serve the pre-built anthrimon-traphandler binary.
 
-    return Response(
-        content=data,
-        media_type="application/octet-stream",
-        headers={
-            "Content-Disposition": f'attachment; filename="anthrimon-collector-linux-{arch}"',
-            "X-Binary-SHA256": sha256_hex,
-        },
-    )
+    Called by the collector bootstrap/install script to put the handler at
+    /usr/local/bin/anthrimon-traphandler so snmptrapd can invoke it.
+    """
+    await _require_collector(request, db)
+    if arch not in _VALID_ARCHES:
+        raise HTTPException(status_code=400,
+                            detail=f"arch must be one of: {', '.join(sorted(_VALID_ARCHES))}")
+    return _serve_binary("trap-handler", arch)
 
 
 @router.get("/config", summary="Fetch device list and credentials for this collector")
@@ -945,6 +1004,167 @@ async def trigger_collector_refresh(
         return {"status": "error", "detail": str(exc)}
 
 
+class CollectorProbeRequest(BaseModel):
+    ip:             str
+    port:           int = 161
+    credential_ids: list[uuid.UUID]
+    timeout_s:      int = 3
+
+
+class CollectorSweepRequest(BaseModel):
+    cidr:           str
+    port:           int = 161
+    credential_ids: list[uuid.UUID]
+    timeout_s:      int = 3
+    max_concurrent: int = 50
+
+
+def _cred_to_spec(cred) -> dict:
+    """Translate a Credential row to the CredSpec JSON expected by the collector."""
+    if cred.type == "snmp_v3":
+        return {
+            "version":    "snmp_v3",
+            "username":   cred.data.get("username", ""),
+            "auth_key":   cred.data.get("auth_key", ""),
+            "priv_key":   cred.data.get("priv_key", ""),
+            "auth_proto": cred.data.get("auth_protocol", "sha256"),
+            "priv_proto": cred.data.get("priv_protocol", "aes"),
+        }
+    return {
+        "version":   "snmp_v2c",
+        "community": cred.data.get("community", "public"),
+    }
+
+
+async def _get_collector_for_tenant(collector_id: str, tenant_id: uuid.UUID, db: AsyncSession) -> RemoteCollector:
+    c = (await db.execute(
+        select(RemoteCollector).where(
+            RemoteCollector.id == collector_id,
+            RemoteCollector.tenant_id == tenant_id,
+        )
+    )).scalar_one_or_none()
+    if c is None:
+        raise HTTPException(status_code=404, detail="Collector not found")
+    if not c.wg_ip:
+        raise HTTPException(status_code=409, detail="Collector has no WireGuard IP — bootstrap it first")
+    wg_ip = str(c.wg_ip).split("/")[0]
+    if ipaddress.ip_address(wg_ip) not in _WG_SUBNET:
+        raise HTTPException(status_code=409, detail="Collector WireGuard IP is outside the expected subnet")
+    return c
+
+
+@router.post("/{collector_id}/probe", summary="Probe a single device via a remote collector")
+async def collector_probe(
+    collector_id: str,
+    body:         CollectorProbeRequest,
+    current_user: User         = Depends(require_tenant_user("tenant_admin")),
+    db:           AsyncSession = Depends(get_db),
+) -> dict:
+    """Forward a single-device SNMP probe to the named collector and return the result.
+
+    The hub translates credential UUIDs to CredSpec objects and POSTs them to
+    the collector's /probe control endpoint.  Returns 200 with the ProbeResult
+    on success, 404 if the device does not respond.
+    """
+    c = await _get_collector_for_tenant(collector_id, current_user.tenant_id, db)
+
+    from ..models.credential import Credential
+    cred_rows = (await db.execute(
+        select(Credential).where(
+            Credential.id.in_(body.credential_ids),
+            Credential.tenant_id == current_user.tenant_id,
+            Credential.type.in_(("snmp_v2c", "snmp_v3")),
+        )
+    )).scalars().all()
+    if not cred_rows:
+        raise HTTPException(status_code=404, detail="No valid SNMP credentials found")
+
+    cred_map  = {cr.id: cr for cr in cred_rows}
+    cred_specs = [_cred_to_spec(cred_map[cid]) for cid in body.credential_ids if cid in cred_map]
+
+    wg_ip   = str(c.wg_ip).split("/")[0]
+    timeout = max(body.timeout_s * len(cred_specs) + 2, 10)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as hc:
+            resp = await hc.post(
+                f"http://{wg_ip}:9090/probe",
+                json={"ip": body.ip, "port": body.port, "creds": cred_specs, "timeout_s": body.timeout_s},
+                headers={"Authorization": f"Bearer {_control_token(c.api_key_hash)}"},
+            )
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Collector unreachable")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    if resp.status_code == 404:
+        raise HTTPException(status_code=404, detail="Device did not respond to SNMP")
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Collector returned HTTP {resp.status_code}")
+    return resp.json()
+
+
+@router.post("/{collector_id}/sweep", summary="Run a CIDR discovery sweep via a remote collector")
+async def collector_sweep(
+    collector_id: str,
+    body:         CollectorSweepRequest,
+    current_user: User         = Depends(require_tenant_user("tenant_admin")),
+    db:           AsyncSession = Depends(get_db),
+) -> dict:
+    """Forward a CIDR sweep to the named collector and return results when complete.
+
+    Note: this is a synchronous call that blocks until the collector finishes
+    scanning the entire CIDR.  For large subnets the hub HTTP client uses a
+    generous timeout.  The discovery page's async-job wrapper calls this internally.
+    """
+    try:
+        network = ipaddress.ip_network(body.cidr, strict=False)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid CIDR notation")
+    if network.num_addresses > 1024:
+        raise HTTPException(status_code=400, detail="CIDR too large — max /22 (1022 hosts)")
+
+    c = await _get_collector_for_tenant(collector_id, current_user.tenant_id, db)
+
+    from ..models.credential import Credential
+    cred_rows = (await db.execute(
+        select(Credential).where(
+            Credential.id.in_(body.credential_ids),
+            Credential.tenant_id == current_user.tenant_id,
+            Credential.type.in_(("snmp_v2c", "snmp_v3")),
+        )
+    )).scalars().all()
+    if not cred_rows:
+        raise HTTPException(status_code=404, detail="No valid SNMP credentials found")
+
+    cred_map   = {cr.id: cr for cr in cred_rows}
+    cred_specs = [_cred_to_spec(cred_map[cid]) for cid in body.credential_ids if cid in cred_map]
+
+    wg_ip   = str(c.wg_ip).split("/")[0]
+    hosts   = network.num_addresses - 2
+    timeout = max(body.timeout_s * hosts / max(body.max_concurrent, 1) * 2 + 30, 60)
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as hc:
+            resp = await hc.post(
+                f"http://{wg_ip}:9090/sweep",
+                json={
+                    "cidr":           body.cidr,
+                    "port":           body.port,
+                    "creds":          cred_specs,
+                    "timeout_s":      body.timeout_s,
+                    "max_concurrent": body.max_concurrent,
+                },
+                headers={"Authorization": f"Bearer {_control_token(c.api_key_hash)}"},
+            )
+    except httpx.ConnectError:
+        raise HTTPException(status_code=503, detail="Collector unreachable")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"Collector returned HTTP {resp.status_code}")
+    return resp.json()
+
+
 @router.post("/{collector_id}/token", summary="Regenerate registration token")
 async def regenerate_token(
     collector_id: str,
@@ -1022,15 +1242,15 @@ if [[ $EUID -ne 0 ]]; then
   exit 1
 fi
 
-echo "→ Installing dependencies (wireguard-tools)..."
+echo "→ Installing dependencies..."
 if command -v apt-get &>/dev/null; then
-  apt-get install -y --no-install-recommends wireguard-tools
+  apt-get install -y --no-install-recommends wireguard-tools snmp snmptrapd
 elif command -v yum &>/dev/null; then
-  yum install -y wireguard-tools
+  yum install -y wireguard-tools net-snmp net-snmp-utils
 elif command -v dnf &>/dev/null; then
-  dnf install -y wireguard-tools
+  dnf install -y wireguard-tools net-snmp net-snmp-utils
 else
-  echo "WARNING: could not detect package manager — install wireguard-tools manually"
+  echo "WARNING: could not detect package manager — install wireguard-tools and snmptrapd manually"
 fi
 
 echo "→ Installing binary..."
@@ -1038,8 +1258,20 @@ install -m 755 "${{BINARY}}" "${{BIN_DST}}"
 
 echo "→ Installing config and CA cert..."
 mkdir -p "${{CONF_DIR}}"
-install -m 640 ca.crt         "${{CONF_DIR}}/ca.crt"
+# ca.crt must be world-readable so the snmptrapd exec handler (Debian-snmp user) can load it
+install -m 644 ca.crt         "${{CONF_DIR}}/ca.crt"
 install -m 640 collector.yaml "${{CONF_DIR}}/collector.yaml"
+
+echo "→ Configuring snmptrapd capability override..."
+mkdir -p /etc/systemd/system/snmptrapd.service.d
+cat > /etc/systemd/system/snmptrapd.service.d/override.conf <<'SNMPEOF'
+[Service]
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+SNMPEOF
+# On Ubuntu 24.04+, socket activation holds port 162; stop it so snmptrapd can bind directly
+systemctl stop snmptrapd.socket snmptrapd 2>/dev/null || true
+systemctl disable snmptrapd.socket 2>/dev/null || true
+systemctl daemon-reload
 
 echo "→ Writing systemd unit..."
 cat > "${{SERVICE_FILE}}" <<'EOF'
@@ -1053,6 +1285,8 @@ Type=simple
 ExecStart={bin_dst} --config /etc/anthrimon/collector.yaml
 Restart=on-failure
 RestartSec=10
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_BIND_SERVICE CAP_NET_RAW
 StandardOutput=journal
 StandardError=journal
 
@@ -1084,14 +1318,14 @@ async def download_collector_package(
     the hub CA cert, and an install.sh — everything needed to deploy on a
     remote server in a single command::
 
-        unzip anthrimon-collector-linux-amd64.zip
+        unzip anthrimon-remote-collector-linux-amd64.zip
         sudo bash install.sh
     """
     if arch not in _VALID_ARCHES:
         raise HTTPException(status_code=400,
                             detail=f"arch must be one of: {', '.join(sorted(_VALID_ARCHES))}")
 
-    binary_path = _COLLECTOR_DIST / f"anthrimon-collector-linux-{arch}"
+    binary_path = _COLLECTOR_DIST / f"anthrimon-remote-collector-linux-{arch}"
     if not binary_path.exists():
         raise HTTPException(
             status_code=503,
@@ -1148,7 +1382,7 @@ async def download_collector_package(
         zf.writestr(inst_info, install_sh)
 
     buf.seek(0)
-    zip_name = f"anthrimon-collector-linux-{arch}.zip"
+    zip_name = f"anthrimon-remote-collector-linux-{arch}.zip"
     return StreamingResponse(
         buf,
         media_type="application/zip",
@@ -1319,7 +1553,7 @@ _DEVICE_ID_RE = re.compile(rb'device_id="([0-9a-f-]{36})"')
 _CPU_RE  = re.compile(rb'anthrimon_device_cpu_util_pct\{[^}]*device_id="([0-9a-f-]{36})"[^}]*\}\s+([\d.]+)')
 _MEM_USED_RE  = re.compile(rb'anthrimon_device_mem_used_bytes\{[^}]*device_id="([0-9a-f-]{36})"[^}]*mem_type="ram"[^}]*\}\s+([\d.]+)')
 _MEM_TOTAL_RE = re.compile(rb'anthrimon_device_mem_total_bytes\{[^}]*device_id="([0-9a-f-]{36})"[^}]*mem_type="ram"[^}]*\}\s+([\d.]+)')
-_UPTIME_RE = re.compile(rb'anthrimon_uptime_seconds\{[^}]*device_id="([0-9a-f-]{36})"[^}]*\}\s+([\d.]+)')
+_UPTIME_RE = re.compile(rb'anthrimon_device_uptime_seconds\{[^}]*device_id="([0-9a-f-]{36})"[^}]*\}\s+([\d.]+)')
 
 # Interface status metrics — emitted by remote collector only.
 # Labels are fixed-order: device_id, if_index, if_name, vendor.
@@ -1335,8 +1569,12 @@ _IF_STP_ROLE_RE  = re.compile(rb'anthrimon_if_stp_role\{[^}]*device_id="([0-9a-f
 # Device sysinfo line emitted once per poll cycle by the remote collector.
 # Labels: device_id, sysname (hostname from SNMP sysName OID), sysdescr.
 _DEVICE_INFO_RE = re.compile(
-    rb'anthrimon_device_info\{[^}]*device_id="([0-9a-f-]{36})"[^}]*'
-    rb'sysdescr="((?:[^"\\]|\\.)*)"[^}]*sysname="([^"]*)"'
+    rb'anthrimon_device_info\{'
+    rb'device_id="([0-9a-f-]{36})",'
+    rb'sysname="([^"]*)",'
+    rb'sysdescr="((?:[^"\\]|\\.)*)"'
+    rb'(?:,sysobjectid="([^"]*)")?'  # optional — absent in older collector builds
+    rb'\}'
 )
 
 # Active failure report: emitted by remote collector when a device returns 0
@@ -1601,24 +1839,39 @@ async def ingest_metrics(
                 {"did": did_str, "idxs": idxs, "states": states, "roles": roles},
             )
 
-    # Parse anthrimon_device_info lines and backfill hostname / sys_description
-    # for devices where the hub has no hostname yet (e.g. newly-registered vEOS nodes).
-    # Only updates when the DB hostname is blank — never overwrites a user-set value.
+    # Parse anthrimon_device_info lines and backfill device identity fields.
+    # hostname / sys_description: only written when the DB value is blank.
+    # vendor / device_type: only written when still 'unknown' (never overwrites user edits).
     for m in _DEVICE_INFO_RE.finditer(body):
         did      = m.group(1).decode()
-        sysdescr = m.group(2).decode().encode('raw_unicode_escape').decode('unicode_escape')
-        sysname  = m.group(3).decode()
-        if did not in allowed_device_ids or not sysname:
+        sysname  = m.group(2).decode()
+        sysdescr = m.group(3).decode().encode('raw_unicode_escape').decode('unicode_escape')
+        sysobj   = (m.group(4) or b'').decode()
+
+        if did not in allowed_device_ids:
             continue
+
+        vendor      = detect_vendor(sysobj, sysdescr)
+        device_type = _VENDOR_DEVICE_TYPE.get(vendor, "unknown")
+
         await db.execute(
             text("""
                 UPDATE devices
-                SET hostname        = :sysname,
-                    sys_description = :sysdescr
+                SET hostname        = CASE WHEN hostname IS NULL OR hostname = ''
+                                          THEN :sysname ELSE hostname END,
+                    sys_description = :sysdescr,
+                    vendor          = CASE WHEN vendor = 'unknown' AND :vendor != 'unknown'
+                                          THEN CAST(:vendor AS vendor_type) ELSE vendor END,
+                    device_type     = CASE WHEN vendor = 'unknown' AND :vendor != 'unknown'
+                                          THEN CAST(:device_type AS device_type) ELSE device_type END
                 WHERE id = CAST(:did AS uuid)
-                  AND (hostname IS NULL OR hostname = '')
+                  AND (
+                      (hostname IS NULL OR hostname = '')
+                      OR (vendor = 'unknown' AND :vendor != 'unknown')
+                  )
             """),
-            {"did": did, "sysname": sysname, "sysdescr": sysdescr},
+            {"did": did, "sysname": sysname, "sysdescr": sysdescr,
+             "vendor": vendor, "device_type": device_type},
         )
 
     await db.commit()
@@ -2133,3 +2386,294 @@ async def ingest_stp_ports(
 
     await db.commit()
     return {"written": written}
+
+
+# ── SNMP trap ingest ──────────────────────────────────────────────────────────
+
+@router.post("/traps", status_code=204, response_model=None,
+             summary="Ingest decoded SNMP trap events from a collector")
+async def ingest_traps(
+    request: Request,
+    db:      AsyncSession = Depends(get_db),
+) -> None:
+    """Accept a batch of decoded SNMP trap events from a remote collector or
+    the hub-local trap receiver and write them to trap_events.
+
+    Payload: {"events": [...], "collector_id": "<uuid-optional>"}
+    Each event: source_ip, device_id (optional), trap_type, oid, severity,
+                varbinds (list of {oid, type, value}), snmp_version, received_at.
+    """
+    collector = await _require_collector(request, db)
+    body      = await request.json()
+    events    = body.get("events") or []
+    if not events:
+        return
+
+    now = datetime.now(timezone.utc)
+    rows: list[dict] = []
+    for ev in events:
+        source_ip = ev.get("source_ip", "")
+        if not source_ip:
+            continue
+
+        # Resolve device_id: prefer what the collector sent, fall back to IP lookup.
+        device_id_str = ev.get("device_id")
+        if not device_id_str:
+            row = (await db.execute(
+                text("SELECT id::text FROM devices WHERE host(mgmt_ip) = :ip LIMIT 1"),
+                {"ip": source_ip},
+            )).one_or_none()
+            if row:
+                device_id_str = row[0]
+
+        received_at = now
+        if ev.get("received_at"):
+            try:
+                received_at = datetime.fromisoformat(ev["received_at"].replace("Z", "+00:00"))
+            except ValueError:
+                pass
+
+        rows.append({
+            "id":           str(uuid.uuid4()),
+            "device_id":    device_id_str or None,
+            "source_ip":    source_ip,
+            "trap_type":    str(ev.get("trap_type", "unknown"))[:100],
+            "oid":          str(ev.get("oid", ""))[:255],
+            "severity":     ev.get("severity", "info") if ev.get("severity") in ("critical", "warning", "info") else "info",
+            "varbinds":     json.dumps(ev.get("varbinds") or []).replace('\\u0000', ''),
+            "snmp_version": str(ev.get("snmp_version", "v2c"))[:10],
+            "collector_id": str(collector.id),
+            "received_at":  received_at,
+        })
+
+    if not rows:
+        return
+
+    await db.execute(text("""
+        INSERT INTO trap_events
+            (id, device_id, source_ip, trap_type, oid, severity,
+             varbinds, snmp_version, collector_id, received_at)
+        VALUES
+            (:id, CAST(:device_id AS uuid), CAST(:source_ip AS inet), :trap_type, :oid, :severity,
+             CAST(:varbinds AS jsonb), :snmp_version, CAST(:collector_id AS uuid), CAST(:received_at AS timestamptz))
+    """), rows)
+    await db.commit()
+    logger.info("traps_ingested", count=len(rows), collector_id=str(collector.id))
+
+    # Fire-and-forget re-poll for qualifying traps (linkDown, coldStart, etc.)
+    # so the hub receives fresh metrics immediately after a state change.
+    _REPOLL_TRAP_TYPES = frozenset({
+        "linkDown", "linkUp", "coldStart", "warmStart",
+        "cisco.bgpBackwardTransition", "arista.bgpPeerStateChange",
+    })
+    repoll_ids = {
+        row["device_id"] for row in rows
+        if row["device_id"] and row["trap_type"] in _REPOLL_TRAP_TYPES
+    }
+    if repoll_ids and collector.wg_ip:
+        wg_ip = str(collector.wg_ip).split("/")[0]
+        if ipaddress.ip_address(wg_ip) in ipaddress.ip_network("10.100.0.0/24"):
+            token = _control_token(collector.api_key_hash)
+            asyncio.create_task(_trigger_repolls(wg_ip, token, repoll_ids))
+
+
+async def _trigger_repolls(wg_ip: str, token: str, device_ids: set[str]) -> None:
+    """POST /poll to the collector for each device that sent a qualifying trap."""
+    headers = {"Authorization": f"Bearer {token}"}
+    async with httpx.AsyncClient(timeout=5.0) as hc:
+        for device_id in device_ids:
+            try:
+                await hc.post(
+                    f"http://{wg_ip}:9090/poll",
+                    json={"device_id": device_id},
+                    headers=headers,
+                )
+            except Exception as exc:
+                logger.warning("trap_repoll_failed", device_id=device_id, error=str(exc))
+
+
+# ── snmptrapd v3 credential sync ──────────────────────────────────────────────
+
+_AUTH_PROTO_MAP = {
+    "md5": "MD5", "sha": "SHA", "sha128": "SHA",
+    "sha224": "SHA-224", "sha256": "SHA-256",
+    "sha384": "SHA-384", "sha512": "SHA-512",
+}
+_PRIV_PROTO_MAP = {
+    "des": "DES", "3des": "3DES",
+    "aes": "AES", "aes128": "AES",
+    "aes192": "AES-192", "aes256": "AES-256",
+}
+_SNMPTRAPD_CONF_PATH    = os.environ.get("ANTHRIMON_SNMPTRAPD_CONF",    "/etc/snmp/snmptrapd.conf")
+_SNMPTRAPD_PERSIST_PATH = os.environ.get("ANTHRIMON_SNMPTRAPD_PERSIST", "/var/lib/snmp/snmptrapd.conf")
+
+
+def _build_snmptrapd_conf(users: list[dict]) -> str:
+    lines = [
+        "# Generated by Anthrimon — do not edit manually",
+        "# Regenerate via POST /api/v1/collectors/{id}/trap-config",
+        "",
+        "disableAuthorization yes",
+        "",
+        "# Output numeric OIDs so the handler needs no MIB files",
+        "outputOption n",
+        "",
+        "# Route all traps to the Anthrimon handler",
+        "traphandle default /usr/local/bin/anthrimon-traphandler",
+    ]
+    if users:
+        lines.append("")
+        lines.append("# Authorize v3 users to trigger handlers")
+        for u in users:
+            lines.append(f"authUser execute,log,net {u['username']}")
+        lines.append("")
+        lines.append("# SNMPv3 users (plaintext; snmptrapd localizes keys on restart)")
+        for u in users:
+            username  = u["username"]
+            auth_p    = u.get("auth_proto", "")
+            auth_k    = u.get("auth_key", "")
+            priv_p    = u.get("priv_proto", "")
+            priv_k    = u.get("priv_key", "")
+            if auth_p and auth_k and priv_p and priv_k:
+                lines.append(f'createUser {username} {auth_p} "{auth_k}" {priv_p} "{priv_k}"')
+            elif auth_p and auth_k:
+                lines.append(f'createUser {username} {auth_p} "{auth_k}"')
+            else:
+                lines.append(f"createUser {username}")
+    lines.append("")
+    return "\n".join(lines)
+
+
+async def _collect_v3_users_for_collector(collector_id: str | None, tenant_id: str, db) -> list[dict]:
+    """Return a deduplicated list of SNMPv3 user dicts for all devices on a collector.
+
+    For the hub (collector_id=None) we include users from ALL tenant devices, not
+    just hub-local ones — traps arrive directly at the hub regardless of which
+    collector is assigned for polling.
+    """
+    from ..models.credential import Credential, DeviceCredential
+    from ..models.device import Device
+
+    q = (
+        select(Credential)
+        .join(DeviceCredential, DeviceCredential.credential_id == Credential.id)
+        .join(Device, Device.id == DeviceCredential.device_id)
+        .where(
+            Device.tenant_id == tenant_id,
+            Device.is_active == True,  # noqa: E712
+            Credential.type == "snmp_v3",
+        )
+    )
+    if collector_id is not None:
+        q = q.where(Device.collector_id == collector_id)
+
+    rows = (await db.execute(q)).scalars().all()
+
+    seen: set[str] = set()
+    users: list[dict] = []
+    for cred in rows:
+        cd = cred.data if isinstance(cred.data, dict) else {}
+        username = cd.get("username", "")
+        if not username or username in seen:
+            continue
+        seen.add(username)
+        users.append({
+            "username":  username,
+            "auth_proto": _AUTH_PROTO_MAP.get(cd.get("auth_protocol", "sha256").lower(), "SHA-256"),
+            "auth_key":   cd.get("auth_key", ""),
+            "priv_proto": _PRIV_PROTO_MAP.get(cd.get("priv_protocol", "aes").lower(), "AES"),
+            "priv_key":   cd.get("priv_key", ""),
+        })
+    return users
+
+
+async def _push_trap_config(collector_id: str | None, tenant_id: str) -> None:
+    """Regenerate snmptrapd config for one collector.
+
+    collector_id=None means hub-local (no WireGuard — write the file directly).
+    For remote collectors, POST to /trap-config on the collector control server.
+    Errors are logged and swallowed so a credential save is never blocked.
+    """
+    import subprocess as _sp
+    from ..database import AsyncSessionLocal
+
+    async with AsyncSessionLocal() as db:
+        users = await _collect_v3_users_for_collector(collector_id, tenant_id, db)
+
+        if collector_id is None:
+            # Hub-local: write the file and restart snmptrapd directly.
+            conf = _build_snmptrapd_conf(users)
+            try:
+                with open(_SNMPTRAPD_CONF_PATH, "w") as fh:
+                    fh.write(conf)
+                try:
+                    os.remove(_SNMPTRAPD_PERSIST_PATH)
+                except FileNotFoundError:
+                    pass
+                _sp.run(["systemctl", "restart", "snmptrapd"], check=True, timeout=15)
+                logger.info("trap_config_hub_updated", v3_users=len(users))
+            except Exception as exc:
+                logger.error("trap_config_hub_failed", error=str(exc))
+            return
+
+        # Remote collector: look up WG IP and push over WireGuard.
+        col = (await db.execute(
+            select(RemoteCollector).where(
+                RemoteCollector.id == collector_id,
+                RemoteCollector.tenant_id == tenant_id,
+                RemoteCollector.is_active == True,  # noqa: E712
+            )
+        )).scalar_one_or_none()
+
+        if col is None or not col.wg_ip:
+            return
+        wg_ip = str(col.wg_ip).split("/")[0]
+        if ipaddress.ip_address(wg_ip) not in ipaddress.ip_network("10.100.0.0/24"):
+            return
+
+        token = _control_token(col.api_key_hash)
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as hc:
+                resp = await hc.post(
+                    f"http://{wg_ip}:9090/trap-config",
+                    json={"users": users},
+                    headers={"Authorization": f"Bearer {token}"},
+                )
+            if resp.status_code >= 400:
+                logger.error("trap_config_push_failed",
+                             collector_id=collector_id, status=resp.status_code)
+            else:
+                logger.info("trap_config_pushed",
+                            collector_id=collector_id, v3_users=len(users))
+        except Exception as exc:
+            logger.error("trap_config_push_failed", collector_id=collector_id, error=str(exc))
+
+
+@router.post("/{collector_id}/trap-config", status_code=204, response_model=None,
+             summary="Push updated snmptrapd v3 user config to a remote collector")
+async def push_trap_config(
+    collector_id: uuid.UUID,
+    current_user: User       = Depends(require_tenant_user("tenant_admin")),
+    db:           AsyncSession = Depends(get_db),
+) -> None:
+    col = (await db.execute(
+        select(RemoteCollector).where(
+            RemoteCollector.id == str(collector_id),
+            RemoteCollector.tenant_id == current_user.tenant_id,
+        )
+    )).scalar_one_or_none()
+    if col is None:
+        raise HTTPException(status_code=404, detail="Collector not found")
+    asyncio.create_task(
+        _push_trap_config(str(collector_id), str(current_user.tenant_id))
+    )
+
+
+@router.post("/trap-config/hub", status_code=204, response_model=None,
+             summary="Regenerate hub-local snmptrapd config from all tenant credentials")
+async def push_trap_config_hub(
+    current_user: User       = Depends(require_tenant_user("tenant_admin")),
+) -> None:
+    asyncio.create_task(
+        _push_trap_config(None, str(current_user.tenant_id))
+    )

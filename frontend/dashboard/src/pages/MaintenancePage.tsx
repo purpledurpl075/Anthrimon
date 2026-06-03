@@ -65,16 +65,27 @@ function CreateWindowModal({ devices, onClose }: {
   const set = (k: keyof CreateWindowForm, v: unknown) => setF(p => ({ ...p, [k]: v }))
 
   const mut = useMutation({
-    mutationFn: () => createMaintenanceWindow({
-      name:            f.name,
-      starts_at:       f.starts_at,
-      ends_at:         f.ends_at,
-      is_recurring:    f.is_recurring,
-      recurrence_cron: f.is_recurring ? f.recurrence_cron || null : null,
-      device_selector: f.target === 'device' && f.device_id ? { device_ids: [f.device_id] } : null,
-    }),
+    mutationFn: () => {
+      if (!f.name.trim()) throw new Error('Name is required')
+      if (!f.starts_at) throw new Error('Start time is required')
+      if (!f.ends_at) throw new Error('End time is required')
+      if (new Date(f.ends_at) <= new Date(f.starts_at)) throw new Error('End time must be after start time')
+      if (f.target === 'device' && !f.device_id) throw new Error('Select a device or choose "All devices"')
+      if (f.is_recurring && !f.recurrence_cron.trim()) throw new Error('Cron expression is required for recurring windows')
+      return createMaintenanceWindow({
+        name:            f.name,
+        starts_at:       f.starts_at,
+        ends_at:         f.ends_at,
+        is_recurring:    f.is_recurring,
+        recurrence_cron: f.is_recurring ? f.recurrence_cron || null : null,
+        device_selector: f.target === 'device' && f.device_id ? { device_ids: [f.device_id] } : null,
+      })
+    },
     onSuccess: () => { qc.invalidateQueries({ queryKey: ['maint-global'] }); onClose() },
-    onError:   (e: any) => setError(e?.response?.data?.detail ?? 'Failed to create'),
+    onError:   (e: any) => {
+      const detail = e?.response?.data?.detail
+      setError(Array.isArray(detail) ? detail.map((d: any) => d?.msg ?? String(d)).join('; ') : typeof detail === 'string' ? detail : e?.message ?? 'Failed to create')
+    },
   })
 
   return (
@@ -132,7 +143,7 @@ function CreateWindowModal({ devices, onClose }: {
 
         <div className="px-6 pb-5 flex justify-end gap-2">
           <button onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-50 rounded-xl transition-colors">Cancel</button>
-          <button onClick={() => mut.mutate()} disabled={mut.isPending || !f.name || !f.starts_at || !f.ends_at}
+          <button onClick={() => mut.mutate()} disabled={mut.isPending}
             className="px-4 py-2 text-sm font-medium bg-slate-800 text-white rounded-xl hover:bg-slate-700 transition-colors disabled:opacity-50">
             {mut.isPending ? 'Saving…' : 'Schedule'}
           </button>

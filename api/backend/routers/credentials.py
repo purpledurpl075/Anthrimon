@@ -135,6 +135,25 @@ async def update_credential(
     await db.commit()
     await db.refresh(cred)
     logger.info("credential_updated", id=str(cred_id))
+
+    # If an SNMP v3 credential changed, push fresh snmptrapd configs to every
+    # collector that has a device using this credential.
+    if cred.type == "snmp_v3" and body.data is not None:
+        import asyncio as _aio
+        from ..models.credential import DeviceCredential
+        from ..models.device import Device
+        from .collectors import _push_trap_config
+        rows = (await db.execute(
+            select(Device.collector_id, Device.tenant_id)
+            .join(DeviceCredential, DeviceCredential.device_id == Device.id)
+            .where(DeviceCredential.credential_id == cred_id)
+            .distinct()
+        )).all()
+        for col_id, tenant_id in rows:
+            _aio.create_task(
+                _push_trap_config(str(col_id) if col_id else None, str(tenant_id))
+            )
+
     return _cred_read(cred)
 
 

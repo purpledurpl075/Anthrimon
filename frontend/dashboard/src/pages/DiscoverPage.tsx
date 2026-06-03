@@ -5,6 +5,7 @@ import {
   fetchCredentials, startSweep, getSweepJob, listSweepJobs, cancelSweepJob,
   type DiscoveredDevice, type SweepJob, type SweepJobSummary,
 } from '../api/discovery'
+import { fetchCollectors } from '../api/collectors'
 import api from '../api/client'
 import VendorBadge from '../components/VendorBadge'
 import { useRole, hasRole } from '../hooks/useCurrentUser'
@@ -94,11 +95,12 @@ export default function DiscoverPage() {
   const queryClient = useQueryClient()
   const canAct = hasRole(useRole(), 'operator')
 
-  const [cidr,       setCidr]      = useState('')
-  const [credIds,    setCredIds]   = useState<string[]>([])
-  const [sshCredIds, setSshCredIds]= useState<string[]>([])
-  const [timeout,    setTimeout_]  = useState(3)
-  const [jobId,      setJobId]     = useState<string | null>(null)
+  const [cidr,        setCidr]       = useState('')
+  const [collectorId, setCollectorId] = useState('')
+  const [credIds,    setCredIds]    = useState<string[]>([])
+  const [sshCredIds, setSshCredIds] = useState<string[]>([])
+  const [timeout,    setTimeout_]   = useState(3)
+  const [jobId,      setJobId]      = useState<string | null>(null)
   const [job,        setJob]       = useState<SweepJob | null>(null)
   const [adding,     setAdding]    = useState<Set<string>>(new Set())
   const [added,      setAdded]     = useState<Set<string>>(new Set())
@@ -106,6 +108,7 @@ export default function DiscoverPage() {
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const { data: allCredentials = [] } = useQuery({ queryKey: ['credentials'], queryFn: fetchCredentials })
+  const { data: collectors = [] }     = useQuery({ queryKey: ['collectors'],  queryFn: fetchCollectors })
   const snmpCreds = allCredentials.filter(c => c.type === 'snmp_v2c' || c.type === 'snmp_v3')
   const sshCreds  = allCredentials.filter(c => c.type === 'ssh' || c.type === 'netconf')
 
@@ -138,7 +141,7 @@ export default function DiscoverPage() {
   }, [jobId])
 
   const sweepMutation = useMutation({
-    mutationFn: () => startSweep(cidr, credIds, timeout),
+    mutationFn: () => startSweep(cidr, credIds, timeout, collectorId || undefined),
     onSuccess: (j) => { setJob(j); setJobId(j.job_id); setAdded(new Set()); refetchJobs() },
   })
 
@@ -215,8 +218,19 @@ export default function DiscoverPage() {
         <div className="bg-white rounded-xl border border-slate-200 p-6">
           <h2 className="text-sm font-semibold text-slate-800 mb-4">SNMP Sweep</h2>
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
-            {/* Left col: CIDR + timeout */}
+            {/* Left col: collector + CIDR + timeout */}
             <div className="space-y-4">
+              <div>
+                <label className="block text-xs font-medium text-slate-600 mb-1">Discovery source</label>
+                <select value={collectorId} onChange={e => setCollectorId(e.target.value)}
+                  disabled={isRunning}
+                  className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white">
+                  <option value="">Hub (local)</option>
+                  {collectors.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              </div>
               <div>
                 <label className="block text-xs font-medium text-slate-600 mb-1">CIDR Range</label>
                 <input type="text" value={cidr} onChange={e => setCidr(e.target.value)}

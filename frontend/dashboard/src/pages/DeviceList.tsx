@@ -1,7 +1,9 @@
 import { useState, useMemo } from 'react'
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useNavigate } from 'react-router-dom'
-import { fetchDevices } from '../api/devices'
+import { fetchDevices, createDevice } from '../api/devices'
+import { fetchCredentials } from '../api/credentials'
+import { fetchCollectors } from '../api/collectors'
 import { fetchMaintenanceWindows } from '../api/maintenance'
 import { DeviceTypeIcon, DEVICE_TYPE_COLOR, DEVICE_TYPE_LABEL } from '../components/DeviceTypeIcon'
 import VendorBadge from '../components/VendorBadge'
@@ -124,13 +126,184 @@ function DeviceCard({ device, inMaintenance }: { device: DeviceListItem; inMaint
   )
 }
 
+// ── Add device modal ───────────────────────────────────────────────────────
+
+const IPV4_RE = /^(\d{1,3}\.){3}\d{1,3}$/
+const IPV6_RE = /^[0-9a-fA-F:]+$/
+
+function isValidIP(v: string) {
+  if (IPV4_RE.test(v)) {
+    return v.split('.').every(n => +n >= 0 && +n <= 255)
+  }
+  return IPV6_RE.test(v) && v.includes(':')
+}
+
+interface AddDeviceModalProps {
+  onClose: () => void
+}
+
+function AddDeviceModal({ onClose }: AddDeviceModalProps) {
+  const queryClient = useQueryClient()
+
+  const [mgmtIp,       setMgmtIp]       = useState('')
+  const [snmpPort,     setSnmpPort]     = useState(161)
+  const [credentialId, setCredentialId] = useState('')
+  const [collectorId,  setCollectorId]  = useState('')
+
+  const [errors,     setErrors]     = useState<Record<string, string>>({})
+  const [apiError,   setApiError]   = useState('')
+  const [submitting, setSubmitting] = useState(false)
+
+  const { data: credentials = [] } = useQuery({
+    queryKey: ['credentials'],
+    queryFn:  () => fetchCredentials(),
+  })
+
+  const { data: collectors = [] } = useQuery({
+    queryKey: ['collectors'],
+    queryFn:  () => fetchCollectors(),
+  })
+
+  function validate() {
+    const errs: Record<string, string> = {}
+    const ip = mgmtIp.trim()
+    if (!ip) errs.mgmtIp = 'Management IP is required'
+    else if (!isValidIP(ip)) errs.mgmtIp = 'Enter a valid IPv4 or IPv6 address'
+
+    if (snmpPort < 1 || snmpPort > 65535) errs.snmpPort = 'Must be 1–65535'
+
+    return errs
+  }
+
+  async function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    const errs = validate()
+    if (Object.keys(errs).length > 0) { setErrors(errs); return }
+    setErrors({})
+    setApiError('')
+    setSubmitting(true)
+    try {
+      await createDevice({
+        mgmt_ip:       mgmtIp.trim(),
+        snmp_port:     snmpPort,
+        credential_id: credentialId  || undefined,
+        collector_id:  collectorId   || undefined,
+      })
+      await queryClient.invalidateQueries({ queryKey: ['devices'] })
+      onClose()
+    } catch (err: unknown) {
+      const msg = (err as { response?: { data?: { detail?: string } } })
+        ?.response?.data?.detail
+      setApiError(msg ?? 'Failed to create device')
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative z-10 bg-white rounded-2xl border border-slate-200 shadow-xl w-full max-w-md mx-4 p-6">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-base font-semibold text-slate-800">Add device</h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} noValidate className="space-y-4">
+
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Management IP <span className="text-red-500">*</span></label>
+            <input
+              type="text"
+              value={mgmtIp}
+              onChange={e => setMgmtIp(e.target.value)}
+              className={`w-full px-3 py-2 text-sm border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 font-mono ${errors.mgmtIp ? 'border-red-400' : 'border-slate-200'}`}
+              placeholder="192.168.1.1"
+            />
+            {errors.mgmtIp && <p className="mt-1 text-xs text-red-600">{errors.mgmtIp}</p>}
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">SNMP port</label>
+            <input
+              type="number"
+              value={snmpPort}
+              onChange={e => setSnmpPort(Number(e.target.value))}
+              className={`w-full px-3 py-2 text-sm border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 ${errors.snmpPort ? 'border-red-400' : 'border-slate-200'}`}
+            />
+            {errors.snmpPort && <p className="mt-1 text-xs text-red-600">{errors.snmpPort}</p>}
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Credential</label>
+            <select
+              value={credentialId}
+              onChange={e => setCredentialId(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">No credential</option>
+              {credentials.map(c => (
+                <option key={c.id} value={c.id}>{c.name} ({c.type})</option>
+              ))}
+            </select>
+          </div>
+
+          <div>
+            <label className="block text-xs font-medium text-slate-600 mb-1">Collector</label>
+            <select
+              value={collectorId}
+              onChange={e => setCollectorId(e.target.value)}
+              className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+            >
+              <option value="">Hub (local)</option>
+              {collectors.map(c => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+            {collectorId && (
+              <p className="mt-1 text-[10px] text-slate-400">Device will be probed by the remote collector on its next poll cycle.</p>
+            )}
+          </div>
+
+          {apiError && (
+            <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{apiError}</p>
+          )}
+
+          <div className="flex items-center justify-end gap-3 pt-1">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-sm text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={submitting}
+              className="px-4 py-2 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors"
+            >
+              {submitting ? 'Adding…' : 'Add device'}
+            </button>
+          </div>
+
+        </form>
+      </div>
+    </div>
+  )
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────
 
 type StatusFilter = 'all' | 'up' | 'down' | 'unreachable' | 'unknown'
 
 export default function DeviceList() {
-  const [search,       setSearch]       = useState('')
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all')
+  const [search,        setSearch]        = useState('')
+  const [statusFilter,  setStatusFilter]  = useState<StatusFilter>('all')
+  const [showAddModal,  setShowAddModal]  = useState(false)
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['devices'],
@@ -189,12 +362,23 @@ export default function DeviceList() {
   return (
     <div className="min-h-full bg-slate-50 dark:bg-slate-900">
 
+      {showAddModal && <AddDeviceModal onClose={() => setShowAddModal(false)} />}
+
       {/* Header */}
       <div className="px-6 py-4 border-b border-slate-200 bg-white flex items-center justify-between">
         <div>
           <h1 className="text-base font-semibold text-slate-800">Devices</h1>
           <p className="text-xs text-slate-400 mt-0.5">{data?.total ?? 0} in inventory</p>
         </div>
+        <button
+          onClick={() => setShowAddModal(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          Add device
+        </button>
       </div>
 
       <div className="px-6 py-5 space-y-4 max-w-5xl">

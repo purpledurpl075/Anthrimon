@@ -8,6 +8,7 @@
 | SNMP collector | `snmp-collector` |
 | Flow collector (NetFlow/sFlow) | `flow-collector` |
 | Syslog collector | `syslog-collector` |
+| Hub SNMP trap receiver | `anthrimon-trap-receiver` |
 | Nginx (web frontend) | `nginx` |
 
 ## Restart a single service
@@ -19,7 +20,7 @@ sudo systemctl restart <service-name>
 ## Restart all Anthrimon services
 
 ```bash
-sudo systemctl restart anthrimon-api snmp-collector flow-collector syslog-collector
+sudo systemctl restart anthrimon-api snmp-collector flow-collector syslog-collector anthrimon-trap-receiver
 ```
 
 ## Check service status
@@ -33,6 +34,7 @@ sudo systemctl status anthrimon-api
 ```bash
 journalctl -u anthrimon-api -f
 journalctl -u snmp-collector -f
+journalctl -u anthrimon-trap-receiver -f
 ```
 
 ## After config file changes
@@ -51,3 +53,10 @@ sudo systemctl restart <service-name>
 ## Remote collectors
 
 Remote collectors are managed via the **Collectors** page in the UI. Use the hot-patch button to push a new binary without needing SSH access to the remote host.
+
+On the remote host itself, the service is `anthrimon-collector`:
+
+```bash
+sudo systemctl status anthrimon-collector
+journalctl -u anthrimon-collector -f
+```

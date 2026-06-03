@@ -131,6 +131,9 @@ function UserModal({ editing, onClose, me, tenants, defaultTenantId }: UserModal
   const saveMut = useMutation({
     mutationFn: async () => {
       if (isNew) {
+        if (!username.trim()) throw new Error('Username is required')
+        if (!email.trim()) throw new Error('Email is required')
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Invalid email address')
         if (password.length < 8) throw new Error('Password must be at least 8 characters')
         if (isPlatAdmin) {
           await api.post('/platform/users', {
@@ -143,6 +146,7 @@ function UserModal({ editing, onClose, me, tenants, defaultTenantId }: UserModal
           await api.post('/users', { username, email, password, full_name: fullName || null, role })
         }
       } else {
+        if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new Error('Invalid email address')
         if (isPlatAdmin) {
           await api.patch(`/platform/users/${editing!.id}`, {
             email, full_name: fullName || null,
@@ -165,7 +169,13 @@ function UserModal({ editing, onClose, me, tenants, defaultTenantId }: UserModal
       qc.invalidateQueries({ queryKey: ['user-tenant-access', editing?.id] })
       onClose()
     },
-    onError: (e: any) => setError(e?.message ?? e?.response?.data?.detail ?? 'Save failed'),
+    onError: (e: any) => {
+      const detail = e?.response?.data?.detail
+      const msg = Array.isArray(detail)
+        ? detail.map((d: any) => d?.msg ?? String(d)).join('; ')
+        : typeof detail === 'string' ? detail : e?.message ?? 'Save failed'
+      setError(msg)
+    },
   })
 
   const resetMut = useMutation({
