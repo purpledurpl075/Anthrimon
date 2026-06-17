@@ -5,13 +5,16 @@ from datetime import datetime, timezone
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from sqlalchemy import func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..alerting.ws_manager import manager as alert_ws_manager
+from ..database import AsyncSessionLocal
 from ..dependencies import (
     get_current_user, get_current_principal, get_db, require_role, Principal,
     accessible_device_ids_subquery, assert_device_access, _has_tenant_role,
+    _principal_from_jwt,
 )
 from ..models.alert import Alert, AlertComment, AlertRule
 from ..models.tenant import User
@@ -67,6 +70,30 @@ async def list_alerts(
         out.append(r)
 
     return PaginatedResponse(total=total, limit=limit, offset=offset, items=out)
+
+
+@router.websocket("/alerts/ws")
+async def alerts_ws(ws: WebSocket, token: str = Query(...)):
+    """Live alert feed — pushes {"event": "alerts_changed"} whenever an
+    alert in the caller's tenant is created, updated, or resolved. Client
+    should refetch GET /alerts on receipt. JWT in `token` query-param
+    (browser WS limitation, same pattern as /probes/ws)."""
+    await ws.accept()
+    async with AsyncSessionLocal() as db:
+        principal = await _principal_from_jwt(token, db)
+    if principal is None:
+        await ws.close(code=1008)
+        return
+
+    tenant_id = principal.active_tenant_id
+    alert_ws_manager.connect(tenant_id, ws)
+    try:
+        while True:
+            await ws.receive_text()  # block until disconnect; ignore content
+    except WebSocketDisconnect:
+        pass
+    finally:
+        alert_ws_manager.disconnect(tenant_id, ws)
 
 
 @router.get("/alerts/{alert_id}", response_model=AlertRead, summary="Get a single alert")
@@ -135,6 +162,7 @@ async def acknowledge_alert(
                  user=current_user, request=request)
     await db.commit()
     await db.refresh(alert)
+    await alert_ws_manager.broadcast(principal.active_tenant_id, {"event": "alerts_changed"})
     logger.info("alert_acknowledged", alert_id=str(alert_id), by=str(current_user.id))
     return AlertRead.model_validate(alert)
 
@@ -167,6 +195,7 @@ async def resolve_alert(
                  user=current_user, request=request)
     await db.commit()
     await db.refresh(alert)
+    await alert_ws_manager.broadcast(principal.active_tenant_id, {"event": "alerts_changed"})
     logger.info("alert_resolved", alert_id=str(alert_id), by=str(current_user.id))
     return AlertRead.model_validate(alert)
 

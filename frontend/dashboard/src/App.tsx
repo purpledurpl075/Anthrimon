@@ -1,7 +1,7 @@
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import Login from './pages/Login'
-import OverviewPage from './pages/OverviewPage'
+import HomeRedirect from './pages/HomeRedirect'
 import DeviceList from './pages/DeviceList'
 import DeviceDetail from './pages/DeviceDetail'
 import DiscoverPage from './pages/DiscoverPage'
@@ -24,11 +24,15 @@ import RoutingPage from './pages/RoutingPage'
 import WikiPage from './pages/WikiPage'
 import ClientPage from './pages/ClientPage'
 import PlatformPage from './pages/PlatformPage'
+import UpgradePage from './pages/UpgradePage'
 import UsersPage from './pages/UsersPage'
 import AuditPage from './pages/AuditPage'
 import PlatformHealthPage from './pages/PlatformHealthPage'
 import ProbesPage from './pages/ProbesPage'
 import PathTracePage from './pages/PathTracePage'
+import DashboardsListPage from './pages/DashboardsListPage'
+import DashboardViewPage from './pages/DashboardViewPage'
+import KioskPage from './pages/KioskPage'
 import Layout from './components/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
 
@@ -45,7 +49,7 @@ export default function App() {
             localStorage.getItem('token') ? <Navigate to="/" replace /> : <Login />
           } />
           <Route element={<ProtectedRoute><Layout /></ProtectedRoute>}>
-            <Route path="/"            element={<OverviewPage />} />
+            <Route path="/"            element={<HomeRedirect />} />
             <Route path="/devices"     element={<DeviceList />} />
             <Route path="/devices/:id" element={<DeviceDetail />} />
             <Route path="/devices/:id/interfaces/:ifaceId" element={<InterfaceDetailPage />} />
@@ -70,12 +74,16 @@ export default function App() {
             <Route path="/wiki/:slug"     element={<WikiPage />} />
             <Route path="/clients/:mac"   element={<ClientPage />} />
             <Route path="/platform"       element={<PlatformPage />} />
+            <Route path="/upgrade"        element={<UpgradePage />} />
             <Route path="/users"          element={<UsersPage />} />
             <Route path="/audit"          element={<AuditPage />} />
             <Route path="/platform-health" element={<PlatformHealthPage />} />
             <Route path="/probes"      element={<ProbesPage />} />
             <Route path="/path-trace"  element={<PathTracePage />} />
+            <Route path="/dashboards"     element={<DashboardsListPage />} />
+            <Route path="/dashboards/:id" element={<DashboardViewPage />} />
           </Route>
+          <Route path="/dashboards/kiosk" element={<ProtectedRoute><KioskPage /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>

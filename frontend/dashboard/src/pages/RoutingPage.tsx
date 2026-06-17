@@ -2,11 +2,18 @@ import { useState, useMemo, type ReactNode } from 'react'
 import { useQuery, useQueries } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import {
+  ReactFlow, ReactFlowProvider, Background, Controls, Handle, Position,
+  type Node, type Edge, type NodeProps,
+} from '@xyflow/react'
+import '@xyflow/react/dist/style.css'
+import {
   fetchAllBGPSessions, fetchBGPSummary, fetchBGPPrefixTotals,
   fetchBGPFlapLog, fetchBGPPrefixHistory, fetchBGPSessionEvents,
   fetchOSPFNeighbors, fetchOSPFAreas,
-  fetchISISNeighbors, fetchISISSummary, fetchISISAreas,
-  type BGPSession, type BGPFlapEvent, type OSPFNeighbor, type ISISNeighbor, type ISISArea,
+  fetchISISNeighbors, fetchISISSummary, fetchISISAreas, fetchRoutes,
+  fetchISISCircuitLevels, fetchISISLsps, fetchISISTopology,
+  type BGPSession, type BGPFlapEvent, type OSPFNeighbor, type ISISNeighbor, type ISISArea, type RouteEntryDTO,
+  type ISISCircuitLevel, type ISISLsp, type ISISTopologyNode,
 } from '../api/bgp'
 import TimeSeriesChart from '../components/TimeSeriesChart'
 
@@ -584,7 +591,7 @@ function BGPFlapLogTab() {
 // ── BGP panel ─────────────────────────────────────────────────────────────────
 
 function BGPPanel() {
-  const [tab, setTab] = useState<'sessions' | 'trends' | 'flap-log'>('sessions')
+  const [tab, setTab] = useState<'sessions' | 'trends' | 'flap-log' | 'routes'>('sessions')
 
   const { data: sessions = [], isLoading } = useQuery({
     queryKey:        ['bgp-sessions-all'],
@@ -675,7 +682,7 @@ function BGPPanel() {
       {/* Tabs */}
       <div>
         <div className="flex gap-1 border-b border-slate-200 mb-4">
-          {([['sessions', 'Sessions'], ['trends', 'Prefix Trends'], ['flap-log', 'Flap Log']] as const).map(([k, label]) => (
+          {([['sessions', 'Sessions'], ['trends', 'Prefix Trends'], ['flap-log', 'Flap Log'], ['routes', 'Routes']] as const).map(([k, label]) => (
             <button key={k} onClick={() => setTab(k)}
               className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${tab === k ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
               {label}
@@ -685,6 +692,7 @@ function BGPPanel() {
         {tab === 'sessions'  && <BGPSessionsTab sessions={sessions} isLoading={isLoading} pfxByDevicePeer={pfxByDevicePeer} />}
         {tab === 'trends'    && <BGPPrefixTrendsTab sessions={sessions} />}
         {tab === 'flap-log'  && <BGPFlapLogTab />}
+        {tab === 'routes'    && <RoutesPanel protocol="bgp" />}
       </div>
     </div>
   )
@@ -693,9 +701,7 @@ function BGPPanel() {
 // ── OSPF panel ────────────────────────────────────────────────────────────────
 
 function OSPFPanel() {
-  const [search, setSearch] = useState('')
-  const [areaFilter, setAreaFilter] = useState('all')
-  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [subTab, setSubTab] = useState<'neighbours' | 'routes'>('neighbours')
 
   const { data: neighbors = [], isLoading } = useQuery({
     queryKey:        ['ospf-neighbors'],
@@ -711,35 +717,6 @@ function OSPFPanel() {
   const totalFull    = areas.reduce((a, r) => a + r.full, 0)
   const totalNotFull = areas.reduce((a, r) => a + r.not_full, 0)
   const totalAll     = totalFull + totalNotFull
-
-  const uniqueAreas  = useMemo(() => ['all', ...new Set(neighbors.map(n => n.area))].sort(), [neighbors])
-
-  const filtered = useMemo(() => {
-    let n = neighbors
-    if (areaFilter !== 'all') n = n.filter(x => x.area === areaFilter)
-    if (search.trim()) {
-      const q = search.toLowerCase()
-      n = n.filter(x =>
-        x.device_name.toLowerCase().includes(q) ||
-        (x.neighbor_ip ?? '').includes(q) ||
-        (x.neighbor_router_id ?? '').includes(q) ||
-        (x.interface_name ?? '').toLowerCase().includes(q)
-      )
-    }
-    return n
-  }, [neighbors, areaFilter, search])
-
-  // Group by device
-  const byDevice = useMemo(() => {
-    const m = new Map<string, { id: string; name: string; neighbors: OSPFNeighbor[] }>()
-    for (const n of filtered) {
-      if (!m.has(n.device_id)) m.set(n.device_id, { id: n.device_id, name: n.device_name, neighbors: [] })
-      m.get(n.device_id)!.neighbors.push(n)
-    }
-    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name))
-  }, [filtered])
-
-  const isDeviceOpen = (id: string) => expanded[id] !== false
 
   if (isLoading) return <div className="text-sm text-slate-400 p-4">Loading…</div>
 
@@ -806,6 +783,59 @@ function OSPFPanel() {
         </div>
       )}
 
+      {/* Tabs */}
+      <div>
+        <div className="flex gap-1 border-b border-slate-200 mb-4">
+          {([['neighbours', 'Neighbours'], ['routes', 'Routes']] as const).map(([k, label]) => (
+            <button key={k} onClick={() => setSubTab(k)}
+              className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${subTab === k ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+        {subTab === 'neighbours' && <OSPFNeighborsTab neighbors={neighbors} />}
+        {subTab === 'routes'     && <RoutesPanel protocol="ospf" />}
+      </div>
+    </div>
+  )
+}
+
+function OSPFNeighborsTab({ neighbors }: { neighbors: OSPFNeighbor[] }) {
+  const [search, setSearch] = useState('')
+  const [areaFilter, setAreaFilter] = useState('all')
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
+  const uniqueAreas  = useMemo(() => ['all', ...new Set(neighbors.map(n => n.area))].sort(), [neighbors])
+
+  const filtered = useMemo(() => {
+    let n = neighbors
+    if (areaFilter !== 'all') n = n.filter(x => x.area === areaFilter)
+    if (search.trim()) {
+      const q = search.toLowerCase()
+      n = n.filter(x =>
+        x.device_name.toLowerCase().includes(q) ||
+        (x.neighbor_ip ?? '').includes(q) ||
+        (x.neighbor_router_id ?? '').includes(q) ||
+        (x.interface_name ?? '').toLowerCase().includes(q)
+      )
+    }
+    return n
+  }, [neighbors, areaFilter, search])
+
+  // Group by device
+  const byDevice = useMemo(() => {
+    const m = new Map<string, { id: string; name: string; neighbors: OSPFNeighbor[] }>()
+    for (const n of filtered) {
+      if (!m.has(n.device_id)) m.set(n.device_id, { id: n.device_id, name: n.device_name, neighbors: [] })
+      m.get(n.device_id)!.neighbors.push(n)
+    }
+    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name))
+  }, [filtered])
+
+  const isDeviceOpen = (id: string) => expanded[id] !== false
+
+  return (
+    <div className="space-y-3">
       {/* Search + area filter */}
       {neighbors.length > 0 && (
         <div className="flex items-center gap-3 flex-wrap">
@@ -939,9 +969,15 @@ function fmtUptimeFull(secs: number | null): string {
   return `${secs}s`
 }
 
+// Zero-padded hex, e.g. fmtHex(26, 4) → "0x001a"
+function fmtHex(n: number | null, width: number): string {
+  if (n == null) return '—'
+  return '0x' + n.toString(16).padStart(width, '0')
+}
+
 // ── IS-IS panel ───────────────────────────────────────────────────────────────
 
-function ISISPanel() {
+function ISISAdjacenciesPanel() {
   const [search, setSearch] = useState('')
   const [levelFilter, setLevelFilter] = useState('all')
   const [instanceFilter, setInstanceFilter] = useState('all')
@@ -962,6 +998,11 @@ function ISISPanel() {
     queryFn:         fetchISISAreas,
     refetchInterval: 60_000,
   })
+  const { data: circuitLevels = [] } = useQuery({
+    queryKey:        ['isis-circuit-levels'],
+    queryFn:         fetchISISCircuitLevels,
+    refetchInterval: 60_000,
+  })
 
   // Build area lookup: "deviceId|instance" → comma-joined area addrs
   const areaByKey = useMemo(() => {
@@ -973,6 +1014,24 @@ function ISISPanel() {
     }
     return m
   }, [areas])
+
+  // Build link-detail lookup: "deviceId|instance|interface" → per-level circuit details
+  const circuitLevelsByKey = useMemo(() => {
+    const m: Record<string, ISISCircuitLevel[]> = {}
+    for (const cl of circuitLevels) {
+      const k = `${cl.device_id}|${cl.instance}|${cl.interface_name}`
+      if (!m[k]) m[k] = []
+      m[k].push(cl)
+    }
+    return m
+  }, [circuitLevels])
+
+  // The levels relevant to a given adjacency row — level-1-2 circuits show both
+  const circuitLevelsFor = (n: ISISNeighbor): ISISCircuitLevel[] => {
+    if (!n.interface_name) return []
+    const all = circuitLevelsByKey[`${n.device_id}|${n.instance}|${n.interface_name}`] ?? []
+    return all.filter(cl => cl.level === n.circuit_type || n.circuit_type === 'level-1-2')
+  }
 
   const uniqueLevels = useMemo(
     () => ['all', ...new Set(neighbors.map(n => n.circuit_type))].sort(),
@@ -1106,7 +1165,11 @@ function ISISPanel() {
           {byDeviceInstance.map(grp => {
             const key      = `${grp.id}|${grp.instance}`
             const upCount  = grp.neighbors.filter(n => n.adjacency_state === 'up').length
-            const allUp    = upCount === grp.neighbors.length
+            const severity = upCount === grp.neighbors.length ? 'ok'
+                           : upCount === 0                    ? 'down'
+                           : 'partial'
+            const dotCls   = severity === 'ok' ? 'bg-green-500' : severity === 'partial' ? 'bg-amber-400' : 'bg-red-500'
+            const badgeCls = severity === 'ok' ? 'text-green-700 bg-green-50' : severity === 'partial' ? 'text-amber-700 bg-amber-50' : 'text-red-700 bg-red-50'
             const open     = isGroupOpen(key)
             const areaList = areaByKey[key] ?? []
             const isNamed  = grp.instance && grp.instance !== 'default'
@@ -1116,7 +1179,7 @@ function ISISPanel() {
                   className="w-full flex items-center gap-3 px-5 py-3 hover:bg-slate-50 transition-colors text-left"
                   onClick={() => setExpanded(e => ({ ...e, [key]: !isGroupOpen(key) }))}
                 >
-                  <span className={`w-2 h-2 rounded-full shrink-0 ${allUp ? 'bg-green-500' : 'bg-amber-400'}`} />
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${dotCls}`} />
                   <Link to={`/devices/${grp.id}`} className="text-sm font-semibold text-slate-800 hover:text-blue-600" onClick={e => e.stopPropagation()}>
                     {grp.name}
                   </Link>
@@ -1124,7 +1187,7 @@ function ISISPanel() {
                   <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${isNamed ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-500'}`}>
                     {grp.instance}
                   </span>
-                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${allUp ? 'text-green-700 bg-green-50' : 'text-amber-700 bg-amber-50'}`}>
+                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${badgeCls}`}>
                     {upCount}/{grp.neighbors.length} up
                   </span>
                   {areaList.length > 0 && (
@@ -1162,7 +1225,25 @@ function ISISPanel() {
                           <tr key={n.id} className="hover:bg-slate-50">
                             <td className="px-5 py-2.5 font-mono text-xs text-slate-700">{n.sys_id || '—'}</td>
                             <td className="px-4 py-2.5 text-xs text-slate-500">{n.hostname ?? '—'}</td>
-                            <td className="px-4 py-2.5 text-xs text-slate-500">{n.interface_name ?? '—'}</td>
+                            <td className="px-4 py-2.5 text-xs text-slate-500">
+                              {n.interface_name ?? '—'}
+                              {circuitLevelsFor(n).map(cl => (
+                                <div key={cl.level} className="flex flex-wrap items-center gap-1 text-[10px] text-slate-400 mt-0.5">
+                                  {n.circuit_type === 'level-1-2' && (
+                                    <span className="font-semibold text-slate-400">{cl.level === 'level-1' ? 'L1' : 'L2'}</span>
+                                  )}
+                                  {cl.metric != null && <span>metric {cl.metric}</span>}
+                                  {cl.hello_interval != null && cl.hold_timer != null && (
+                                    <span>hello {cl.hello_interval}s/hold {cl.hold_timer}s</span>
+                                  )}
+                                  {cl.dis_id && (
+                                    <span className="px-1 py-0.5 rounded bg-indigo-50 text-indigo-600 font-semibold leading-none" title={`LAN DIS: ${cl.dis_id}`}>
+                                      DIS
+                                    </span>
+                                  )}
+                                </div>
+                              ))}
+                            </td>
                             <td className="px-4 py-2.5 text-xs text-slate-500">{n.circuit_type}</td>
                             <td className="px-4 py-2.5 font-mono text-xs text-slate-500">
                               {n.ipv4_address ?? n.ipv6_address ?? '—'}
@@ -1217,6 +1298,569 @@ function ISISPanel() {
   )
 }
 
+// ── Routes panel (shared by BGP / OSPF / IS-IS) ──────────────────────────────
+
+const ROUTES_PROTOCOL_LABEL: Record<'bgp' | 'ospf' | 'isis', string> = {
+  bgp:  'BGP',
+  ospf: 'OSPF',
+  isis: 'IS-IS',
+}
+
+function RoutesPanel({ protocol }: { protocol: 'bgp' | 'ospf' | 'isis' }) {
+  const [search, setSearch] = useState('')
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const isISIS = protocol === 'isis'
+
+  const { data: routes = [], isLoading } = useQuery({
+    queryKey:        ['routes', protocol],
+    queryFn:         () => fetchRoutes(protocol),
+    refetchInterval: 30_000,
+  })
+
+  // IS-IS-only extras: area badges (per device) and per-circuit levels
+  const { data: areas = [] } = useQuery({
+    queryKey:        ['isis-areas'],
+    queryFn:         fetchISISAreas,
+    refetchInterval: 60_000,
+    enabled:         isISIS,
+  })
+  const { data: circuitLevels = [] } = useQuery({
+    queryKey:        ['isis-circuit-levels'],
+    queryFn:         fetchISISCircuitLevels,
+    refetchInterval: 60_000,
+    enabled:         isISIS,
+  })
+
+  // Device → union of area addresses across all instances (route_entries has no instance column)
+  const areasByDevice = useMemo(() => {
+    const m: Record<string, Set<string>> = {}
+    for (const a of areas) {
+      if (!m[a.device_id]) m[a.device_id] = new Set()
+      m[a.device_id].add(a.area_addr)
+    }
+    return m
+  }, [areas])
+
+  // "deviceId|interface" → set of levels seen on that circuit
+  const levelsByDeviceIface = useMemo(() => {
+    const m: Record<string, Set<string>> = {}
+    for (const cl of circuitLevels) {
+      const k = `${cl.device_id}|${cl.interface_name}`
+      if (!m[k]) m[k] = new Set()
+      m[k].add(cl.level)
+    }
+    return m
+  }, [circuitLevels])
+
+  const levelLabel = (r: RouteEntryDTO): string => {
+    if (!r.interface_name) return '—'
+    const levels = levelsByDeviceIface[`${r.device_id}|${r.interface_name}`]
+    if (!levels || levels.size === 0) return '—'
+    if (levels.has('level-1') && levels.has('level-2')) return 'L1+L2'
+    return levels.has('level-1') ? 'L1' : 'L2'
+  }
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return routes
+    const q = search.toLowerCase()
+    return routes.filter(r =>
+      r.device_name.toLowerCase().includes(q) ||
+      r.destination.toLowerCase().includes(q) ||
+      (r.next_hop ?? '').toLowerCase().includes(q) ||
+      (r.interface_name ?? '').toLowerCase().includes(q)
+    )
+  }, [routes, search])
+
+  const byDevice = useMemo(() => {
+    const m = new Map<string, { id: string; name: string; routes: RouteEntryDTO[] }>()
+    for (const r of filtered) {
+      if (!m.has(r.device_id)) m.set(r.device_id, { id: r.device_id, name: r.device_name, routes: [] })
+      m.get(r.device_id)!.routes.push(r)
+    }
+    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name))
+  }, [filtered])
+
+  const isGroupOpen = (key: string) => expanded[key] !== false
+
+  const distinctPrefixes = useMemo(() => new Set(routes.map(r => r.destination)).size, [routes])
+  const ecmpCount = useMemo(() => {
+    const counts = new Map<string, number>()
+    for (const r of routes) counts.set(r.destination, (counts.get(r.destination) ?? 0) + 1)
+    return [...counts.values()].filter(c => c > 1).length
+  }, [routes])
+
+  const label = ROUTES_PROTOCOL_LABEL[protocol]
+
+  if (isLoading) return <div className="text-sm text-slate-400 p-4">Loading…</div>
+
+  return (
+    <div className="space-y-5">
+      {/* Summary */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">Routes</div>
+          <div className="text-2xl font-bold text-slate-800">{routes.length}</div>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">Devices</div>
+          <div className="text-2xl font-bold text-slate-800">{byDevice.length}</div>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">Distinct Prefixes</div>
+          <div className="text-2xl font-bold text-slate-800">{distinctPrefixes}</div>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">ECMP Routes</div>
+          <div className="text-2xl font-bold text-slate-800">{ecmpCount}</div>
+          {ecmpCount > 0 && <div className="text-xs text-slate-400 mt-1">multiple next-hops</div>}
+        </div>
+      </div>
+
+      {/* Search */}
+      {routes.length > 0 && (
+        <div className="relative w-64">
+          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search destination, next hop, interface…"
+            className="pl-8 pr-3 py-1.5 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
+          />
+        </div>
+      )}
+
+      {/* Routes grouped by device */}
+      {routes.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center">
+          <p className="text-sm text-slate-400">No {label} routes found</p>
+          <p className="text-xs text-slate-300 mt-1">{label} routes are learned from the device's routing table (protocol "{protocol}")</p>
+        </div>
+      ) : byDevice.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center text-sm text-slate-400">No routes match</div>
+      ) : (
+        <div className="space-y-2">
+          {byDevice.map(grp => {
+            const open     = isGroupOpen(grp.id)
+            const areaList = isISIS ? [...(areasByDevice[grp.id] ?? [])] : []
+            return (
+              <div key={grp.id} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                <button
+                  className="w-full flex items-center gap-3 px-5 py-3 hover:bg-slate-50 transition-colors text-left"
+                  onClick={() => setExpanded(e => ({ ...e, [grp.id]: !isGroupOpen(grp.id) }))}
+                >
+                  <Link to={`/devices/${grp.id}`} className="text-sm font-semibold text-slate-800 hover:text-blue-600" onClick={e => e.stopPropagation()}>
+                    {grp.name}
+                  </Link>
+                  <span className="text-xs font-medium px-1.5 py-0.5 rounded text-slate-600 bg-slate-100">
+                    {grp.routes.length} route{grp.routes.length === 1 ? '' : 's'}
+                  </span>
+                  {areaList.length > 0 && (
+                    <span className="text-xs text-slate-400 font-mono">
+                      area {areaList.join(', ')}
+                    </span>
+                  )}
+                  <span className="ml-auto text-slate-400 text-xs">{open ? '▲' : '▼'}</span>
+                </button>
+                {open && (
+                  <table className="w-full text-sm border-t border-slate-100">
+                    <thead>
+                      <tr className="bg-slate-50">
+                        <th className="text-left px-5 py-2 text-xs font-medium text-slate-400">Destination</th>
+                        <th className="text-left px-4 py-2 text-xs font-medium text-slate-400">Next Hop</th>
+                        <th className="text-left px-4 py-2 text-xs font-medium text-slate-400">Interface</th>
+                        {isISIS && <th className="text-left px-4 py-2 text-xs font-medium text-slate-400">Level</th>}
+                        <th className="text-right px-4 py-2 text-xs font-medium text-slate-400">Metric</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {grp.routes.map(r => (
+                        <tr key={`${r.destination}|${r.next_hop ?? ''}`} className="hover:bg-slate-50">
+                          <td className="px-5 py-2.5 font-mono text-xs text-slate-700">{r.destination}</td>
+                          <td className="px-4 py-2.5 font-mono text-xs text-slate-500">{r.next_hop ?? '—'}</td>
+                          <td className="px-4 py-2.5 text-xs text-slate-500">{r.interface_name ?? '—'}</td>
+                          {isISIS && <td className="px-4 py-2.5 text-xs text-slate-500">{levelLabel(r)}</td>}
+                          <td className="px-4 py-2.5 text-right tabular-nums text-xs text-slate-500">{r.metric ?? '—'}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── IS-IS LSP database panel ────────────────────────────────────────────────
+
+function ISISLspPanel() {
+  const [search, setSearch] = useState('')
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+
+  const { data: lsps = [], isLoading } = useQuery({
+    queryKey:        ['isis-lsps'],
+    queryFn:         fetchISISLsps,
+    refetchInterval: 30_000,
+  })
+  const { data: areas = [] } = useQuery({
+    queryKey:        ['isis-areas'],
+    queryFn:         fetchISISAreas,
+    refetchInterval: 60_000,
+  })
+
+  // Build area lookup: "deviceId|instance" → comma-joined area addrs
+  const areaByKey = useMemo(() => {
+    const m: Record<string, string[]> = {}
+    for (const a of areas) {
+      const k = `${a.device_id}|${a.instance}`
+      if (!m[k]) m[k] = []
+      m[k].push(a.area_addr)
+    }
+    return m
+  }, [areas])
+
+  const filtered = useMemo(() => {
+    if (!search.trim()) return lsps
+    const q = search.toLowerCase()
+    return lsps.filter(l =>
+      l.device_name.toLowerCase().includes(q) ||
+      l.lsp_id.toLowerCase().includes(q) ||
+      l.instance.toLowerCase().includes(q)
+    )
+  }, [lsps, search])
+
+  const byDeviceInstance = useMemo(() => {
+    const m = new Map<string, { id: string; name: string; instance: string; lsps: ISISLsp[] }>()
+    for (const l of filtered) {
+      const key = `${l.device_id}|${l.instance}`
+      if (!m.has(key)) m.set(key, { id: l.device_id, name: l.device_name, instance: l.instance, lsps: [] })
+      m.get(key)!.lsps.push(l)
+    }
+    return [...m.values()].sort((a, b) => a.name.localeCompare(b.name) || a.instance.localeCompare(b.instance))
+  }, [filtered])
+
+  const isGroupOpen = (key: string) => expanded[key] !== false
+  const overloadCount = useMemo(() => lsps.filter(l => l.overload_bit).length, [lsps])
+  const attachedCount = useMemo(() => lsps.filter(l => l.attached_bit).length, [lsps])
+
+  if (isLoading) return <div className="text-sm text-slate-400 p-4">Loading…</div>
+
+  return (
+    <div className="space-y-5">
+      {/* Summary */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">LSPs</div>
+          <div className="text-2xl font-bold text-slate-800">{lsps.length}</div>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">Devices</div>
+          <div className="text-2xl font-bold text-slate-800">{byDeviceInstance.length}</div>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">Overload Bit Set</div>
+          <div className={`text-2xl font-bold ${overloadCount > 0 ? 'text-amber-600' : 'text-slate-400'}`}>{overloadCount}</div>
+          {overloadCount > 0 && <div className="text-xs text-amber-500 mt-1">May affect path selection</div>}
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">Attached Bit Set</div>
+          <div className={`text-2xl font-bold ${attachedCount > 0 ? 'text-blue-600' : 'text-slate-400'}`}>{attachedCount}</div>
+          {attachedCount > 0 && <div className="text-xs text-blue-400 mt-1">L1 default route to L2</div>}
+        </div>
+      </div>
+
+      {/* Search */}
+      {lsps.length > 0 && (
+        <div className="relative w-64">
+          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-slate-400" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/>
+          </svg>
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search device, LSP ID, instance…"
+            className="pl-8 pr-3 py-1.5 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500 w-64"
+          />
+        </div>
+      )}
+
+      {/* LSPs grouped by device + instance */}
+      {lsps.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center">
+          <p className="text-sm text-slate-400">No IS-IS LSPs found</p>
+          <p className="text-xs text-slate-300 mt-1">The LSP database is collected via SNMP ISIS-MIB (isisLSPSummaryTable)</p>
+        </div>
+      ) : byDeviceInstance.length === 0 ? (
+        <div className="bg-white rounded-2xl border border-slate-200 p-6 text-center text-sm text-slate-400">No LSPs match</div>
+      ) : (
+        <div className="space-y-2">
+          {byDeviceInstance.map(grp => {
+            const key      = `${grp.id}|${grp.instance}`
+            const open     = isGroupOpen(key)
+            const isNamed  = grp.instance && grp.instance !== 'default'
+            const areaList = areaByKey[key] ?? []
+            return (
+              <div key={key} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+                <button
+                  className="w-full flex items-center gap-3 px-5 py-3 hover:bg-slate-50 transition-colors text-left"
+                  onClick={() => setExpanded(e => ({ ...e, [key]: !isGroupOpen(key) }))}
+                >
+                  <Link to={`/devices/${grp.id}`} className="text-sm font-semibold text-slate-800 hover:text-blue-600" onClick={e => e.stopPropagation()}>
+                    {grp.name}
+                  </Link>
+                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${isNamed ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-500'}`}>
+                    {grp.instance}
+                  </span>
+                  <span className="text-xs font-medium px-1.5 py-0.5 rounded text-slate-600 bg-slate-100">
+                    {grp.lsps.length} LSP{grp.lsps.length === 1 ? '' : 's'}
+                  </span>
+                  {areaList.length > 0 && (
+                    <span className="text-xs text-slate-400 font-mono">
+                      area {areaList.join(', ')}
+                    </span>
+                  )}
+                  <span className="ml-auto text-slate-400 text-xs">{open ? '▲' : '▼'}</span>
+                </button>
+                {open && (
+                  <table className="w-full text-sm border-t border-slate-100">
+                    <thead>
+                      <tr className="bg-slate-50">
+                        <th className="text-left px-5 py-2 text-xs font-medium text-slate-400">LSP ID</th>
+                        <th className="text-left px-4 py-2 text-xs font-medium text-slate-400">Level</th>
+                        <th className="text-right px-4 py-2 text-xs font-medium text-slate-400">Seq #</th>
+                        <th className="text-right px-4 py-2 text-xs font-medium text-slate-400">Checksum</th>
+                        <th className="text-right px-4 py-2 text-xs font-medium text-slate-400">PDU Len</th>
+                        <th className="text-right px-4 py-2 text-xs font-medium text-slate-400">Remaining Life</th>
+                        <th className="text-left px-4 py-2 text-xs font-medium text-slate-400">Flags</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-50">
+                      {grp.lsps.map(l => {
+                        const lowLife = l.remaining_lifetime != null && l.remaining_lifetime < 300
+                        return (
+                          <tr key={`${l.level}|${l.lsp_id}`} className="hover:bg-slate-50">
+                            <td className="px-5 py-2.5 font-mono text-xs text-slate-700">{l.lsp_id}</td>
+                            <td className="px-4 py-2.5 text-xs text-slate-500">{l.level}</td>
+                            <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-500">{fmtHex(l.sequence_number, 8)}</td>
+                            <td className="px-4 py-2.5 text-right font-mono text-xs text-slate-500">{fmtHex(l.checksum, 4)}</td>
+                            <td className="px-4 py-2.5 text-right tabular-nums text-xs text-slate-500">{l.pdu_length ?? '—'}</td>
+                            <td className={`px-4 py-2.5 text-right tabular-nums text-xs ${lowLife ? 'text-amber-600 font-semibold' : 'text-slate-500'}`}>
+                              {l.remaining_lifetime != null ? `${l.remaining_lifetime}s` : '—'}
+                            </td>
+                            <td className="px-4 py-2.5">
+                              <div className="flex gap-1">
+                                {l.overload_bit && <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">OL</span>}
+                                {l.attached_bit && <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-blue-100 text-blue-700">ATT</span>}
+                                {!l.overload_bit && !l.attached_bit && <span className="text-slate-300 text-xs">—</span>}
+                              </div>
+                            </td>
+                          </tr>
+                        )
+                      })}
+                    </tbody>
+                  </table>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── IS-IS topology panel ────────────────────────────────────────────────────
+
+const ISIS_LEVEL_EDGE_COLOR: Record<string, string> = {
+  'level-1':   '#3b82f6',
+  'level-2':   '#8b5cf6',
+  'level-1-2': '#94a3b8',
+}
+
+// Edges that are "up" carry the level color; anything else carries the same
+// state color used in the Adjacencies tab (initializing → blue, down/failed → red).
+function isisEdgeColor(level: string, state: string): string {
+  if (state === 'up') return ISIS_LEVEL_EDGE_COLOR[level] ?? '#94a3b8'
+  return ISIS_STATE_COLOR[state] ?? '#94a3b8'
+}
+
+const TOPO_COL_GAP = 220
+const TOPO_ROW_GAP = 90
+
+function ISISTopoNode({ data }: NodeProps) {
+  const d = data as unknown as { label: string; area: string | null; managed: boolean }
+  return (
+    <div className={`px-3 py-2 rounded-xl border text-xs shadow-sm min-w-[150px] ${d.managed ? 'bg-white border-slate-300' : 'bg-slate-50 border-dashed border-slate-300'}`}>
+      <Handle type="target" position={Position.Top} style={{ opacity: 0 }} />
+      <Handle type="source" position={Position.Bottom} style={{ opacity: 0 }} />
+      <div className="flex items-center gap-1.5 font-semibold text-slate-700">
+        <span className={`w-2 h-2 rounded-full shrink-0 ${d.managed ? 'bg-slate-700' : 'bg-slate-300'}`} />
+        <span className="truncate">{d.label}</span>
+      </div>
+      {d.area && <div className="text-[10px] text-slate-400 mt-0.5">area {d.area}</div>}
+      {!d.managed && <div className="text-[10px] text-slate-400 mt-0.5">external</div>}
+    </div>
+  )
+}
+
+const ISIS_TOPO_NODE_TYPES = { isisTopo: ISISTopoNode }
+
+function ISISTopologyPanel() {
+  const { data, isLoading } = useQuery({
+    queryKey:        ['isis-topology'],
+    queryFn:         fetchISISTopology,
+    refetchInterval: 60_000,
+  })
+
+  const nodes = data?.nodes ?? []
+  const edges = data?.edges ?? []
+
+  // Group nodes into columns by area — managed devices without an area, then
+  // external (unmanaged) neighbors, are placed in their own trailing columns.
+  const groups = useMemo(() => {
+    const byArea = new Map<string, ISISTopologyNode[]>()
+    for (const n of nodes) {
+      const key = n.managed ? (n.area ?? 'Unassigned') : 'External'
+      if (!byArea.has(key)) byArea.set(key, [])
+      byArea.get(key)!.push(n)
+    }
+    const keys = [...byArea.keys()].sort((a, b) => {
+      if (a === 'External') return 1
+      if (b === 'External') return -1
+      if (a === 'Unassigned') return 1
+      if (b === 'Unassigned') return -1
+      return a.localeCompare(b)
+    })
+    return keys.map(k => ({ area: k, nodes: byArea.get(k)!.sort((a, b) => a.label.localeCompare(b.label)) }))
+  }, [nodes])
+
+  const flowNodes: Node[] = useMemo(() => {
+    const out: Node[] = []
+    groups.forEach((g, colIdx) => {
+      g.nodes.forEach((n, rowIdx) => {
+        out.push({
+          id:       n.id,
+          type:     'isisTopo',
+          position: { x: colIdx * TOPO_COL_GAP, y: rowIdx * TOPO_ROW_GAP },
+          data:     { label: n.label, area: n.area, managed: n.managed },
+        })
+      })
+    })
+    return out
+  }, [groups])
+
+  const flowEdges: Edge[] = useMemo(() => edges.map(e => {
+    const isDown = e.state !== 'up'
+    return {
+      id:     `${e.source}-${e.target}`,
+      source: e.source,
+      target: e.target,
+      label:  e.level === 'level-1-2' ? undefined : (e.level === 'level-1' ? 'L1' : 'L2'),
+      labelStyle: { fontSize: 10, fill: '#64748b' },
+      style: {
+        stroke:          isisEdgeColor(e.level, e.state),
+        strokeWidth:     2,
+        strokeDasharray: isDown ? '4 4' : undefined,
+      },
+    }
+  }), [edges])
+
+  if (isLoading) return <div className="text-sm text-slate-400 p-4">Loading…</div>
+
+  if (nodes.length === 0) {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center">
+        <p className="text-sm text-slate-400">No IS-IS topology data</p>
+        <p className="text-xs text-slate-300 mt-1">Topology is derived from IS-IS adjacencies and area addresses</p>
+      </div>
+    )
+  }
+
+  const linksDown = edges.filter(e => e.state !== 'up' && e.state !== 'unknown').length
+
+  return (
+    <div className="space-y-3">
+      {/* Summary cards */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">Nodes</div>
+          <div className="text-2xl font-bold text-slate-800">{nodes.length}</div>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">Managed Devices</div>
+          <div className="text-2xl font-bold text-slate-800">{nodes.filter(n => n.managed).length}</div>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">Links</div>
+          <div className="text-2xl font-bold text-slate-800">{edges.length}</div>
+        </div>
+        <div className="bg-white rounded-2xl border border-slate-200 p-5">
+          <div className="text-xs text-slate-500 font-medium mb-1">Links Down</div>
+          <div className={`text-2xl font-bold ${linksDown > 0 ? 'text-red-600' : 'text-slate-400'}`}>{linksDown}</div>
+          {linksDown > 0 && <div className="text-xs text-red-400 mt-1">Requires attention</div>}
+        </div>
+      </div>
+
+      <div className="flex items-center gap-4 text-xs text-slate-500 flex-wrap">
+        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-slate-700" /> Managed device</span>
+        <span className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full bg-slate-300" /> External neighbor</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-blue-500" /> Level-1</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-purple-500" /> Level-2</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 bg-slate-400" /> Level-1-2</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 border-t-2 border-dashed border-blue-600" /> Initializing</span>
+        <span className="flex items-center gap-1.5"><span className="inline-block w-4 h-0.5 border-t-2 border-dashed border-red-600" /> Down / Failed</span>
+      </div>
+      <div className="bg-white rounded-2xl border border-slate-200" style={{ height: 520 }}>
+        <ReactFlowProvider>
+          <ReactFlow
+            nodes={flowNodes}
+            edges={flowEdges}
+            nodeTypes={ISIS_TOPO_NODE_TYPES}
+            fitView
+            nodesDraggable={false}
+            nodesConnectable={false}
+            elementsSelectable={false}
+            proOptions={{ hideAttribution: true }}
+          >
+            <Background color="#dde3eb" gap={24} size={1} />
+            <Controls showInteractive={false} />
+          </ReactFlow>
+        </ReactFlowProvider>
+      </div>
+    </div>
+  )
+}
+
+// ── IS-IS panel (sub-tabs) ────────────────────────────────────────────────────
+
+function ISISPanel() {
+  const [subTab, setSubTab] = useState<'adjacencies' | 'routes' | 'lsps' | 'topology'>('adjacencies')
+
+  return (
+    <div className="space-y-5">
+      <div className="flex gap-1 border-b border-slate-200 mb-1">
+        {([['adjacencies', 'Adjacencies'], ['routes', 'Routes'], ['lsps', 'LSP Database'], ['topology', 'Topology']] as const).map(([k, label]) => (
+          <button key={k} onClick={() => setSubTab(k)}
+            className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${subTab === k ? 'border-blue-600 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'}`}>
+            {label}
+          </button>
+        ))}
+      </div>
+      {subTab === 'adjacencies' && <ISISAdjacenciesPanel />}
+      {subTab === 'routes'      && <RoutesPanel protocol="isis" />}
+      {subTab === 'lsps'        && <ISISLspPanel />}
+      {subTab === 'topology'    && <ISISTopologyPanel />}
+    </div>
+  )
+}
+
 // ── Page ──────────────────────────────────────────────────────────────────────
 
 type Protocol = 'bgp' | 'ospf' | 'isis'
@@ -1225,7 +1869,7 @@ const PROTOCOLS: { key: Protocol; label: string; desc: string; icon: ReactNode }
   {
     key: 'bgp',
     label: 'BGP',
-    desc: 'Sessions · Prefixes · Flap log',
+    desc: 'Sessions · Prefixes · Flap log · Routes',
     icon: (
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4 shrink-0">
         <circle cx="3" cy="8" r="1.5" />
@@ -1239,7 +1883,7 @@ const PROTOCOLS: { key: Protocol; label: string; desc: string; icon: ReactNode }
   {
     key: 'ospf',
     label: 'OSPF',
-    desc: 'Adjacencies · Areas',
+    desc: 'Adjacencies · Areas · Routes',
     icon: (
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4 shrink-0">
         <circle cx="8" cy="8" r="5.5" />
@@ -1252,7 +1896,7 @@ const PROTOCOLS: { key: Protocol; label: string; desc: string; icon: ReactNode }
   {
     key: 'isis',
     label: 'IS-IS',
-    desc: 'Level 1/2 · Adjacencies',
+    desc: 'Level 1/2 · Adjacencies · Routes · LSPs · Topology',
     icon: (
       <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className="w-4 h-4 shrink-0">
         <rect x="2" y="2.5" width="12" height="3" rx="1" />

@@ -115,12 +115,19 @@ async def _write_isis_neighbors(device_id: uuid.UUID, rows: list[dict]) -> None:
     now = datetime.now(timezone.utc)
 
     async with AsyncSessionLocal() as db:
-        # Mark all existing rows for this device as unknown first so
-        # neighbors that disappeared transition to unknown state.
+        # Mark existing rows for this device as down first so neighbors that
+        # disappeared from "show isis neighbors" -- including ALL of them, if
+        # the device is now fully isolated -- are treated as down (the alert
+        # evaluator ignores 'unknown', so that state would otherwise mask a
+        # real adjacency-down event). A successful poll that returns zero
+        # rows means the device genuinely has no adjacencies right now (a
+        # failed poll never reaches this function -- see callers). The
+        # upsert loop below restores any adjacency still present to its real
+        # state.
         await db.execute(text("""
             UPDATE isis_neighbors
-               SET adjacency_state = 'unknown', updated_at = :now
-             WHERE device_id = :did
+               SET adjacency_state = 'down', last_state_change = :now, updated_at = :now
+             WHERE device_id = :did AND adjacency_state != 'down'
         """), {"did": device_id, "now": now})
 
         for r in rows:
@@ -246,5 +253,5 @@ async def _eapi_isis_loop(interval_s: int) -> None:
         await asyncio.sleep(interval_s)
 
 
-def start_eapi_isis_collector(interval_s: int = 300) -> asyncio.Task:
+def start_eapi_isis_collector(interval_s: int = 60) -> asyncio.Task:
     return asyncio.create_task(_eapi_isis_loop(interval_s), name="eapi-isis-collector")

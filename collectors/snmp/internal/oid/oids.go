@@ -29,22 +29,22 @@ const IfTable = "1.3.6.1.2.1.2.2.1"
 
 // Individual ifTable column subtrees (walk to get all rows).
 const (
-	IfDescr       = "1.3.6.1.2.1.2.2.1.2"
-	IfType        = "1.3.6.1.2.1.2.2.1.3"
-	IfMtu         = "1.3.6.1.2.1.2.2.1.4"
-	IfSpeed       = "1.3.6.1.2.1.2.2.1.5"
-	IfPhysAddr    = "1.3.6.1.2.1.2.2.1.6"
-	IfAdminStatus = "1.3.6.1.2.1.2.2.1.7"
-	IfOperStatus  = "1.3.6.1.2.1.2.2.1.8"
-	IfLastChange  = "1.3.6.1.2.1.2.2.1.9"
-	IfInOctets    = "1.3.6.1.2.1.2.2.1.10"
-	IfInUcastPkts = "1.3.6.1.2.1.2.2.1.11"
-	IfInDiscards  = "1.3.6.1.2.1.2.2.1.13"
-	IfInErrors    = "1.3.6.1.2.1.2.2.1.14"
-	IfOutOctets   = "1.3.6.1.2.1.2.2.1.16"
+	IfDescr        = "1.3.6.1.2.1.2.2.1.2"
+	IfType         = "1.3.6.1.2.1.2.2.1.3"
+	IfMtu          = "1.3.6.1.2.1.2.2.1.4"
+	IfSpeed        = "1.3.6.1.2.1.2.2.1.5"
+	IfPhysAddr     = "1.3.6.1.2.1.2.2.1.6"
+	IfAdminStatus  = "1.3.6.1.2.1.2.2.1.7"
+	IfOperStatus   = "1.3.6.1.2.1.2.2.1.8"
+	IfLastChange   = "1.3.6.1.2.1.2.2.1.9"
+	IfInOctets     = "1.3.6.1.2.1.2.2.1.10"
+	IfInUcastPkts  = "1.3.6.1.2.1.2.2.1.11"
+	IfInDiscards   = "1.3.6.1.2.1.2.2.1.13"
+	IfInErrors     = "1.3.6.1.2.1.2.2.1.14"
+	IfOutOctets    = "1.3.6.1.2.1.2.2.1.16"
 	IfOutUcastPkts = "1.3.6.1.2.1.2.2.1.17"
-	IfOutDiscards = "1.3.6.1.2.1.2.2.1.19"
-	IfOutErrors   = "1.3.6.1.2.1.2.2.1.20"
+	IfOutDiscards  = "1.3.6.1.2.1.2.2.1.19"
+	IfOutErrors    = "1.3.6.1.2.1.2.2.1.20"
 )
 
 // ── IF-MIB: ifXTable (RFC 2863) ─────────────────────────────────────────────
@@ -53,13 +53,13 @@ const (
 const IfXTable = "1.3.6.1.2.1.31.1.1.1"
 
 const (
-	IfName          = "1.3.6.1.2.1.31.1.1.1.1"
-	IfHCInOctets    = "1.3.6.1.2.1.31.1.1.1.6"
-	IfHCInUcastPkts = "1.3.6.1.2.1.31.1.1.1.7"
-	IfHCOutOctets   = "1.3.6.1.2.1.31.1.1.1.10"
+	IfName           = "1.3.6.1.2.1.31.1.1.1.1"
+	IfHCInOctets     = "1.3.6.1.2.1.31.1.1.1.6"
+	IfHCInUcastPkts  = "1.3.6.1.2.1.31.1.1.1.7"
+	IfHCOutOctets    = "1.3.6.1.2.1.31.1.1.1.10"
 	IfHCOutUcastPkts = "1.3.6.1.2.1.31.1.1.1.11"
-	IfHighSpeed     = "1.3.6.1.2.1.31.1.1.1.15" // Mbps; multiply × 1e6 for bps
-	IfAlias         = "1.3.6.1.2.1.31.1.1.1.18"
+	IfHighSpeed      = "1.3.6.1.2.1.31.1.1.1.15" // Mbps; multiply × 1e6 for bps
+	IfAlias          = "1.3.6.1.2.1.31.1.1.1.18"
 )
 
 // ── HOST-RESOURCES-MIB (RFC 2790) ───────────────────────────────────────────
@@ -75,17 +75,17 @@ const (
 	HrProcessorLoad  = "1.3.6.1.2.1.25.3.3.1.2"
 
 	// Storage table
-	HrStorageTable            = "1.3.6.1.2.1.25.2.3.1"
-	HrStorageType             = "1.3.6.1.2.1.25.2.3.1.2"
-	HrStorageDescr            = "1.3.6.1.2.1.25.2.3.1.3"
-	HrStorageAllocationUnits  = "1.3.6.1.2.1.25.2.3.1.4"
-	HrStorageSize             = "1.3.6.1.2.1.25.2.3.1.5"
-	HrStorageUsed             = "1.3.6.1.2.1.25.2.3.1.6"
+	HrStorageTable           = "1.3.6.1.2.1.25.2.3.1"
+	HrStorageType            = "1.3.6.1.2.1.25.2.3.1.2"
+	HrStorageDescr           = "1.3.6.1.2.1.25.2.3.1.3"
+	HrStorageAllocationUnits = "1.3.6.1.2.1.25.2.3.1.4"
+	HrStorageSize            = "1.3.6.1.2.1.25.2.3.1.5"
+	HrStorageUsed            = "1.3.6.1.2.1.25.2.3.1.6"
 
 	// Storage type OID values (hrStorageType column returns one of these)
-	HrStorageTypeRam          = "1.3.6.1.2.1.25.2.1.2"
+	HrStorageTypeRam           = "1.3.6.1.2.1.25.2.1.2"
 	HrStorageTypeVirtualMemory = "1.3.6.1.2.1.25.2.1.3"
-	HrStorageTypeFlash        = "1.3.6.1.2.1.25.2.1.7"
+	HrStorageTypeFlash         = "1.3.6.1.2.1.25.2.1.7"
 )
 
 // ── ENTITY-MIB (RFC 2737) ────────────────────────────────────────────────────
@@ -178,13 +178,13 @@ const (
 const (
 	// Scalar system stats
 	FgSysCpuUsage    = "1.3.6.1.4.1.12356.101.4.1.3.0"
-	FgSysMemUsage    = "1.3.6.1.4.1.12356.101.4.1.4.0"  // % used
-	FgSysMemCapacity = "1.3.6.1.4.1.12356.101.4.1.5.0"  // total KB
+	FgSysMemUsage    = "1.3.6.1.4.1.12356.101.4.1.4.0" // % used
+	FgSysMemCapacity = "1.3.6.1.4.1.12356.101.4.1.5.0" // total KB
 
 	// Hardware sensor table (temperature, fan, etc.)
-	FgHwSensorTable     = "1.3.6.1.4.1.12356.101.4.4.2.1"
-	FgHwSensorEntName   = "1.3.6.1.4.1.12356.101.4.4.2.1.2"
-	FgHwSensorEntValue  = "1.3.6.1.4.1.12356.101.4.4.2.1.3"
+	FgHwSensorTable          = "1.3.6.1.4.1.12356.101.4.4.2.1"
+	FgHwSensorEntName        = "1.3.6.1.4.1.12356.101.4.4.2.1.2"
+	FgHwSensorEntValue       = "1.3.6.1.4.1.12356.101.4.4.2.1.3"
 	FgHwSensorEntAlarmStatus = "1.3.6.1.4.1.12356.101.4.4.2.1.4"
 )
 
@@ -204,7 +204,7 @@ const InetCidrRouteTable = "1.3.6.1.2.1.4.24.7.1"
 // One row per IP address configured on the device.
 // Indexed by the IP address itself (4 decimal octets).
 const (
-	IPAddrTable    = "1.3.6.1.2.1.4.20.1"  // ipAddrEntry subtree
+	IPAddrTable    = "1.3.6.1.2.1.4.20.1"   // ipAddrEntry subtree
 	IPAdEntIfIndex = "1.3.6.1.2.1.4.20.1.2" // col 2: ifIndex
 	IPAdEntNetMask = "1.3.6.1.2.1.4.20.1.3" // col 3: subnet mask
 )
@@ -213,9 +213,9 @@ const (
 // Present on ArubaOS campus APs and controllers (not ArubaOS-CX switches).
 
 const (
-	ArubaAPCpuUsedPct    = "1.3.6.1.4.1.14823.2.2.1.1.3.1.0" // wlsxSysstatCpuUsedPercent (0–100)
-	ArubaAPMemTotalKB    = "1.3.6.1.4.1.14823.2.2.1.1.3.2.0" // wlsxSysstatMemTotal (KB)
-	ArubaAPMemUsedPct    = "1.3.6.1.4.1.14823.2.2.1.1.3.3.0" // wlsxSysstatMemUsedPercent (0–100)
+	ArubaAPCpuUsedPct = "1.3.6.1.4.1.14823.2.2.1.1.3.1.0" // wlsxSysstatCpuUsedPercent (0–100)
+	ArubaAPMemTotalKB = "1.3.6.1.4.1.14823.2.2.1.1.3.2.0" // wlsxSysstatMemTotal (KB)
+	ArubaAPMemUsedPct = "1.3.6.1.4.1.14823.2.2.1.1.3.3.0" // wlsxSysstatMemUsedPercent (0–100)
 )
 
 // ── UCD-SNMP-MIB (NET-SNMP Linux) ────────────────────────────────────────────
@@ -234,18 +234,18 @@ const BGPPeerTable = "1.3.6.1.2.1.15.3.1"
 
 // bgpPeerTable column subtrees (col.a.b.c.d).
 const (
-	BGPLocalAs              = "1.3.6.1.2.1.15.2.0" // scalar — local AS number
-	BGPPeerState            = "1.3.6.1.2.1.15.3.1.2"  // 1=idle 2=connect 3=active 4=opensent 5=openconfirm 6=established
-	BGPPeerAdminStatus      = "1.3.6.1.2.1.15.3.1.3"  // 1=stop 2=start
-	BGPPeerRemoteAs         = "1.3.6.1.2.1.15.3.1.9"  // remote AS number
-	BGPPeerInUpdates        = "1.3.6.1.2.1.15.3.1.7"  // total UPDATE messages received
-	BGPPeerOutUpdates       = "1.3.6.1.2.1.15.3.1.8"  // total UPDATE messages sent
-	BGPPeerEstablishedTime  = "1.3.6.1.2.1.15.3.1.16" // sysUpTime when session became established
-	BGPPeerIdentifier       = "1.3.6.1.2.1.15.3.1.1"  // peer BGP router-ID
-	BGPPeerHoldTime         = "1.3.6.1.2.1.15.3.1.19" // negotiated hold time
-	BGPPeerKeepAlive             = "1.3.6.1.2.1.15.3.1.20" // negotiated keepalive
-	BGPPeerInPrefixes            = "1.3.6.1.2.1.15.3.1.11" // prefixes received (RFC 1657 col 11)
-	BGPPeerFsmEstablishedTrans   = "1.3.6.1.2.1.15.3.1.15" // total times entered Established (flap counter)
+	BGPLocalAs                 = "1.3.6.1.2.1.15.2.0"    // scalar — local AS number
+	BGPPeerState               = "1.3.6.1.2.1.15.3.1.2"  // 1=idle 2=connect 3=active 4=opensent 5=openconfirm 6=established
+	BGPPeerAdminStatus         = "1.3.6.1.2.1.15.3.1.3"  // 1=stop 2=start
+	BGPPeerRemoteAs            = "1.3.6.1.2.1.15.3.1.9"  // remote AS number
+	BGPPeerInUpdates           = "1.3.6.1.2.1.15.3.1.7"  // total UPDATE messages received
+	BGPPeerOutUpdates          = "1.3.6.1.2.1.15.3.1.8"  // total UPDATE messages sent
+	BGPPeerEstablishedTime     = "1.3.6.1.2.1.15.3.1.16" // sysUpTime when session became established
+	BGPPeerIdentifier          = "1.3.6.1.2.1.15.3.1.1"  // peer BGP router-ID
+	BGPPeerHoldTime            = "1.3.6.1.2.1.15.3.1.19" // negotiated hold time
+	BGPPeerKeepAlive           = "1.3.6.1.2.1.15.3.1.20" // negotiated keepalive
+	BGPPeerInPrefixes          = "1.3.6.1.2.1.15.3.1.11" // prefixes received (RFC 1657 col 11)
+	BGPPeerFsmEstablishedTrans = "1.3.6.1.2.1.15.3.1.15" // total times entered Established (flap counter)
 )
 
 // ── OSPF-MIB (RFC 1850) ───────────────────────────────────────────────────────
@@ -287,6 +287,13 @@ const (
 
 	// dot1qPvid: access VLAN per bridge port, indexed by bridge port number.
 	Dot1qPvid = "1.3.6.1.2.1.17.7.1.4.5.1.1"
+
+	// dot1qTpFdbTable — per-VLAN MAC forwarding database: MAC → bridge port.
+	// On VLAN-aware bridges, dot1dTpFdbTable (BRIDGE-MIB) typically only
+	// reflects the default/native VLAN; entries for tagged VLANs live here
+	// instead. Indexed by (dot1qFdbId, MAC address as 6 decimal octets).
+	// Col 2 = dot1qTpFdbPort (dot1dBasePort number), col 3 = dot1qTpFdbStatus.
+	Dot1qTpFdbTable = "1.3.6.1.2.1.17.7.1.2.2.1"
 )
 
 // ── HP-ICF-VLAN-MIB (HP ProCurve / Aruba ProVision) ─────────────────────────
@@ -315,8 +322,8 @@ const (
 	// isisCircTable: circuit (interface) config.
 	// Index: instanceLen[.instanceChars*].circIndex
 	// Col 2: isisCircIfIndex — maps circuit index to ifIndex.
-	ISISCircTable    = "1.3.6.1.2.1.138.1.3.1"
-	ISISCircIfIndex  = "1.3.6.1.2.1.138.1.3.1.2"
+	ISISCircTable   = "1.3.6.1.2.1.138.1.3.1"
+	ISISCircIfIndex = "1.3.6.1.2.1.138.1.3.1.2"
 
 	// isisISAdjTable: IS-IS adjacency table.
 	// Index: instanceLen[.instanceChars*].circIndex.adjIndex
@@ -337,6 +344,26 @@ const (
 	// Col 2: isisSysAreaAddrExistState — RowStatus
 	// The area address itself is encoded in the index, not a column.
 	ISISSysAreaAddrTable = "1.3.6.1.2.1.138.1.2.1"
+
+	// isisCircLevelTable: per-circuit, per-level link parameters.
+	// Index: instanceLen[.instanceChars*].circIndex.levelIndex (1=level-1, 2=level-2)
+	// Col 2: isisCircLevelMetric         — narrow metric (IsisDefaultMetric)
+	// Col 3: isisCircLevelWideMetric     — wide metric (IsisWideMetric)
+	// Col 4: isisCircLevelISPriority     — DIS election priority
+	// Col 7: isisCircLevelDesIS          — LAN-DIS ID for this circuit/level (7 bytes); all-zero = no DIS elected
+	// Col 8: isisCircLevelHelloMultiplier
+	// Col 9: isisCircLevelHelloTimer     — milliseconds
+	ISISCircLevelTable = "1.3.6.1.2.1.138.1.4.1"
+
+	// isisLSPSummaryTable: summary of each LSP in the device's link-state database.
+	// Index: instanceLen[.instanceChars*].lspLevel.lspIDByte1..8 (8-byte LSP ID, fixed-size, no length prefix)
+	// Col 3: isisLSPSeq            — sequence number
+	// Col 4: isisLSPZeroLife       — TruthValue (1=true): LSP is being purged
+	// Col 5: isisLSPChecksum       — 16-bit Fletcher checksum
+	// Col 6: isisLSPLifetimeRemain — remaining lifetime in seconds
+	// Col 7: isisLSPPDULength      — PDU length
+	// Col 8: isisLSPAttributes     — flag byte: 0x04=overload (OL), 0x78=attached (ATT)
+	ISISLSPTable = "1.3.6.1.2.1.138.1.9.1"
 )
 
 // ── BRIDGE-MIB STP (IEEE 802.1D) ─────────────────────────────────────────────

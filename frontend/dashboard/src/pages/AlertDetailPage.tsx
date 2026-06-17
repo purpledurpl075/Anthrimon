@@ -57,6 +57,31 @@ function fmt(iso: string | null | undefined) {
   return new Date(iso).toLocaleString()
 }
 
+function ContextValue({ value }: { value: unknown }) {
+  if (Array.isArray(value)) {
+    if (value.length === 0) return <span className="text-slate-400">—</span>
+    if (typeof value[0] === 'object' && value[0] !== null) {
+      return (
+        <div className="flex flex-col gap-1">
+          {(value as Record<string, unknown>[]).map((item, i) => (
+            <span key={i} className="font-mono text-[10px] text-slate-600">
+              {Object.entries(item)
+                .filter(([, v]) => v != null)
+                .map(([k, v]) => `${k}: ${v}`)
+                .join('  ·  ')}
+            </span>
+          ))}
+        </div>
+      )
+    }
+    return <span className="font-mono text-[10px] text-slate-600">{value.join(', ')}</span>
+  }
+  if (typeof value === 'object' && value !== null) {
+    return <span className="font-mono text-[10px] text-slate-600">{JSON.stringify(value)}</span>
+  }
+  return <span className="font-mono text-[10px] text-slate-600">{String(value)}</span>
+}
+
 function Row({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="flex gap-4 py-2.5 border-b border-slate-100 last:border-0">
@@ -362,7 +387,7 @@ export default function AlertDetailPage() {
                 .filter(([k]) => !['metric','value','threshold','condition','syslog_context'].includes(k))
                 .map(([k, v]) => (
                   <Row key={k} label={k}>
-                    <span className="font-mono text-[10px] text-slate-600">{String(v)}</span>
+                    <ContextValue value={v} />
                   </Row>
                 ))}
               <Row label="Alert ID"><span className="font-mono text-[10px] text-slate-400">{alert.id}</span></Row>

@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
-import { fetchAlerts, acknowledgeAlert, resolveAlert } from '../api/alerts'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { fetchAlerts, acknowledgeAlert, resolveAlert, subscribeAlerts } from '../api/alerts'
+import type { AlertsWsStatus } from '../api/alerts'
 import type { Alert } from '../api/types'
 import { useRole, hasRole } from '../hooks/useCurrentUser'
+import SavedViewsMenu from '../components/SavedViewsMenu'
 
 const SEVERITY_STYLE: Record<string, string> = {
   critical: 'bg-red-100 text-red-700 border-red-200',
@@ -40,9 +42,37 @@ export default function AlertsPage() {
   const navigate = useNavigate()
   const role = useRole()
   const canAct = hasRole(role, 'operator')
-  const [statusFilter, setStatusFilter] = useState('open')
-  const [severityFilter, setSeverityFilter] = useState('')
-  const [showHistory, setShowHistory] = useState(false)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const statusFilter = searchParams.get('status') ?? 'open'
+  const severityFilter = searchParams.get('severity') ?? ''
+  const showHistory = searchParams.get('history') === '1'
+
+  const setStatusFilter = (s: string) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (s === 'open') next.delete('status'); else next.set('status', s)
+      return next
+    })
+  }
+  const setSeverityFilter = (s: string) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (s === '') next.delete('severity'); else next.set('severity', s)
+      return next
+    })
+  }
+  const toggleHistory = () => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (showHistory) {
+        next.delete('history')
+      } else {
+        next.set('history', '1')
+        next.set('status', '')
+      }
+      return next
+    })
+  }
 
   const effectiveStatus = showHistory ? (statusFilter === 'open' ? '' : statusFilter) : statusFilter
 
@@ -53,8 +83,17 @@ export default function AlertsPage() {
       severity: severityFilter || undefined,
       limit: 200,
     }),
-    refetchInterval: showHistory ? 60_000 : 15_000,
+    // WebSocket pushes drive live updates; this poll is just a safety net.
+    refetchInterval: 60_000,
   })
+
+  const [wsStatus, setWsStatus] = useState<AlertsWsStatus>('connecting')
+  useEffect(() => {
+    return subscribeAlerts(() => {
+      qc.invalidateQueries({ queryKey: ['alerts'] })
+      qc.invalidateQueries({ queryKey: ['alert-count'] })
+    }, setWsStatus)
+  }, [qc])
 
   const ackMutation = useMutation({
     mutationFn: acknowledgeAlert,
@@ -89,18 +128,25 @@ export default function AlertsPage() {
           <div className="flex items-center gap-2">
             <h1 className="text-base font-semibold text-slate-800">Alerts</h1>
             {data && <span className="text-xs text-slate-400 bg-slate-100 px-2 py-0.5 rounded-full">{data.total}</span>}
+            <span className="flex items-center gap-1.5 text-xs text-slate-400" title={wsStatus === 'open' ? 'Live updates connected' : 'Reconnecting to live updates…'}>
+              <span className={`w-1.5 h-1.5 rounded-full ${wsStatus === 'open' ? 'bg-green-500 animate-pulse' : 'bg-slate-300'}`} />
+              {wsStatus === 'open' ? 'Live' : 'Reconnecting…'}
+            </span>
           </div>
-          <button
-            onClick={() => { setShowHistory(h => !h); if (!showHistory) setStatusFilter('') }}
-            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
-              showHistory ? 'bg-slate-800 text-white border-slate-800' : 'text-slate-500 border-slate-200 hover:border-slate-400'
-            }`}
-          >
-            <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-              <path d="M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/>
-            </svg>
-            {showHistory ? 'History on' : 'History'}
-          </button>
+          <div className="flex items-center gap-2">
+            <SavedViewsMenu page="alerts" query={searchParams.toString()} onApply={q => setSearchParams(new URLSearchParams(q))} />
+            <button
+              onClick={toggleHistory}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
+                showHistory ? 'bg-slate-800 text-white border-slate-800' : 'text-slate-500 border-slate-200 hover:border-slate-400'
+              }`}
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path d="M12 8v4l3 3m6-3a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/>
+              </svg>
+              {showHistory ? 'History on' : 'History'}
+            </button>
+          </div>
         </div>
 
         {/* Filter bar */}

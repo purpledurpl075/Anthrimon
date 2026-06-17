@@ -243,26 +243,83 @@ export const fetchDeviceStp = (deviceId: string) =>
 
 // ── Traps ─────────────────────────────────────────────────────────────────────
 
+const tp = (params: Record<string, unknown>) =>
+  Object.fromEntries(Object.entries(params).filter(([, v]) => v != null && v !== ''))
+
 export interface TrapEvent {
-  id:           string
-  device_id:    string
-  hostname:     string
-  source_ip:    string
+  id:             string
+  device_id:      string
+  hostname:       string | null
+  source_ip:      string
+  trap_type:      string
+  oid:            string
+  oid_name:       string | null
+  severity:       string
+  varbinds:       { oid: string; type: string; value: string; name: string | null }[]
+  snmp_version:   string
+  received_at:    string
+  label:          string
+  description:    string
+  category:       string
+  is_cataloged:   boolean
+  alert_id:       string | null
+  alert_title:    string | null
+  alert_severity: string | null
+  alert_status:   string | null
+}
+
+export interface TrapSummary {
+  total:          number
+  by_severity:    Record<string, number>
+  active_devices: number
+  active_sources: number
+}
+
+export interface TrapRatePoint {
+  ts_ms:    number
+  severity: string
+  count:    number
+}
+
+export interface TrapTypeStat {
   trap_type:    string
-  oid:          string
-  severity:     string
-  varbinds:     { oid: string; type: string; value: string }[]
-  snmp_version: string
-  received_at:  string
+  total:        number
+  critical:     number
+  warning:      number
+  label:        string
+  category:     string
+  is_cataloged: boolean
+}
+
+export interface TrapDeviceStat {
+  device_id:   string
+  device_name: string
+  device_type: string
+  total:       number
+  critical:    number
+  warnings:    number
 }
 
 export const fetchDeviceTraps = (deviceId: string, days = 7) =>
   api.get<{ items: TrapEvent[] }>(`/traps/device/${deviceId}`, { params: { days } }).then(r => r.data)
 
 export const fetchTraps = (params: {
-  device_id?: string; trap_type?: string; days?: number; limit?: number; offset?: number
+  device_id?: string; trap_type?: string; severity?: string; q?: string
+  days?: number; minutes?: number; limit?: number; offset?: number
 }) =>
-  api.get<{ total: number; items: TrapEvent[] }>('/traps', { params }).then(r => r.data)
+  api.get<{ total: number; items: TrapEvent[] }>('/traps', { params: tp(params) }).then(r => r.data)
+
+export const fetchTrapSummary = (minutes: number, deviceId?: string) =>
+  api.get<TrapSummary>('/traps/summary', { params: tp({ minutes, device_id: deviceId }) }).then(r => r.data)
+
+export const fetchTrapRate = (hours: number, deviceId?: string) =>
+  api.get<TrapRatePoint[]>('/traps/rate', { params: tp({ hours, device_id: deviceId }) }).then(r => r.data)
+
+export const fetchTrapTopTypes = (minutes: number, deviceId?: string) =>
+  api.get<TrapTypeStat[]>('/traps/top-types', { params: tp({ minutes, device_id: deviceId }) }).then(r => r.data)
+
+export const fetchTrapTopDevices = (minutes: number) =>
+  api.get<TrapDeviceStat[]>('/traps/top-devices', { params: { minutes } }).then(r => r.data)
 
 // ── Baselines ──────────────────────────────────────────────────────────────────
 
@@ -330,3 +387,27 @@ export const overrideBaseline = (
 
 export const discoverSnmpEngineId = (deviceId: string) =>
   api.post<{ engine_id: string }>(`/devices/${deviceId}/snmp-engine-id`).then((r) => r.data)
+
+// ── Bulk operations ──────────────────────────────────────────────────────────
+
+export interface SiteOption { id: string; name: string }
+
+export const fetchSites = () =>
+  api.get<SiteOption[]>('/devices/sites').then(r => r.data)
+
+export type BulkAction =
+  | 'add_tag' | 'remove_tag' | 'set_site' | 'set_collector'
+  | 'set_credential' | 'set_polling_interval' | 'delete'
+
+export interface BulkDeviceRequest {
+  device_ids: string[]
+  action: BulkAction
+  tag?: string
+  site_id?: string | null
+  collector_id?: string | null
+  credential_id?: string
+  polling_interval_s?: number
+}
+
+export const bulkDeviceAction = (body: BulkDeviceRequest) =>
+  api.post<{ updated: number }>('/devices/bulk', body).then(r => r.data)

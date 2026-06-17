@@ -407,14 +407,23 @@ async def _compute_dom_rx_power(db: AsyncSession, iface_map: dict, valid_devs: s
 
 async def _compute_syslog_rate(db: AsyncSession, valid_devs: set[str]) -> int:
     """Compute mean + stddev of hourly syslog message rate per device from ClickHouse."""
+    # syslog_agg_1hr stores one row per (hour, device_id, severity) with a `count`
+    # column. Roll severities up into an hourly total per device first, then take
+    # the mean/stddev of those hourly totals across the window (sample_count = the
+    # number of hours observed). The previous query referenced a non-existent
+    # `total` column, which ClickHouse rejected (UNKNOWN_IDENTIFIER → HTTP 404).
     rows = await _ch_query("""
         SELECT
             device_id,
-            avg(total)   AS mean,
-            stddevPop(total) AS stddev,
-            count()      AS sample_count
-        FROM syslog_agg_1hr
-        WHERE hour >= now() - INTERVAL 14 DAY
+            avg(hourly_total)       AS mean,
+            stddevPop(hourly_total) AS stddev,
+            count()                 AS sample_count
+        FROM (
+            SELECT device_id, hour, sum(count) AS hourly_total
+            FROM syslog_agg_1hr
+            WHERE hour >= now() - INTERVAL 14 DAY
+            GROUP BY device_id, hour
+        )
         GROUP BY device_id
     """)
     count = 0

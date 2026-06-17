@@ -67,6 +67,11 @@ def _has_tenant_role(principal: Principal, min_role: str) -> bool:
 
 
 def _has_site_role(principal: Principal, site_id: uuid.UUID, min_role: str) -> bool:
+    if not principal.site_role_map:
+        # Site-scoping is opt-in: a user with no per-site grants at all isn't
+        # "restricted to nothing", they simply haven't been site-scoped yet —
+        # fall back to their tenant-wide role for every site in the tenant.
+        return _has_tenant_role(principal, min_role)
     role = principal.site_role_map.get(site_id, "")
     have = _TENANT_LEVELS.get(role, 0)
     need = _TENANT_LEVELS.get(min_role, 99)
@@ -330,6 +335,26 @@ def require_tenant_user(min_role: str = "tenant_admin"):
     return _check
 
 
+# ── Licensing gate ────────────────────────────────────────────────────────────
+
+def require_license(module: str):
+    """Require that `module` is covered by a valid license, else 402.
+
+    Use on endpoints/routers belonging to paid modules. Mirrors the require_*
+    factories above. The module loader gates whole module routers at mount time;
+    this dependency is for gating individual endpoints inside an always-mounted
+    router.
+    """
+    async def _check() -> None:
+        from .licensing import is_licensed
+        if not is_licensed(module):
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail=f"Feature '{module}' requires a license",
+            )
+    return _check
+
+
 # ── Assertion helpers (called inside endpoint bodies) ─────────────────────────
 
 async def assert_site_access(
@@ -366,13 +391,16 @@ async def assert_device_access(
     """Raise 403/404 if the principal cannot access device_id at min_role level.
     Looks up the device's site_id and delegates to assert_site_access.
     Devices with site_id IS NULL (tenant-wide / orphaned) fall back to tenant role."""
+    # Platform admins are cross-tenant superusers by design.
     if principal.is_platform_admin:
-        return
-    if _has_tenant_role(principal, "tenant_admin"):
         return
 
     from .models.device import Device  # local import to avoid circular dependency
 
+    # Every tenant-scoped role (including tenant_admin) must own the device
+    # within their active tenant. This lookup runs BEFORE the tenant_admin
+    # short-circuit so a tenant_admin cannot reach another tenant's device by
+    # supplying its UUID (cross-tenant IDOR).
     result = await db.execute(
         select(Device.site_id).where(
             Device.id == device_id,
@@ -382,6 +410,11 @@ async def assert_device_access(
     row = result.one_or_none()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Device not found")
+
+    # tenant_admin has access to every site within its own tenant — having
+    # confirmed tenant ownership above, skip the per-site role check.
+    if _has_tenant_role(principal, "tenant_admin"):
+        return
 
     site_id: Optional[uuid.UUID] = row[0]
     if site_id is None:
@@ -401,15 +434,21 @@ def accessible_device_ids_subquery(principal: Principal):
     Usage in a router query:
         .where(Device.id.in_(accessible_device_ids_subquery(principal)))
 
-    Platform admins and tenant_admins see the full tenant device list (subject to
-    token_site_ids if the request came via a site-restricted API token).
-    Site-role users see only devices in their accessible sites plus orphaned devices.
+    Platform admins, tenant_admins, and users with no per-site role grants see
+    the full tenant device list (subject to token_site_ids if the request came
+    via a site-restricted API token). Once a user has at least one per-site
+    role grant (via PUT /users/{id}/site-roles), they're restricted to devices
+    in their granted sites plus orphaned (site_id IS NULL) devices.
     """
     from .models.device import Device  # local import to avoid circular dependency
 
     base = select(Device.id).where(Device.tenant_id == principal.active_tenant_id)
 
-    if principal.is_platform_admin or _has_tenant_role(principal, "tenant_admin"):
+    # tenant_admin/platform_admin, and any user with no per-site grants at all
+    # (site-scoping is opt-in — until an admin restricts them via
+    # PUT /users/{id}/site-roles, they see the whole tenant), subject only to
+    # token-level site restriction.
+    if principal.is_platform_admin or _has_tenant_role(principal, "tenant_admin") or not principal.site_role_map:
         if principal.token_site_ids:
             return base.where(
                 or_(Device.site_id.in_(principal.token_site_ids), Device.site_id.is_(None))
@@ -443,4 +482,8 @@ async def _assert_device_in_tenant(device_id: str, principal: Principal, db: Asy
 
 def _is_tenant_wide(principal: Principal) -> bool:
     """True if the principal sees the full tenant device set (no site restriction)."""
-    return principal.is_platform_admin or _has_tenant_role(principal, "tenant_admin")
+    return (
+        principal.is_platform_admin
+        or _has_tenant_role(principal, "tenant_admin")
+        or not principal.site_role_map
+    )

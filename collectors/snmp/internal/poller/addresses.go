@@ -148,6 +148,31 @@ func PollMACTable(s *client.Session, deviceID uuid.UUID, ifByIndex map[int]strin
 		}
 	}
 
+	// dot1dTpFdbTable (above) only covers the default/native VLAN on most
+	// VLAN-aware bridges. dot1qTpFdbTable (Q-BRIDGE-MIB) covers every VLAN's
+	// FDB in one walk and uses the same dot1dBasePort numbering, so merge it
+	// in — it's what fills in end-device ports on tagged-VLAN access ports.
+	if qPDUs, err := s.BulkWalkAll(oid.Dot1qTpFdbTable); err == nil {
+		for _, pdu := range qPDUs {
+			col, mac, ok := splitDot1qFdbIndex(pdu.Name)
+			if !ok {
+				continue
+			}
+			r := ensure(mac)
+			switch col {
+			case 2: // dot1qTpFdbPort — 0 means "not learned", don't clobber
+				if p := client.PDUInt(pdu); p > 0 {
+					r.bridgePort = p
+				}
+			case 3: // dot1qTpFdbStatus — don't let an invalid row on an
+				// unrelated VLAN mark an otherwise-valid entry invalid
+				if v := client.PDUInt(pdu); v != 2 {
+					r.status = v
+				}
+			}
+		}
+	}
+
 	results := make([]*model.MACEntry, 0, len(rows))
 	for mac, r := range rows {
 		if r.status == 2 { // invalid
@@ -204,6 +229,33 @@ func splitMACFdbIndex(pduName string) (col int, mac [6]byte, ok bool) {
 	}
 	for i := 0; i < 6; i++ {
 		v, err := strconv.Atoi(parts[i+1])
+		if err != nil || v < 0 || v > 255 {
+			return 0, mac, false
+		}
+		mac[i] = byte(v)
+	}
+	return c, mac, true
+}
+
+// splitDot1qFdbIndex parses col and MAC (as [6]byte) from a dot1qTpFdbTable
+// PDU name. OID suffix: col.fdbId.a.b.c.d.e.f (fdbId + 6 decimal MAC octets).
+func splitDot1qFdbIndex(pduName string) (col int, mac [6]byte, ok bool) {
+	full := strings.TrimPrefix(pduName, ".")
+	base := strings.TrimPrefix(oid.Dot1qTpFdbTable, ".")
+	if !strings.HasPrefix(full, base+".") {
+		return 0, mac, false
+	}
+	parts := strings.Split(full[len(base)+1:], ".")
+	if len(parts) < 8 {
+		return 0, mac, false
+	}
+	c, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return 0, mac, false
+	}
+	// parts[1] = dot1qFdbId (unused — bridge-port numbering is FDB-independent)
+	for i := 0; i < 6; i++ {
+		v, err := strconv.Atoi(parts[i+2])
 		if err != nil || v < 0 || v > 255 {
 			return 0, mac, false
 		}

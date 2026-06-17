@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 import structlog
@@ -16,7 +16,7 @@ from ..dependencies import (
 )
 from ..models.bgp import BGPSession, BGPSessionEvent
 from ..models.device import Device
-from ..models.interface import OSPFNeighbor, ISISNeighbor, ISISArea
+from ..models.interface import OSPFNeighbor, ISISNeighbor, ISISArea, ISISCircuitLevel, ISISLsp, RouteEntry
 
 VM_BASE = "http://localhost:8428"
 
@@ -88,7 +88,10 @@ async def device_sessions(
 ) -> list[dict]:
     await assert_device_access(principal, device_id, "readonly", db)
     dev = (await db.execute(
-        select(Device).where(Device.id == device_id)
+        select(Device).where(
+            Device.id == device_id,
+            Device.tenant_id == principal.active_tenant_id,
+        )
     )).scalar_one_or_none()
     if dev is None:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -236,7 +239,10 @@ async def bgp_prefix_history(
     """
     await assert_device_access(principal, device_id, "readonly", db)
     dev = (await db.execute(
-        select(Device).where(Device.id == device_id)
+        select(Device).where(
+            Device.id == device_id,
+            Device.tenant_id == principal.active_tenant_id,
+        )
     )).scalar_one_or_none()
     if not dev:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -452,3 +458,157 @@ async def isis_areas(
         }
         for a, dev in rows
     ]
+
+
+@router.get("/routes", summary="Learned routes by protocol across tenant devices")
+async def routes_by_protocol(
+    protocol:     Literal["bgp", "ospf", "isis"] = Query(...),
+    principal:    Principal     = Depends(get_current_principal),
+    db:           AsyncSession = Depends(get_db),
+) -> list[dict]:
+    rows = (await db.execute(
+        select(RouteEntry, Device)
+        .join(Device, RouteEntry.device_id == Device.id)
+        .where(
+            Device.id.in_(accessible_device_ids_subquery(principal)),
+            RouteEntry.protocol == protocol,
+        )
+        .order_by(Device.hostname, RouteEntry.destination)
+    )).all()
+    return [
+        {
+            "device_id":      str(r.device_id),
+            "device_name":    dev.display_name,
+            "destination":    r.destination,
+            "next_hop":       r.next_hop or None,
+            "metric":         r.metric,
+            "interface_name": r.interface_name,
+            "updated_at":     r.updated_at.isoformat(),
+        }
+        for r, dev in rows
+    ]
+
+
+@router.get("/isis-circuit-levels", summary="Per-circuit, per-level IS-IS link parameters")
+async def isis_circuit_levels_all(
+    principal:    Principal     = Depends(get_current_principal),
+    db:           AsyncSession = Depends(get_db),
+) -> list[dict]:
+    rows = (await db.execute(
+        select(ISISCircuitLevel, Device)
+        .join(Device, ISISCircuitLevel.device_id == Device.id)
+        .where(Device.id.in_(accessible_device_ids_subquery(principal)))
+        .order_by(Device.hostname, ISISCircuitLevel.interface_name, ISISCircuitLevel.level)
+    )).all()
+    return [
+        {
+            "device_id":      str(c.device_id),
+            "device_name":    dev.display_name,
+            "instance":       c.instance,
+            "interface_name": c.interface_name,
+            "level":          c.level,
+            "metric":         c.metric,
+            "hello_interval": c.hello_interval,
+            "hold_timer":     c.hold_timer,
+            "priority":       c.priority,
+            "dis_id":         c.dis_id,
+            "updated_at":     c.updated_at.isoformat(),
+        }
+        for c, dev in rows
+    ]
+
+
+@router.get("/isis-lsps", summary="IS-IS link-state database (LSPs) across tenant devices")
+async def isis_lsps_all(
+    principal:    Principal     = Depends(get_current_principal),
+    db:           AsyncSession = Depends(get_db),
+) -> list[dict]:
+    rows = (await db.execute(
+        select(ISISLsp, Device)
+        .join(Device, ISISLsp.device_id == Device.id)
+        .where(Device.id.in_(accessible_device_ids_subquery(principal)))
+        .order_by(Device.hostname, ISISLsp.instance, ISISLsp.level, ISISLsp.lsp_id)
+    )).all()
+    return [
+        {
+            "device_id":          str(l.device_id),
+            "device_name":        dev.display_name,
+            "instance":           l.instance,
+            "level":              l.level,
+            "lsp_id":             l.lsp_id,
+            "sequence_number":    l.sequence_number,
+            "checksum":           l.checksum,
+            "remaining_lifetime": l.remaining_lifetime,
+            "pdu_length":         l.pdu_length,
+            "overload_bit":       l.overload_bit,
+            "attached_bit":       l.attached_bit,
+            "updated_at":         l.updated_at.isoformat(),
+        }
+        for l, dev in rows
+    ]
+
+
+@router.get("/isis-topology", summary="IS-IS topology graph derived from adjacencies and areas")
+async def isis_topology(
+    principal:    Principal     = Depends(get_current_principal),
+    db:           AsyncSession = Depends(get_db),
+) -> dict:
+    neighbor_rows = (await db.execute(
+        select(ISISNeighbor, Device)
+        .join(Device, ISISNeighbor.device_id == Device.id)
+        .where(Device.id.in_(accessible_device_ids_subquery(principal)))
+    )).all()
+
+    if not neighbor_rows:
+        return {"nodes": [], "edges": []}
+
+    area_rows = (await db.execute(
+        select(ISISArea).where(ISISArea.device_id.in_(accessible_device_ids_subquery(principal)))
+    )).scalars().all()
+    area_by_device: dict[str, str] = {}
+    for a in area_rows:
+        area_by_device.setdefault(str(a.device_id), a.area_addr)
+
+    device_rows = (await db.execute(
+        select(Device).where(Device.id.in_(accessible_device_ids_subquery(principal)))
+    )).scalars().all()
+    device_by_hostname: dict[str, Device] = {d.hostname.lower(): d for d in device_rows if d.hostname}
+
+    nodes: dict[str, dict] = {}
+    edges: dict[tuple[str, str], dict] = {}
+
+    def add_managed_node(d: Device) -> None:
+        node_id = str(d.id)
+        if node_id not in nodes:
+            nodes[node_id] = {"id": node_id, "label": d.display_name, "area": area_by_device.get(node_id), "managed": True}
+
+    for n, dev in neighbor_rows:
+        src_id = str(dev.id)
+        add_managed_node(dev)
+
+        # Correlate the neighbor's dynamic hostname to another managed device
+        matched = device_by_hostname.get(n.hostname.lower()) if n.hostname else None
+        if matched and str(matched.id) != src_id:
+            dst_id = str(matched.id)
+            add_managed_node(matched)
+        else:
+            dst_id = n.sys_id
+            if dst_id not in nodes:
+                nodes[dst_id] = {"id": dst_id, "label": n.hostname or n.sys_id, "area": None, "managed": False}
+
+        if src_id == dst_id:
+            continue
+
+        level = n.circuit_type or "level-1-2"
+        state = n.adjacency_state
+        key = (src_id, dst_id) if src_id < dst_id else (dst_id, src_id)
+        existing = edges.get(key)
+        if existing is None:
+            edges[key] = {"source": src_id, "target": dst_id, "level": level, "state": state}
+        else:
+            if existing["state"] == "up" and state != "up":
+                existing["state"] = state
+            if existing["level"] != level:
+                existing["level"] = "level-1-2"
+
+    return {"nodes": list(nodes.values()), "edges": list(edges.values())}

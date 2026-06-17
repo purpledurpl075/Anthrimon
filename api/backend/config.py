@@ -55,6 +55,15 @@ class Settings(BaseSettings):
     # The default tenant UUID inserted by migration 001_init.sql.
     default_tenant_id: str = "00000000-0000-0000-0000-000000000001"
 
+    # ── Licensing ─────────────────────────────────────────────────────────────
+    # Offline RS256 license file. Absent = free tier. Lives under the
+    # service-owned state dir so Platform Admin uploads persist in place without
+    # needing root (the dir is created owned by the API service user at install).
+    license_path: str = "/var/lib/anthrimon/license.key"
+    # When True, a license bound to a different machine hard-fails at startup
+    # instead of degrading to free tier. Default False (soft-fail).
+    license_strict: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

@@ -807,10 +807,12 @@ visudo -cf "${BACKUP_SUDOERS_DST}" && ok "sudoers rule written: ${BACKUP_SUDOERS
 
 hdr "Config rollback firewall"
 
-# Config rollback works by spinning up an ephemeral HTTP server on the hub
+# Config rollback works by spinning up an ephemeral one-shot server on the hub
 # bound to the device-facing IP, telling the device "fetch config from this
 # URL", and tearing the server down after one request.  The server picks a
-# port from this range — open it so devices can reach it.
+# port from this range — open it so devices can reach it.  Most vendors fetch
+# over HTTP (TCP); AOS-CX's `copy ... checkpoint` only accepts tftp:// (UDP),
+# so both protocols are opened on the same range.
 ROLLBACK_PORTS_LOW=5050
 ROLLBACK_PORTS_HIGH=5054
 ROLLBACK_PORT_RANGE="${ROLLBACK_PORTS_LOW}:${ROLLBACK_PORTS_HIGH}"
@@ -819,13 +821,20 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
     ufw allow ${ROLLBACK_PORT_RANGE}/tcp comment "anthrimon config rollback" >/dev/null 2>&1 \
         && ok "ufw rule added: ${ROLLBACK_PORT_RANGE}/tcp" \
         || warn "ufw allow failed — open ${ROLLBACK_PORT_RANGE}/tcp manually if rollback fails to reach devices"
+    ufw allow ${ROLLBACK_PORT_RANGE}/udp comment "anthrimon config rollback (tftp)" >/dev/null 2>&1 \
+        && ok "ufw rule added: ${ROLLBACK_PORT_RANGE}/udp" \
+        || warn "ufw allow failed — open ${ROLLBACK_PORT_RANGE}/udp manually if AOS-CX rollback fails"
 elif command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld; then
     firewall-cmd --permanent --add-port=${ROLLBACK_PORT_RANGE//:/-}/tcp >/dev/null 2>&1 \
         && firewall-cmd --reload >/dev/null 2>&1 \
         && ok "firewalld rule added: ${ROLLBACK_PORT_RANGE//:/-}/tcp" \
         || warn "firewalld add-port failed — open ${ROLLBACK_PORT_RANGE//:/-}/tcp manually"
+    firewall-cmd --permanent --add-port=${ROLLBACK_PORT_RANGE//:/-}/udp >/dev/null 2>&1 \
+        && firewall-cmd --reload >/dev/null 2>&1 \
+        && ok "firewalld rule added: ${ROLLBACK_PORT_RANGE//:/-}/udp" \
+        || warn "firewalld add-port failed — open ${ROLLBACK_PORT_RANGE//:/-}/udp manually"
 else
-    info "No active host firewall detected — rollback port range ${ROLLBACK_PORT_RANGE//:/-}/tcp left open by default"
+    info "No active host firewall detected — rollback port range ${ROLLBACK_PORT_RANGE//:/-} (tcp+udp) left open by default"
 fi
 
 # Ensure the port range is also visible to the API process as an env hint.
@@ -890,10 +899,36 @@ RestartSec=5
 WantedBy=multi-user.target
 EOF
 
+# The unit embeds ANTHRIMON_ENCRYPTION_KEY / JWT_SECRET_KEY / DB_PASSWORD as
+# Environment= lines. systemd unit files are created world-readable (0644) by
+# default, which would let any local user read these secrets. systemd (PID 1)
+# reads units as root regardless of mode, so 0600 is safe and closes the leak.
+chmod 600 /etc/systemd/system/anthrimon-api.service
+
 systemctl daemon-reload
 systemctl enable anthrimon-api
 systemctl restart anthrimon-api
 ok "anthrimon-api service running"
+
+# ── Licensing ──────────────────────────────────────────────────────────────────
+hdr "Licensing"
+# The license file lives under the service-owned state dir so Platform Admin
+# uploads persist in place without root. Absent = free tier; no key needed to run.
+install -d -m 0750 -o "${REAL_USER}" -g "${REAL_USER}" /var/lib/anthrimon
+ok "license dir ready: /var/lib/anthrimon (free tier until a license is uploaded)"
+
+# anthrimon-licensing CLI — print this host's fingerprint (to request a license)
+# or show current license status. Callable by ops staff from anywhere.
+cat > /usr/local/bin/anthrimon-licensing <<EOF
+#!/usr/bin/env bash
+cd "${API_DIR}" && exec "${VENV_DIR}/bin/python3" -m backend.licensing "\$@"
+EOF
+chmod 0755 /usr/local/bin/anthrimon-licensing
+ok "anthrimon-licensing CLI installed to /usr/local/bin"
+
+# Print this host's license fingerprint so the admin can request a license now.
+LIC_FP="$(cd "${API_DIR}" && "${VENV_DIR}/bin/python3" -m backend.licensing --print-machine-id 2>/dev/null || true)"
+[[ -n "${LIC_FP}" ]] && ok "License fingerprint for this host: ${LIC_FP}"
 
 # Seed platform settings (base_url; abuseipdb_api_key left blank — set in UI)
 info "Setting platform base_url to ${BASE_URL}..."

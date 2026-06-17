@@ -82,14 +82,17 @@ def _collect_ssh_paramiko(host: str, port: int, command: str, cred_data: dict) -
     interactive session setup (e.g. HP ProCurve which ignores terminal width)."""
     import paramiko, time, socket
 
+    from .hostkeys import apply_paramiko_policy, persist_paramiko
+
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    apply_paramiko_policy(client)
     client.connect(
         hostname=host, port=port,
         username=cred_data.get("username", ""),
         password=cred_data.get("password", ""),
         timeout=30, look_for_keys=False, allow_agent=False,
     )
+    persist_paramiko(client)
     try:
         shell = client.invoke_shell(width=200, height=200)
         shell.settimeout(5)
@@ -137,7 +140,7 @@ def _collect_ssh(host: str, port: int, vendor_key: str, cred_data: dict) -> str:
         command = _SHOW_RUN.get(vendor_key, "show running-config")
         return _collect_ssh_paramiko(host, port, command, cred_data)
 
-    from netmiko import ConnectHandler
+    from .hostkeys import pinned_connect_handler
 
     device_type = _NETMIKO_TYPE.get(vendor_key, "cisco_ios")
     command = _SHOW_RUN.get(vendor_key, "show running-config")
@@ -170,7 +173,7 @@ def _collect_ssh(host: str, port: int, vendor_key: str, cred_data: dict) -> str:
         # have the user already at privilege 15.
         conn_params["secret"] = cred_data.get("password", "")
 
-    with ConnectHandler(**conn_params) as conn:
+    with pinned_connect_handler(**conn_params) as conn:
         if vendor_key in _NEEDS_ENABLE:
             try:
                 conn.enable()
@@ -187,7 +190,7 @@ def _collect_ssh(host: str, port: int, vendor_key: str, cred_data: dict) -> str:
 
 def _ssh_exec(host: str, port: int, vendor_key: str, cred_data: dict, command: str) -> str:
     """Run a single exec-mode command via SSH and return output. Not config mode."""
-    from netmiko import ConnectHandler
+    from .hostkeys import pinned_connect_handler
 
     _NEEDS_ENABLE_EXEC = {"arista", "cisco_ios", "cisco_iosxe", "cisco_iosxr",
                           "cisco_nxos", "hp_procurve", "aruba_cx"}
@@ -211,7 +214,7 @@ def _ssh_exec(host: str, port: int, vendor_key: str, cred_data: dict, command: s
     elif vendor_key in _NEEDS_ENABLE_EXEC:
         conn_params["secret"] = cred_data.get("password", "")
 
-    with ConnectHandler(**conn_params) as conn:
+    with pinned_connect_handler(**conn_params) as conn:
         if vendor_key in _NEEDS_ENABLE_EXEC:
             try:
                 conn.enable()
@@ -259,7 +262,7 @@ def _deploy_ssh(
     if vendor_key in _PARAMIKO_VENDORS:
         return _deploy_ssh_paramiko(host, port, vendor_key, cred_data, commands, save)
 
-    from netmiko import ConnectHandler
+    from .hostkeys import pinned_connect_handler
 
     device_type = _NETMIKO_TYPE.get(vendor_key, "cisco_ios")
     is_procurve  = vendor_key in {"hp_procurve"}
@@ -286,7 +289,7 @@ def _deploy_ssh(
 
     output_parts: list[str] = []
 
-    with ConnectHandler(**conn_params) as conn:
+    with pinned_connect_handler(**conn_params) as conn:
         if vendor_key in _NEEDS_ENABLE_DEPLOY:
             try:
                 conn.enable()
@@ -330,14 +333,17 @@ def _deploy_ssh_paramiko(
     """Deploy config via paramiko invoke_shell (for ProCurve)."""
     import paramiko, time, socket
 
+    from .hostkeys import apply_paramiko_policy, persist_paramiko
+
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    apply_paramiko_policy(client)
     client.connect(
         hostname=host, port=port,
         username=cred_data.get("username", ""),
         password=cred_data.get("password", ""),
         timeout=30, look_for_keys=False, allow_agent=False,
     )
+    persist_paramiko(client)
 
     output_parts: list[str] = []
 
@@ -598,9 +604,28 @@ _PROMPT_TAIL = re.compile(r"^\S*[#>$]\s*(exit|quit|logout)?\s*$", re.IGNORECASE)
 # config lines start with a keyword or indentation, never "hostname#  text".
 _PROMPT_LINE = re.compile(r"^\S+[#>]\s+\S")
 # Shell/login banner noise that some OSes interleave with command output.
+# These lines must NOT be stored — they vary between captures (timestamps,
+# byte-counts, session metadata) and produce spurious diffs.
 _BANNER_NOISE = re.compile(
     r"(^Last login:|has logged in .* in the past|Invalid input:"
-    r"|^Building configuration|^Current configuration)",
+    r"|^Building configuration|^Current configuration"
+    # Arista EOS / Cisco NX-OS command echo (with or without space after !)
+    r"|^[!;#]+\s*Command[\s:]"
+    # Cisco IOS/IOS-XE/IOS-XR: timestamp + byte-count headers
+    r"|^[!#]+\s*Last configuration change"
+    r"|^[!#]+\s*NVRAM config"
+    r"|^!!?\s*IOS XR Configuration"
+    # Cisco NX-OS: timestamp line emitted on every capture
+    r"|^[!#]+\s*Time:\s"
+    r"|^[!#]+\s*Startup database"
+    # Juniper: timestamp in hierarchical format (display set has no headers)
+    r"|^#+\s*Last changed:"
+    # HP ProCurve: model/firmware header lines
+    r"|^;\s*[A-Z]\w+\s+Configuration Editor"
+    r"|^;\s*Ver\s+#"
+    # FortiOS: build/version/user embedded in first line
+    r"|^#config-version="
+    r")",
     re.IGNORECASE,
 )
 
@@ -622,7 +647,7 @@ def _extract_show_output(raw: str, command: str) -> str:
         or _PROMPT_TAIL.match(body[-1])
     ):
         body.pop()
-    body = [ln for ln in body
+    body = [ln.rstrip() for ln in body
             if not (_PROMPT_LINE.match(ln) or _BANNER_NOISE.search(ln))]
     return "\n".join(body).strip()
 

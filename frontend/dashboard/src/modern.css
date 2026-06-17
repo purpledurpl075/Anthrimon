@@ -1,0 +1,116 @@
+/* ============================================================================
+   "Refined SaaS" skin, scoped via html[data-ui="modern"] (set statically in
+   index.html — this is the only UI). Reuses the same scoped-override
+   technique as the dark-mode layer in index.css: it remaps the literal
+   Tailwind utility classes the app already uses, so every page is restyled
+   without being edited. Composes with .dark for dark mode.
+   ============================================================================ */
+
+[data-ui="modern"] {
+  --m-accent:      #4f46e5;   /* refined indigo */
+  --m-accent-2:    #6366f1;
+  --m-accent-700:  #4338ca;
+  --m-accent-50:   #eef2ff;
+  --m-accent-100:  #e0e7ff;
+  --m-radius:      0.875rem;  /* 14px */
+  --m-radius-sm:   0.625rem;  /* 10px */
+  --m-radius-lg:   1.125rem;  /* 18px */
+  --m-bg:          #eceef6;
+  --m-surface:     #ffffff;
+  --m-border:      #e7e9f2;
+  --m-shadow:      0 1px 2px rgba(16,24,40,.04), 0 10px 26px -14px rgba(16,24,40,.20);
+}
+
+/* ── Base surface + typography ─────────────────────────────────────────────── */
+[data-ui="modern"] body {
+  background: linear-gradient(180deg, #f4f6fc 0%, var(--m-bg) 100%);
+  background-attachment: fixed;
+  letter-spacing: -0.006em;
+}
+[data-ui="modern"] h1 { letter-spacing: -0.022em; font-weight: 700; }
+[data-ui="modern"] h2,
+[data-ui="modern"] h3 { letter-spacing: -0.018em; }
+
+/* App shell + main scroll area background */
+[data-ui="modern"] .bg-slate-50 { background-color: transparent !important; }
+
+/* ── Cards / surfaces — the biggest visual signal ──────────────────────────── */
+[data-ui="modern"] .bg-white { background-color: var(--m-surface) !important; }
+[data-ui="modern"] .border-slate-200 { border-color: var(--m-border) !important; }
+[data-ui="modern"] .border-slate-100 { border-color: #eef0f6 !important; }
+[data-ui="modern"] .border-slate-300 { border-color: #dfe2ee !important; }
+
+/* Definition comes from a clear soft lift + larger radius, not hard borders */
+[data-ui="modern"] .bg-white.rounded-lg,
+[data-ui="modern"] .bg-white.rounded-xl,
+[data-ui="modern"] .bg-white.rounded-2xl,
+[data-ui="modern"] .bg-white.border {
+  box-shadow: var(--m-shadow);
+  border-color: var(--m-border) !important;
+}
+[data-ui="modern"] .bg-white.rounded-lg  { border-radius: var(--m-radius-lg) !important; }
+[data-ui="modern"] .bg-white.rounded-xl  { border-radius: var(--m-radius-lg) !important; }
+
+/* Global radius bump */
+[data-ui="modern"] .rounded-md { border-radius: var(--m-radius-sm) !important; }
+[data-ui="modern"] .rounded-lg { border-radius: var(--m-radius) !important; }
+
+/* ── Accent remap (indigo) + gradient primary buttons ──────────────────────── */
+[data-ui="modern"] .bg-blue-600,
+[data-ui="modern"] .bg-blue-500 {
+  background-image: linear-gradient(180deg, var(--m-accent-2), var(--m-accent)) !important;
+  background-color: var(--m-accent) !important;
+  box-shadow: 0 1px 2px rgba(79,70,229,.30), 0 6px 16px -6px rgba(79,70,229,.45);
+}
+[data-ui="modern"] .hover\:bg-blue-700:hover,
+[data-ui="modern"] .bg-blue-700 {
+  background-image: linear-gradient(180deg, var(--m-accent), var(--m-accent-700)) !important;
+  background-color: var(--m-accent-700) !important;
+}
+[data-ui="modern"] .bg-blue-50  { background-color: var(--m-accent-50) !important; }
+[data-ui="modern"] .bg-blue-100 { background-color: var(--m-accent-100) !important; }
+
+[data-ui="modern"] .text-blue-600,
+[data-ui="modern"] .text-blue-500 { color: var(--m-accent) !important; }
+[data-ui="modern"] .text-blue-700,
+[data-ui="modern"] .hover\:text-blue-700:hover { color: var(--m-accent-700) !important; }
+
+[data-ui="modern"] .border-blue-600,
+[data-ui="modern"] .border-blue-500 { border-color: var(--m-accent) !important; }
+[data-ui="modern"] .border-blue-200 { border-color: var(--m-accent-100) !important; }
+
+[data-ui="modern"] .ring-blue-500,
+[data-ui="modern"] .focus\:ring-blue-500:focus { --tw-ring-color: var(--m-accent) !important; }
+
+/* ── Sidebar — refreshed indigo-navy with accent active pill ───────────────── */
+[data-ui="modern"] aside.bg-slate-900 {
+  background: linear-gradient(180deg, #1e2540 0%, #141a2e 100%) !important;
+  border-right-color: #232b46 !important;
+}
+[data-ui="modern"] .border-slate-800 { border-color: #232b46 !important; }
+[data-ui="modern"] .bg-blue-950\/60 {
+  background-color: rgba(99,102,241,.28) !important;
+  box-shadow: inset 2px 0 0 #818cf8;
+}
+[data-ui="modern"] .text-blue-400 { color: #a5b4fc !important; }
+[data-ui="modern"] .bg-blue-400   { background-color: #818cf8 !important; }
+
+/* ── Inputs ───────────────────────────────────────────────────────────────── */
+[data-ui="modern"] input, [data-ui="modern"] select, [data-ui="modern"] textarea {
+  border-radius: var(--m-radius-sm);
+}
+
+/* ── Dark + Modern: keep dark surfaces, apply accent + radii + softer edges ── */
+[data-ui="modern"].dark { --m-bg: #0b1220; --m-surface: #161e2e; --m-border: #283044; }
+.dark[data-ui="modern"] body          { background: #0b1220; }
+.dark[data-ui="modern"] .bg-white     { background-color: var(--m-surface) !important; }
+.dark[data-ui="modern"] .bg-slate-50  { background-color: transparent !important; }
+.dark[data-ui="modern"] .bg-white.rounded-lg,
+.dark[data-ui="modern"] .bg-white.rounded-xl,
+.dark[data-ui="modern"] .bg-white.border {
+  box-shadow: 0 1px 3px rgba(0,0,0,.4);
+  border-color: var(--m-border) !important;
+}
+.dark[data-ui="modern"] aside.bg-slate-900 {
+  background: linear-gradient(180deg, #141a2e 0%, #0d1322 100%) !important;
+}

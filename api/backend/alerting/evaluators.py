@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from dataclasses import dataclass, field
@@ -11,6 +12,42 @@ from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 _VM_URL = "http://localhost:8428"
+
+# ── Shared pooled HTTP client ───────────────────────────────────────────────
+# The alert engine evaluates every metric rule against every device on a ~15s
+# loop, and each evaluator previously built a fresh httpx.AsyncClient per call —
+# no keep-alive, full connection setup/teardown every time. A single shared
+# client (lazily bound to the running loop) pools connections to VictoriaMetrics
+# (:8428) and ClickHouse (:8123) across all calls. `_shared_http()` is a
+# drop-in async context manager that yields the shared client WITHOUT closing
+# it on exit, so existing `async with ... as client:` call sites are unchanged.
+_http_client_singleton: Optional[httpx.AsyncClient] = None
+
+
+def _http_client() -> httpx.AsyncClient:
+    global _http_client_singleton
+    if _http_client_singleton is None or _http_client_singleton.is_closed:
+        _http_client_singleton = httpx.AsyncClient(timeout=5.0)
+    return _http_client_singleton
+
+
+@asynccontextmanager
+async def _shared_http(timeout: float | None = None):
+    """Yield the process-wide shared httpx client; never closes it.
+
+    `timeout` is accepted for call-site compatibility and applied per-request
+    by callers via `client.get(..., timeout=...)` where they need a non-default
+    value; the shared client's default (5s) covers the rest.
+    """
+    yield _http_client()
+
+
+async def aclose_http_client() -> None:
+    """Close the shared client on app shutdown (called from the lifespan)."""
+    global _http_client_singleton
+    if _http_client_singleton is not None and not _http_client_singleton.is_closed:
+        await _http_client_singleton.aclose()
+    _http_client_singleton = None
 
 _snmp_engine = None  # lazy singleton — SnmpEngine is thread-safe and expensive to construct
 
@@ -139,8 +176,11 @@ async def eval_device_down(db: AsyncSession, device: dict, platform: dict | None
     status = row["status"]
     last_polled = row["last_polled"]
     poll_interval = int(device.get("polling_interval_s") or 15)
-    stale_min = int((platform or {}).get("device_down_stale_min_s", 45))
-    stale_seconds = max(stale_min, int(poll_interval * 2.5))
+    stale_min = int((platform or {}).get("device_down_stale_min_s", 90))
+    # 6× the poll interval: generous enough that an SNMP reconnect (up to 60s
+    # max backoff) doesn't trigger a false Device Down during the reconnect
+    # window, while still detecting a genuinely unreachable device promptly.
+    stale_seconds = max(stale_min, int(poll_interval * 6))
     stale = (
         last_polled is None or
         (datetime.now(timezone.utc) - last_polled).total_seconds() > stale_seconds
@@ -262,7 +302,7 @@ async def eval_interface_errors(db: AsyncSession, device: dict, threshold: float
         f' + increase(anthrimon_if_out_errors_total{{device_id="{device_id}"}}[5m])'
     )
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with _shared_http() as client:
             resp = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
             resp.raise_for_status()
             results = resp.json().get("data", {}).get("result", [])
@@ -342,7 +382,7 @@ async def eval_interface_util(db: AsyncSession, device: dict, threshold: float) 
         f')'
     )
     try:
-        async with httpx.AsyncClient(timeout=5) as client:
+        async with _shared_http() as client:
             resp = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
             resp.raise_for_status()
             results = resp.json().get("data", {}).get("result", [])
@@ -524,7 +564,6 @@ async def eval_flow_bandwidth(
     Example: {"src_ip": "10.0.0.1", "protocol": 6}
     """
     import json as _json
-    import httpx as _httpx
     import ipaddress as _ipaddress
     import structlog as _sl
     _log = _sl.get_logger(__name__)
@@ -545,10 +584,14 @@ async def eval_flow_bandwidth(
         return None
 
     device_id = device["id"]
+    # ClickHouse bound params ({name:Type} + param_<name>) rather than
+    # interpolation. The IP/protocol values are already validated below; bound
+    # params make the query injection-proof regardless.
     clauses = [
-        f"collector_device_id = toUUID('{device_id}')",
-        "minute >= now() - INTERVAL 5 MINUTE",
+        "collector_device_id = {did:UUID}",
+        "minute >= now() - toIntervalMinute(5)",
     ]
+    ch_params = {"param_did": device_id}
     for key in ("src_ip", "dst_ip"):
         raw_ip = filt.get(key)
         if not raw_ip:
@@ -558,19 +601,22 @@ async def eval_flow_bandwidth(
         except ValueError:
             return None
         col = "src_ip" if key == "src_ip" else "dst_ip"
-        fn = "toIPv6" if isinstance(addr, _ipaddress.IPv6Address) else "toIPv4"
-        clauses.append(f"{col} = {fn}('{raw_ip}')")
+        ch_type = "IPv6" if isinstance(addr, _ipaddress.IPv6Address) else "IPv4"
+        clauses.append(f"{col} = {{{key}:{ch_type}}}")
+        ch_params[f"param_{key}"] = str(raw_ip)
     if filt.get("protocol"):
-        clauses.append(f"ip_protocol = {int(filt['protocol'])}")
+        clauses.append("ip_protocol = {proto:UInt16}")
+        ch_params["param_proto"] = str(int(filt["protocol"]))
 
     query = (
         f"SELECT sum(bytes_total) / (5 * 60) AS bps "
         f"FROM flow_agg_1min WHERE {' AND '.join(clauses)}"
     )
     try:
-        async with _httpx.AsyncClient(timeout=5) as client:
+        async with _shared_http() as client:
             resp = await client.post(
                 "http://localhost:8123",
+                params=ch_params,
                 content=query + " FORMAT JSON",
                 headers={"Content-Type": "text/plain"},
             )
@@ -600,7 +646,6 @@ async def eval_syslog_match(
     Example: {"pattern": "OSPF.*down", "severity_max": 4}
     """
     import json as _json
-    import httpx as _httpx
     import structlog as _sl
     _log = _sl.get_logger(__name__)
 
@@ -625,28 +670,36 @@ async def eval_syslog_match(
 
     minutes  = max(1, duration_seconds // 60)
     did      = device["id"]
-    esc_pat  = pattern.replace("\\", "\\\\").replace("'", "\\'")
 
+    # Build the WHERE using ClickHouse bound parameters ({name:Type} in the SQL,
+    # param_<name> in the request) instead of interpolating user input — the
+    # `pattern` regex in particular is attacker-controllable (rule config) and
+    # must never be hand-escaped into the query string.
     clauses = [
-        f"device_id = toUUID('{did}')",
-        f"ts >= now() - INTERVAL {minutes} MINUTE",
-        f"match(message, '{esc_pat}')",
+        "device_id = {did:UUID}",
+        "ts >= now() - toIntervalMinute({mins:UInt32})",
+        "match(message, {pat:String})",
     ]
+    ch_params = {
+        "param_did": did,
+        "param_mins": str(minutes),
+        "param_pat": pattern,
+    }
     if filt.get("program"):
-        import re as _re
-        if not _re.fullmatch(r'[A-Za-z0-9._/-]+', filt["program"]):
-            return None
-        clauses.append(f"program = '{filt['program']}'")
+        clauses.append("program = {prog:String}")
+        ch_params["param_prog"] = str(filt["program"])
     if filt.get("severity_max") is not None:
-        clauses.append(f"severity <= {int(filt['severity_max'])}")
+        clauses.append("severity <= {sevmax:UInt8}")
+        ch_params["param_sevmax"] = str(int(filt["severity_max"]))
 
     where = " AND ".join(clauses)
 
     try:
-        async with _httpx.AsyncClient(timeout=5) as client:
+        async with _shared_http() as client:
             # Count
             cnt_resp = await client.post(
                 "http://localhost:8123",
+                params=ch_params,
                 content=f"SELECT count() AS n FROM syslog_messages WHERE {where} FORMAT JSON",
                 headers={"Content-Type": "text/plain"},
             )
@@ -659,6 +712,7 @@ async def eval_syslog_match(
             # Grab the most recent matching message for the alert title/context
             msg_resp = await client.post(
                 "http://localhost:8123",
+                params=ch_params,
                 content=(
                     f"SELECT program, message FROM syslog_messages "
                     f"WHERE {where} ORDER BY ts DESC LIMIT 1 FORMAT JSON"
@@ -683,17 +737,17 @@ async def eval_syslog_match(
 
 async def fetch_syslog_context(device_id: str, count: int = 5) -> list[dict]:
     """Fetch the most recent syslog messages for a device to annotate an alert."""
-    import httpx as _httpx
     try:
-        async with _httpx.AsyncClient(timeout=3) as client:
+        async with _shared_http() as client:
             resp = await client.post(
                 "http://localhost:8123",
+                params={"param_did": device_id, "param_lim": str(int(count))},
                 content=(
-                    f"SELECT toUnixTimestamp(ts)*1000 AS ts_ms, severity, program, message "
-                    f"FROM syslog_messages "
-                    f"WHERE device_id = toUUID('{device_id}') "
-                    f"  AND ts >= now() - INTERVAL 10 MINUTE "
-                    f"ORDER BY ts DESC LIMIT {count} FORMAT JSON"
+                    "SELECT toUnixTimestamp(ts)*1000 AS ts_ms, severity, program, message "
+                    "FROM syslog_messages "
+                    "WHERE device_id = {did:UUID} "
+                    "  AND ts >= now() - toIntervalMinute(10) "
+                    "ORDER BY ts DESC LIMIT {lim:UInt32} FORMAT JSON"
                 ),
                 headers={"Content-Type": "text/plain"},
             )
@@ -785,7 +839,7 @@ async def eval_bgp_prefix_drop(
     # Historical average: avg_over_time over the lookback window
     async def vm_instant(query: str) -> list[dict]:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with _shared_http() as client:
                 r = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
             return r.json().get("data", {}).get("result", [])
         except Exception:
@@ -869,7 +923,7 @@ async def eval_device_latency(
 
     async def vm_instant(query: str) -> float | None:
         try:
-            async with httpx.AsyncClient(timeout=5.0) as client:
+            async with _shared_http() as client:
                 r = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
             results = r.json().get("data", {}).get("result", [])
             if results:
@@ -952,6 +1006,187 @@ async def eval_snmp_trap(
         })
 
     return Breach(device["id"], device["hostname"], value=float(count), extra=extra)
+
+
+async def eval_interface_discards(db: AsyncSession, device: dict, threshold: float) -> list[Breach]:
+    """Alert on interfaces accumulating discards faster than threshold per 5-minute window.
+
+    Discard counters are stored in VictoriaMetrics (anthrimon_if_in/out_discards_total).
+    Uses increase() over 5m so a counter reset (reboot) doesn't create false positives.
+    """
+    device_id = device["id"]
+    query = (
+        f'increase(anthrimon_if_in_discards_total{{device_id="{device_id}"}}[5m])'
+        f' + increase(anthrimon_if_out_discards_total{{device_id="{device_id}"}}[5m])'
+    )
+    try:
+        async with _shared_http() as client:
+            resp = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
+            resp.raise_for_status()
+            results = resp.json().get("data", {}).get("result", [])
+    except Exception:
+        return []
+
+    # Batch-fetch all interface IDs + baselines for this device in one query.
+    iface_rows = (await db.execute(
+        text("""
+            SELECT i.name, i.id::text,
+                   mb.mean, mb.stddev, mb.force_alert, mb.force_suppress
+            FROM interfaces i
+            LEFT JOIN metric_baselines mb
+                   ON mb.interface_id = i.id
+                  AND mb.metric_type  = 'interface_discards'
+                  AND mb.bucket_type  = 'rolling'
+                  AND mb.bucket_index = 0
+            WHERE i.device_id = :did
+        """),
+        {"did": device_id},
+    )).mappings().all()
+    iface_bl_map = {r["name"]: r for r in iface_rows}
+
+    breaches: list[Breach] = []
+    for r in results:
+        val = float(r.get("value", [0, 0])[1] or 0)
+        if_name = r["metric"].get("if_name", "")
+
+        iface_row = iface_bl_map.get(if_name)
+        iface_id = iface_row["id"] if iface_row else None
+
+        # Determine effective threshold: max(static, mean + 3σ from baseline).
+        effective = float(threshold)
+        if iface_row and not iface_row["force_alert"]:
+            bl_mean   = float(iface_row["mean"]   or 0)
+            bl_stddev = float(iface_row["stddev"] or 0)
+            if bl_mean > 0 or bl_stddev > 0:
+                effective = max(effective, bl_mean + 3.0 * bl_stddev)
+            if iface_row["force_suppress"]:
+                continue  # always silenced
+
+        if val <= effective:
+            continue
+
+        breaches.append(Breach(
+            device_id, device["hostname"],
+            interface_id=iface_id,
+            interface_name=if_name,
+            value=val,
+        ))
+    return breaches
+
+
+async def eval_isis_state(db: AsyncSession, device: dict) -> Optional[Breach]:
+    """Fire if any IS-IS adjacency is not up.
+
+    States that trigger: down, initializing, failed. 'unknown' is ignored
+    (no data yet). 'up' is the only healthy state.
+    Reports all bad adjacencies in extra["neighbors"] plus a count.
+    """
+    rows = (await db.execute(
+        text("""
+            SELECT sys_id, hostname, interface_name, adjacency_state
+            FROM isis_neighbors
+            WHERE device_id = :did
+              AND adjacency_state NOT IN ('up', 'unknown')
+            ORDER BY
+                CASE adjacency_state
+                    WHEN 'down'         THEN 1
+                    WHEN 'failed'       THEN 2
+                    WHEN 'initializing' THEN 3
+                    ELSE 4
+                END
+        """),
+        {"did": device["id"]},
+    )).mappings().all()
+    if not rows:
+        return None
+    bad = [
+        {
+            "neighbor":  r["hostname"] or r["sys_id"],
+            "interface": r["interface_name"],
+            "state":     r["adjacency_state"],
+        }
+        for r in rows
+    ]
+    return Breach(
+        device["id"], device["hostname"],
+        extra={"neighbors": bad, "count": len(bad), "isis_state": bad[0]["state"]},
+    )
+
+
+async def eval_config_change(db: AsyncSession, device: dict, duration_seconds: int) -> Optional[Breach]:
+    """Alert when the device's running config changed within the last
+    `duration_seconds` (a config_diffs row was recorded in that window).
+    """
+    minutes = max(1, duration_seconds // 60)
+    row = (await db.execute(
+        text("""
+            SELECT id::text, lines_added, lines_removed, created_at::text
+            FROM config_diffs
+            WHERE device_id = :did
+              AND created_at >= now() - make_interval(mins => :mins)
+            ORDER BY created_at DESC LIMIT 1
+        """),
+        {"did": device["id"], "mins": minutes},
+    )).mappings().one_or_none()
+    if not row:
+        return None
+    return Breach(
+        device["id"], device["hostname"],
+        value=float(row["lines_added"] + row["lines_removed"]),
+        extra={
+            "diff_id":        row["id"],
+            "lines_added":    row["lines_added"],
+            "lines_removed":  row["lines_removed"],
+            "changed_at":     row["created_at"],
+            "window_minutes": minutes,
+        },
+    )
+
+
+async def eval_collector_offline(db: AsyncSession, device: dict, stale_seconds: int = 300) -> Optional[Breach]:
+    """Fire once per offline remote collector, attached to a single
+    representative device (the lexicographically-first device id assigned
+    to that collector) so a collector outage doesn't fire one alert per
+    device it manages.
+
+    Fires when the collector's status != 'online' or its last heartbeat
+    (last_seen) is older than `stale_seconds`.
+    """
+    collector_id = device.get("collector_id")
+    if not collector_id:
+        return None
+
+    row = (await db.execute(
+        text("SELECT name, status, last_seen FROM remote_collectors WHERE id = CAST(:cid AS uuid)"),
+        {"cid": collector_id},
+    )).mappings().first()
+    if not row:
+        return None
+
+    stale = (
+        row["last_seen"] is None or
+        (datetime.now(timezone.utc) - row["last_seen"]).total_seconds() > stale_seconds
+    )
+    if row["status"] == "online" and not stale:
+        return None
+
+    # Leader election: only the device with the lowest id for this collector fires.
+    leader = (await db.execute(
+        text("SELECT id::text FROM devices WHERE collector_id = CAST(:cid AS uuid) ORDER BY id LIMIT 1"),
+        {"cid": collector_id},
+    )).scalar_one_or_none()
+    if leader != device["id"]:
+        return None
+
+    return Breach(
+        device["id"], device["hostname"],
+        extra={
+            "collector_id":     collector_id,
+            "collector_name":   row["name"],
+            "collector_status": row["status"],
+            "last_seen":        row["last_seen"].isoformat() if row["last_seen"] else None,
+        },
+    )
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────────

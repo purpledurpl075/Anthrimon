@@ -21,6 +21,7 @@ import (
 	"golang.org/x/crypto/ssh"
 
 	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/hub"
+	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/sshtofu"
 )
 
 // ── Vendor tables ─────────────────────────────────────────────────────────────
@@ -73,6 +74,22 @@ var (
 	passwordRE = regexp.MustCompile(`(?i)password\s*:`)
 	moreRE     = regexp.MustCompile(`(?i)--\s*[Mm]ore\s*--`)
 	ansiRE     = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	// bannerNoiseRE matches header lines that are CLI framing, not real config.
+	// These vary between captures (timestamps, byte counts, session metadata)
+	// and produce spurious diffs. Mirrors _BANNER_NOISE in configmgmt/collector.py.
+	bannerNoiseRE = regexp.MustCompile(`(?i)^(` +
+		`Building configuration|Current configuration` +
+		`|[!;#]+\s*Command[\s:]` + // Arista/NX-OS command echo
+		`|[!#]+\s*Last configuration change` + // Cisco timestamp
+		`|[!#]+\s*NVRAM config` + // Cisco NVRAM timestamp
+		`|!!?\s*IOS XR Configuration` + // IOS-XR byte-count header
+		`|[!#]+\s*Time:\s` + // NX-OS per-capture timestamp
+		`|[!#]+\s*Startup database` + // NX-OS startup-DB timestamp
+		`|#+\s*Last changed:` + // Juniper timestamp
+		`|;\s*[A-Z]\w+\s+Configuration Editor` + // ProCurve model header
+		`|;\s*Ver\s+#` + // ProCurve firmware header
+		`|#config-version=` + // FortiOS build/version line
+		`)`)
 )
 
 // ── SSHConfigCollector ────────────────────────────────────────────────────────
@@ -266,7 +283,7 @@ func sshCollect(
 				return answers, nil
 			}),
 		},
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), //nolint:gosec — enterprise internal network
+		HostKeyCallback: sshtofu.HostKeyCallback(),
 		Timeout:         30 * time.Second,
 	}
 
@@ -414,6 +431,9 @@ func cleanOutput(raw, cmd string) string {
 		if promptRE.MatchString(stripped) {
 			break
 		}
+		if bannerNoiseRE.MatchString(stripped) {
+			continue
+		}
 		out = append(out, stripped)
 	}
 
@@ -424,6 +444,9 @@ func cleanOutput(raw, cmd string) string {
 			stripped := strings.TrimRight(line, " \t")
 			if promptRE.MatchString(stripped) {
 				break
+			}
+			if bannerNoiseRE.MatchString(stripped) {
+				continue
 			}
 			out = append(out, stripped)
 		}

@@ -8,6 +8,7 @@ export interface TopologyNode {
   device_type: string
   status: string
   connected: boolean
+  site_id: string | null
 }
 
 export interface TopologyEdge {

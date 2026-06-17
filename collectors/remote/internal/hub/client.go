@@ -21,10 +21,12 @@ import (
 
 // DeviceConfig is the full device list returned by the hub.
 type DeviceConfig struct {
-	CollectorID string   `json:"collector_id"`
-	Timezone    string   `json:"timezone"` // collector-level IANA timezone
-	Devices     []Device `json:"devices"`
-	GeneratedAt string   `json:"generated_at"`
+	CollectorID      string   `json:"collector_id"`
+	Timezone         string   `json:"timezone"`           // collector-level IANA timezone
+	StateIntervalS   int      `json:"state_interval_s"`   // fast-path state poll cadence (BGP/OSPF/ISIS)
+	CounterIntervalS int      `json:"counter_interval_s"` // slow-path counter/topology poll cadence
+	Devices          []Device `json:"devices"`
+	GeneratedAt      string   `json:"generated_at"`
 }
 
 // Device represents a single monitored device assigned to this collector.
@@ -171,10 +173,16 @@ func (c *Client) PostConfigBackup(ctx context.Context, deviceID, configText, met
 	}, nil)
 }
 
-// PostBGPSessions sends a batch of BGP session state records to the hub.
-// Each record must contain a device_id field plus the BGP peer fields.
-func (c *Client) PostBGPSessions(ctx context.Context, sessions []map[string]any) error {
-	return c.postJSON(ctx, "/api/v1/collectors/bgp-sessions", sessions, nil)
+// PostBGPSessions sends one device's current BGP session list to the hub,
+// including when empty. An empty list tells the hub this device now has
+// zero BGP sessions, so any previously-reported sessions for it should be
+// marked stale (session_state='idle').
+func (c *Client) PostBGPSessions(ctx context.Context, deviceID string, sessions []map[string]any) error {
+	if sessions == nil {
+		sessions = []map[string]any{}
+	}
+	body := map[string]any{"device_id": deviceID, "sessions": sessions}
+	return c.postJSON(ctx, "/api/v1/collectors/bgp-sessions", body, nil)
 }
 
 // PostLogs sends a batch of collector operational log entries to the hub.
@@ -182,16 +190,28 @@ func (c *Client) PostLogs(ctx context.Context, entries []map[string]any) error {
 	return c.postJSON(ctx, "/api/v1/collectors/collector-logs", entries, nil)
 }
 
-// PostOSPFNeighbors sends a batch of OSPF neighbor state records to the hub.
-// Each record must contain a device_id field plus the OSPF neighbor fields.
-func (c *Client) PostOSPFNeighbors(ctx context.Context, neighbors []map[string]any) error {
-	return c.postJSON(ctx, "/api/v1/collectors/ospf-neighbors", neighbors, nil)
+// PostOSPFNeighbors sends one device's current OSPF neighbor list to the hub,
+// including when empty. An empty list tells the hub this device now has zero
+// OSPF neighbors, so any previously-reported neighbors for it should be
+// marked down.
+func (c *Client) PostOSPFNeighbors(ctx context.Context, deviceID string, neighbors []map[string]any) error {
+	if neighbors == nil {
+		neighbors = []map[string]any{}
+	}
+	body := map[string]any{"device_id": deviceID, "neighbors": neighbors}
+	return c.postJSON(ctx, "/api/v1/collectors/ospf-neighbors", body, nil)
 }
 
-// PostISISNeighbors sends a batch of IS-IS adjacency records to the hub.
-// Each record must contain a device_id field plus the adjacency fields.
-func (c *Client) PostISISNeighbors(ctx context.Context, neighbors []map[string]any) error {
-	return c.postJSON(ctx, "/api/v1/collectors/isis-neighbors", neighbors, nil)
+// PostISISNeighbors sends one device's current IS-IS adjacency list to the
+// hub, including when empty. An empty list tells the hub this device now has
+// zero adjacencies, so any previously-reported neighbors for it should be
+// marked down.
+func (c *Client) PostISISNeighbors(ctx context.Context, deviceID string, neighbors []map[string]any) error {
+	if neighbors == nil {
+		neighbors = []map[string]any{}
+	}
+	body := map[string]any{"device_id": deviceID, "neighbors": neighbors}
+	return c.postJSON(ctx, "/api/v1/collectors/isis-neighbors", body, nil)
 }
 
 // PostSTPPorts sends per-interface STP state records to the hub.
@@ -200,12 +220,37 @@ func (c *Client) PostSTPPorts(ctx context.Context, ports []map[string]any) error
 	return c.postJSON(ctx, "/api/v1/collectors/stp-ports", ports, nil)
 }
 
-// PostRoutes sends a batch of route table entries to the hub.
-// Each record must contain: device_id, destination, protocol, and optionally
-// next_hop, metric, interface_name. The hub upserts into route_entries and
-// removes any existing rows for that device not present in this batch.
-func (c *Client) PostRoutes(ctx context.Context, routes []map[string]any) error {
-	return c.postJSON(ctx, "/api/v1/collectors/routes", routes, nil)
+// PostAddresses sends a flat list of address records to the hub. Records with an
+// ip_address are ARP/ND entries; records with only mac_address are FDB entries.
+func (c *Client) PostAddresses(ctx context.Context, records []map[string]any) error {
+	return c.postJSON(ctx, "/api/v1/collectors/addresses", records, nil)
+}
+
+// PostDeviceInventory sends [{device_id, serial_number}] records to the hub.
+func (c *Client) PostDeviceInventory(ctx context.Context, records []map[string]any) error {
+	return c.postJSON(ctx, "/api/v1/collectors/device-inventory", records, nil)
+}
+
+// PostVLANs sends a flat list of VLAN records to the hub. Each record is either
+// a VLAN definition ({device_id, vlan_id, name}) or a per-interface membership
+// ({device_id, vlan_id, if_name, tagged}). The hub upserts vlans and replaces
+// the device's interface_vlans.
+func (c *Client) PostVLANs(ctx context.Context, records []map[string]any) error {
+	return c.postJSON(ctx, "/api/v1/collectors/vlans", records, nil)
+}
+
+// PostRoutes sends one device's current route table to the hub, including
+// when empty. An empty list tells the hub this device's routing table is
+// currently empty; the hub upserts whatever rows ARE present and removes any
+// previously-reported rows for that device not present in this batch.
+// Each record must contain: destination, protocol, and optionally next_hop,
+// metric, interface_name.
+func (c *Client) PostRoutes(ctx context.Context, deviceID string, routes []map[string]any) error {
+	if routes == nil {
+		routes = []map[string]any{}
+	}
+	body := map[string]any{"device_id": deviceID, "routes": routes}
+	return c.postJSON(ctx, "/api/v1/collectors/routes", body, nil)
 }
 
 // PostEngineIDs sends SNMP engine IDs discovered via v3 USM handshake to the hub.

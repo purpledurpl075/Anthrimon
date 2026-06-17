@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, IPvAnyAddress, field_validator
@@ -154,3 +155,27 @@ class DeviceListRead(BaseModel):
     site_id: Optional[uuid.UUID] = None
     tags: list[Any] = []
     is_active: bool
+
+
+class BulkAction(str, Enum):
+    add_tag = "add_tag"
+    remove_tag = "remove_tag"
+    set_site = "set_site"
+    set_collector = "set_collector"
+    set_credential = "set_credential"
+    set_polling_interval = "set_polling_interval"
+    delete = "delete"
+
+
+class BulkDeviceRequest(BaseModel):
+    device_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    action: BulkAction
+    tag: Optional[str] = None
+    site_id: Optional[uuid.UUID] = None
+    collector_id: Optional[uuid.UUID] = None
+    credential_id: Optional[uuid.UUID] = None
+    polling_interval_s: Optional[int] = Field(default=None, ge=10, le=86400)
+
+
+class BulkDeviceResponse(BaseModel):
+    updated: int

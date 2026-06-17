@@ -36,7 +36,7 @@ import (
 	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/tunnel"
 )
 
-const version = "0.3.18"
+const version = "0.3.40"
 
 // capabilities lists every feature this binary supports.  Sent on bootstrap
 // and on every heartbeat so the hub always reflects the running binary.
@@ -551,6 +551,8 @@ func refreshDevices(
 	flowCol.UpdateDevices(byIP)
 	syslogCol.UpdateDevices(byIP)
 	syslogCol.SetTimezone(devCfg.Timezone)
+	restCol.SetIntervals(devCfg.StateIntervalS, devCfg.CounterIntervalS)
+	eapiCol.SetIntervals(devCfg.StateIntervalS, devCfg.CounterIntervalS)
 
 	logger.Info().
 		Int("devices", len(devCfg.Devices)).

@@ -41,7 +41,9 @@ type SNMPConfig struct {
 
 type PollingConfig struct {
 	DefaultIntervalS     int `yaml:"default_interval_s"`
-	HealthMultiplier     int `yaml:"health_multiplier"`
+	StateIntervalS       int `yaml:"state_interval_s"`
+	HealthIntervalS      int `yaml:"health_interval_s"`
+	HealthMultiplier     int `yaml:"health_multiplier"` // kept for config-file compat; no longer used
 	DeviceRefreshS       int `yaml:"device_refresh_s"`
 	MaxConcurrentDevices int `yaml:"max_concurrent_devices"`
 }
@@ -61,7 +63,7 @@ func defaults() Config {
 	return Config{
 		Database:   DatabaseConfig{MaxConns: 5, MinConns: 1},
 		SNMP:       SNMPConfig{TimeoutSeconds: 10, Retries: 3, MaxOids: 60, MaxRepetitions: 25},
-		Polling:    PollingConfig{DefaultIntervalS: 60, HealthMultiplier: 5, DeviceRefreshS: 300, MaxConcurrentDevices: 500},
+		Polling:    PollingConfig{DefaultIntervalS: 60, StateIntervalS: 15, HealthIntervalS: 60, HealthMultiplier: 5, DeviceRefreshS: 300, MaxConcurrentDevices: 500},
 		Metrics:    MetricsConfig{VictoriaMetricsURL: "http://localhost:8428", FlushInterval: 10 * time.Second, BatchSize: 500},
 		Log:        LogConfig{Level: "info"},
 	}
@@ -111,9 +113,11 @@ func applyEnv(cfg *Config) {
 	if v := env("ANTHRIMON_ENCRYPTION_KEY");          v != "" { cfg.Encryption.Key = v }
 	if v := env("SNMP_SNMP_TIMEOUT_SECONDS");         v != "" { cfg.SNMP.TimeoutSeconds = atoi(v, cfg.SNMP.TimeoutSeconds) }
 	if v := env("SNMP_SNMP_RETRIES");                 v != "" { cfg.SNMP.Retries = atoi(v, cfg.SNMP.Retries) }
-	if v := env("SNMP_POLLING_DEFAULT_INTERVAL_S");   v != "" { cfg.Polling.DefaultIntervalS = atoi(v, cfg.Polling.DefaultIntervalS) }
-	if v := env("SNMP_POLLING_HEALTH_MULTIPLIER");    v != "" { cfg.Polling.HealthMultiplier = atoi(v, cfg.Polling.HealthMultiplier) }
-	if v := env("SNMP_POLLING_DEVICE_REFRESH_S");     v != "" { cfg.Polling.DeviceRefreshS = atoi(v, cfg.Polling.DeviceRefreshS) }
+	if v := env("SNMP_POLLING_DEFAULT_INTERVAL_S");     v != "" { cfg.Polling.DefaultIntervalS = atoi(v, cfg.Polling.DefaultIntervalS) }
+	if v := env("SNMP_POLLING_STATE_INTERVAL_S");       v != "" { cfg.Polling.StateIntervalS = atoi(v, cfg.Polling.StateIntervalS) }
+	if v := env("SNMP_POLLING_HEALTH_INTERVAL_S");      v != "" { cfg.Polling.HealthIntervalS = atoi(v, cfg.Polling.HealthIntervalS) }
+	if v := env("SNMP_POLLING_HEALTH_MULTIPLIER");      v != "" { cfg.Polling.HealthMultiplier = atoi(v, cfg.Polling.HealthMultiplier) }
+	if v := env("SNMP_POLLING_DEVICE_REFRESH_S");       v != "" { cfg.Polling.DeviceRefreshS = atoi(v, cfg.Polling.DeviceRefreshS) }
 	if v := env("SNMP_POLLING_MAX_CONCURRENT_DEVICES"); v != "" { cfg.Polling.MaxConcurrentDevices = atoi(v, cfg.Polling.MaxConcurrentDevices) }
 	if v := env("SNMP_METRICS_VICTORIAMETRICS_URL");  v != "" { cfg.Metrics.VictoriaMetricsURL = v }
 	if v := env("SNMP_LOG_LEVEL");                    v != "" { cfg.Log.Level = v }

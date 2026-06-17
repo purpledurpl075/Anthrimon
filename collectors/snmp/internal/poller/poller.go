@@ -18,22 +18,26 @@ import (
 
 // PollResult carries all results from one complete poll cycle for a device.
 type PollResult struct {
-	DeviceID        uuid.UUID
-	SysInfo         *model.DeviceInfo            // nil if not yet polled or failed
-	Interfaces      []*model.InterfaceResult
-	Health          *model.HealthResult          // nil if health poll not run this cycle
-	LLDPNeighbors   []*model.LLDPNeighbor        // nil if not polled this cycle
-	CDPNeighbors    []*model.CDPNeighbor         // nil if not polled this cycle
-	OSPFNeighbours  []*model.OSPFNeighbour       // nil if not polled this cycle
-	ISISAdjacencies []*model.ISISAdjacency       // nil if not polled this cycle
-	BGPSessions     []*model.BGPSession          // nil if not polled this cycle
-	RouteEntries    []*model.RouteEntry          // nil if not polled this cycle
-	ARPEntries      []*model.ARPEntry            // nil if not polled this cycle
-	MACEntries      []*model.MACEntry            // nil if not polled this cycle
-	VLANs           []*model.VLANResult          // nil if not polled this cycle
-	InterfaceVLANs  []*model.InterfaceVLANResult // nil if not polled this cycle
-	STPPorts        []*model.STPPortResult       // nil if not polled this cycle
-	ProbeResult     *model.ProbeResult           // nil if probe not run or unavailable
+	DeviceID          uuid.UUID
+	SysInfo           *model.DeviceInfo // nil if not yet polled or failed
+	Interfaces        []*model.InterfaceResult
+	StateOnly         bool                         // true = Interfaces contains state fields only (no counters); use upsertInterfaceState
+	Health            *model.HealthResult          // nil if health poll not run this cycle
+	LLDPNeighbors     []*model.LLDPNeighbor        // nil if not polled this cycle
+	CDPNeighbors      []*model.CDPNeighbor         // nil if not polled this cycle
+	OSPFNeighbours    []*model.OSPFNeighbour       // nil = poll didn't run/errored; non-nil (even empty) = polled successfully
+	ISISAdjacencies   []*model.ISISAdjacency       // nil = poll didn't run/errored; non-nil (even empty) = polled successfully
+	ISISAreas         []*model.ISISArea            // nil if not polled this cycle
+	ISISCircuitLevels []*model.ISISCircuitLevel    // nil if not polled this cycle
+	ISISLSPs          []*model.ISISLSP             // nil if not polled this cycle
+	BGPSessions       []*model.BGPSession          // nil = poll didn't run/errored; non-nil (even empty) = polled successfully
+	RouteEntries      []*model.RouteEntry          // nil = poll didn't run/errored; non-nil (even empty) = polled successfully
+	ARPEntries        []*model.ARPEntry            // nil if not polled this cycle
+	MACEntries        []*model.MACEntry            // nil if not polled this cycle
+	VLANs             []*model.VLANResult          // nil if not polled this cycle
+	InterfaceVLANs    []*model.InterfaceVLANResult // nil if not polled this cycle
+	STPPorts          []*model.STPPortResult       // nil if not polled this cycle
+	ProbeResult       *model.ProbeResult           // nil if probe not run or unavailable
 }
 
 // ResultHandler is a callback invoked after each completed poll cycle.
@@ -173,32 +177,42 @@ func (m *Manager) runDevice(ctx context.Context, dev model.DeviceRow, prober *Pr
 	}
 
 	timeout := time.Duration(m.cfg.SNMP.TimeoutSeconds) * time.Second
-	pollInterval := time.Duration(dev.PollingIntervalS) * time.Second
-	if pollInterval <= 0 {
-		pollInterval = time.Duration(m.cfg.Polling.DefaultIntervalS) * time.Second
+	counterInterval := time.Duration(dev.PollingIntervalS) * time.Second
+	if counterInterval <= 0 {
+		counterInterval = time.Duration(m.cfg.Polling.DefaultIntervalS) * time.Second
 	}
-	healthInterval := pollInterval * time.Duration(m.cfg.Polling.HealthMultiplier)
+	stateInterval := time.Duration(m.cfg.Polling.StateIntervalS) * time.Second
+	if stateInterval <= 0 || stateInterval >= counterInterval {
+		stateInterval = counterInterval / 4
+	}
+	healthInterval := time.Duration(m.cfg.Polling.HealthIntervalS) * time.Second
+	if healthInterval <= 0 {
+		healthInterval = counterInterval
+	}
 
 	backoff := client.NewBackoff(60)
 	var session *client.Session
 	var currentProfile *vendor.Profile
 	var lastSysUpTime uint32
-	ifByIndex := make(map[int]string) // shared between ifaceTicker and healthTicker
+	ifByIndex := make(map[int]string) // shared between stateTicker and counterTicker
 
-	// Stagger startup across the poll interval to avoid thundering herd on launch.
-	stagger := time.Duration(rand.Int63n(int64(pollInterval)))
+	// Stagger startup across the counter poll interval to avoid thundering herd on launch.
+	stagger := time.Duration(rand.Int63n(int64(counterInterval)))
 	if client.SleepOrCancel(ctx, stagger) {
 		return
 	}
 
-	ifaceTicker := time.NewTicker(pollInterval)
-	// Offset health ticker by half a poll interval so it never fires at the
-	// same instant as the interface ticker (avoids select starvation when
-	// healthInterval is an exact multiple of pollInterval).
-	healthTicker := time.NewTicker(healthInterval + pollInterval/2)
+	// stateTicker: fast-path for state-change detection (BGP/OSPF/ISIS/interface oper).
+	stateTicker := time.NewTicker(stateInterval)
+	// counterTicker: full interface + topology + route polls at the slower interval.
+	counterTicker := time.NewTicker(counterInterval)
+	// Offset health ticker by half a counter interval so it never fires at the
+	// same instant as the counter ticker (avoids select starvation).
+	healthTicker := time.NewTicker(healthInterval + counterInterval/2)
 	// Probe ticker runs independently of SNMP — fires even when SNMP is broken.
 	probeTicker := time.NewTicker(ProbeInterval)
-	defer ifaceTicker.Stop()
+	defer stateTicker.Stop()
+	defer counterTicker.Stop()
 	defer healthTicker.Stop()
 	defer probeTicker.Stop()
 
@@ -260,13 +274,88 @@ func (m *Manager) runDevice(ctx context.Context, dev model.DeviceRow, prober *Pr
 			session.Close()
 			return
 
-		case <-ifaceTicker.C:
-			result := &PollResult{DeviceID: dev.ID}
+		case <-stateTicker.C:
+			// Fast-path: state-change polls only. Uses a lightweight walk of
+			// per-column subtrees (not the full ifTable) to minimise SNMP traffic
+			// at the higher 15 s cadence.
+			stateResult := &PollResult{DeviceID: dev.ID, StateOnly: true}
 
-			// Only fetch sysUpTime — full PollSysInfo runs on connect/reconnect only.
-			if ticks, err := PollSysUpTime(session); err == nil {
+			// sysUpTime acts as the canary — failure means SNMP is broken.
+			if ticks, err := PollSysUpTime(session); err != nil {
+				log.Warn().Err(err).Msg("sysuptime poll failed; reconnecting")
+				session.Close()
+				if !connectAndSysInfo() {
+					return
+				}
+				continue
+			} else {
 				lastSysUpTime = ticks
 			}
+
+			if ifaces, err := PollInterfaceState(session, dev.ID); err != nil {
+				log.Warn().Err(err).Msg("interface state poll failed (non-fatal)")
+			} else {
+				stateResult.Interfaces = ifaces
+				for _, iface := range ifaces {
+					name := iface.IfName
+					if name == "" {
+						name = iface.IfDescr
+					}
+					ifByIndex[iface.IfIndex] = name
+				}
+			}
+
+			if currentProfile == nil || !currentProfile.SkipOSPF {
+				if ospf, err := PollOSPFNeighbours(session, dev.ID, ifByIndex); err != nil {
+					log.Warn().Err(err).Msg("ospf poll failed (non-fatal)")
+				} else if ospf != nil {
+					// nil means the MIB walk returned 0 PDUs (SNMP hiccup or no OSPF
+					// configured). Skip the write entirely — the writer's orphan-mark
+					// would otherwise set every existing neighbour to 'down' for a
+					// full poll cycle, creating false-positive alerts.
+					stateResult.OSPFNeighbours = ospf
+				}
+			}
+
+			if currentProfile == nil || !currentProfile.SkipISIS {
+				if isis, err := PollISISAdjacencies(session, dev.ID, ifByIndex, lastSysUpTime); err != nil {
+					log.Warn().Err(err).Msg("isis poll failed (non-fatal)")
+				} else {
+					if isis == nil {
+						isis = []*model.ISISAdjacency{}
+					}
+					stateResult.ISISAdjacencies = isis
+				}
+
+				if areas, err := PollISISAreas(session, dev.ID); err != nil {
+					log.Warn().Err(err).Msg("isis areas poll failed (non-fatal)")
+				} else if len(areas) > 0 {
+					stateResult.ISISAreas = areas
+				}
+
+				if circLevels, err := PollISISCircuitLevels(session, dev.ID, ifByIndex); err != nil {
+					log.Warn().Err(err).Msg("isis circuit level poll failed (non-fatal)")
+				} else if len(circLevels) > 0 {
+					stateResult.ISISCircuitLevels = circLevels
+				}
+			}
+
+			if currentProfile == nil || !currentProfile.SkipBGP {
+				if bgp, err := PollBGPSessions(session, dev.ID); err != nil {
+					log.Warn().Err(err).Msg("bgp poll failed (non-fatal)")
+				} else if bgp != nil {
+					// nil means the MIB walk returned 0 PDUs (SNMP hiccup or BGP not
+					// configured). Skip the write — the writer's orphan-mark would
+					// otherwise idle every session for a full poll cycle.
+					stateResult.BGPSessions = bgp
+				}
+			}
+
+			m.emit(ctx, log, stateResult)
+
+		case <-counterTicker.C:
+			// Slow-path: full interface counters + topology + route tables.
+			counterResult := &PollResult{DeviceID: dev.ID}
 
 			ifaces, err := PollInterfaces(session, dev.ID, lastSysUpTime)
 			if err != nil {
@@ -277,9 +366,9 @@ func (m *Manager) runDevice(ctx context.Context, dev model.DeviceRow, prober *Pr
 				}
 				continue
 			}
-			result.Interfaces = ifaces
+			counterResult.Interfaces = ifaces
 
-			// Refresh the shared ifIndex → ifName map used by address/CDP pollers.
+			// Refresh the shared ifIndex → ifName map (full poll is authoritative).
 			ifByIndex = make(map[int]string, len(ifaces))
 			for _, iface := range ifaces {
 				name := iface.IfName
@@ -292,78 +381,65 @@ func (m *Manager) runDevice(ctx context.Context, dev model.DeviceRow, prober *Pr
 			if lldp, err := PollLLDPNeighbors(session, dev.ID); err != nil {
 				log.Warn().Err(err).Msg("lldp poll failed (non-fatal)")
 			} else {
-				result.LLDPNeighbors = lldp
+				counterResult.LLDPNeighbors = lldp
 			}
 
 			if cdp, err := PollCDPNeighbors(session, dev.ID, ifByIndex); err != nil {
 				log.Warn().Err(err).Msg("cdp poll failed (non-fatal)")
 			} else {
-				result.CDPNeighbors = cdp
-			}
-
-			if currentProfile == nil || !currentProfile.SkipOSPF {
-				if ospf, err := PollOSPFNeighbours(session, dev.ID, ifByIndex); err != nil {
-					log.Warn().Err(err).Msg("ospf poll failed (non-fatal)")
-				} else if len(ospf) > 0 {
-					result.OSPFNeighbours = ospf
-				}
-			}
-
-			if currentProfile == nil || !currentProfile.SkipISIS {
-				if isis, err := PollISISAdjacencies(session, dev.ID, ifByIndex, lastSysUpTime); err != nil {
-					log.Warn().Err(err).Msg("isis poll failed (non-fatal)")
-				} else if len(isis) > 0 {
-					result.ISISAdjacencies = isis
-				}
-			}
-
-			if currentProfile == nil || !currentProfile.SkipBGP {
-				if bgp, err := PollBGPSessions(session, dev.ID); err != nil {
-					log.Warn().Err(err).Msg("bgp poll failed (non-fatal)")
-				} else if len(bgp) > 0 {
-					result.BGPSessions = bgp
-				}
+				counterResult.CDPNeighbors = cdp
 			}
 
 			if routes, err := PollRouteTable(session, dev.ID, ifByIndex); err != nil {
 				log.Warn().Err(err).Msg("route table poll failed (non-fatal)")
-			} else if len(routes) > 0 {
-				result.RouteEntries = routes
+			} else {
+				if routes == nil {
+					routes = []*model.RouteEntry{}
+				}
+				counterResult.RouteEntries = routes
 			}
 
 			if arp, err := PollARPTable(session, dev.ID, ifByIndex); err != nil {
 				log.Warn().Err(err).Msg("arp poll failed (non-fatal)")
 			} else {
-				result.ARPEntries = arp
+				counterResult.ARPEntries = arp
 			}
 
 			if macs, err := PollMACTable(session, dev.ID, ifByIndex); err != nil {
 				log.Warn().Err(err).Msg("mac poll failed (non-fatal)")
 			} else {
-				result.MACEntries = macs
+				counterResult.MACEntries = macs
 			}
 
 			if currentProfile != nil && currentProfile.HpicfVlan {
 				if vlans, ifvlans, err := PollVLANsHPICF(session, dev.ID); err != nil {
 					log.Warn().Err(err).Msg("hpicf vlan poll failed (non-fatal)")
 				} else {
-					result.VLANs = vlans
-					result.InterfaceVLANs = ifvlans
+					counterResult.VLANs = vlans
+					counterResult.InterfaceVLANs = ifvlans
 				}
 			} else if vlans, ifvlans, err := PollVLANs(session, dev.ID, ifByIndex); err != nil {
 				log.Warn().Err(err).Msg("vlan poll failed (non-fatal)")
 			} else {
-				result.VLANs = vlans
-				result.InterfaceVLANs = ifvlans
+				counterResult.VLANs = vlans
+				counterResult.InterfaceVLANs = ifvlans
 			}
 
 			if stp, err := PollSTPPorts(session, dev.ID, ifByIndex); err != nil {
 				log.Warn().Err(err).Msg("stp poll failed (non-fatal)")
 			} else {
-				result.STPPorts = stp
+				counterResult.STPPorts = stp
 			}
 
-			m.emit(ctx, log, result)
+			if currentProfile == nil || !currentProfile.SkipISIS {
+				if lsps, err := PollISISLSPDatabase(session, dev.ID); err != nil {
+					log.Warn().Err(err).Msg("isis lsp database poll failed (non-fatal)")
+				} else if len(lsps) > 0 {
+					counterResult.ISISLSPs = lsps
+				}
+			}
+
+			m.emit(ctx, log, counterResult)
 
 		case <-healthTicker.C:
 			health, err := PollHealth(session, dev.ID, currentProfile, lastSysUpTime)
@@ -418,4 +494,3 @@ type DeviceSource interface {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-

@@ -24,7 +24,10 @@ from ..models.interface import ARPEntry, CDPNeighbor, Interface, LLDPNeighbor, M
 from ..models.tenant import User
 from ..schemas.alert import AlertRead
 from ..schemas.common import PaginatedResponse
-from ..schemas.device import DeviceCreate, DeviceListRead, DeviceRead, DeviceUpdate
+from ..schemas.device import (
+    BulkAction, BulkDeviceRequest, BulkDeviceResponse,
+    DeviceCreate, DeviceListRead, DeviceRead, DeviceUpdate,
+)
 from ..schemas.interface import InterfaceRead
 from ..snmp_probe import probe_v2c, probe_v3, VENDOR_DEVICE_TYPE as _VENDOR_DEVICE_TYPE
 
@@ -397,6 +400,22 @@ async def baselines_status(
     }
 
 
+# ── Sites (must be before /{device_id} to avoid path-param shadowing) ───────────
+
+@router.get("/sites", summary="List sites for this tenant (id + name only)")
+async def list_device_sites(
+    current_user: User = Depends(require_role("admin", "superadmin", "operator")),
+    db: AsyncSession = Depends(get_db),
+) -> list[dict]:
+    from ..models.site import Site
+    rows = (await db.execute(
+        select(Site.id, Site.name)
+        .where(Site.tenant_id == current_user.tenant_id)
+        .order_by(Site.name)
+    )).all()
+    return [{"id": str(r.id), "name": r.name} for r in rows]
+
+
 # ── Get one ────────────────────────────────────────────────────────────────────
 
 @router.get("/{device_id}", response_model=DeviceRead, summary="Get device details")
@@ -558,6 +577,145 @@ async def delete_device(
     await db.delete(device)
     await db.commit()
     logger.info("device_deleted", device_id=str(device_id))
+
+
+# ── Bulk operations ────────────────────────────────────────────────────────────
+
+@router.post("/bulk", response_model=BulkDeviceResponse, summary="Apply an action to multiple devices")
+async def bulk_device_action(
+    body: BulkDeviceRequest,
+    current_user: User = Depends(require_role("admin", "superadmin", "operator")),
+    db: AsyncSession = Depends(get_db),
+) -> BulkDeviceResponse:
+    if body.action == BulkAction.delete and current_user.role not in ("admin", "superadmin"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only admins can bulk-delete devices",
+        )
+
+    devices = (await db.execute(
+        select(Device).where(
+            Device.id.in_(body.device_ids),
+            Device.tenant_id == current_user.tenant_id,
+        )
+    )).scalars().all()
+    if not devices:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No matching devices")
+
+    ids = [d.id for d in devices]
+
+    if body.action in (BulkAction.add_tag, BulkAction.remove_tag):
+        tag = (body.tag or "").strip()
+        if not tag:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="'tag' is required")
+        for device in devices:
+            current_tags = list(device.tags or [])
+            if body.action == BulkAction.add_tag:
+                if tag not in current_tags:
+                    current_tags.append(tag)
+            else:
+                current_tags = [t for t in current_tags if t != tag]
+            device.tags = current_tags
+        await db.commit()
+
+    elif body.action == BulkAction.set_site:
+        if body.site_id is not None:
+            from ..models.site import Site
+            site = (await db.execute(
+                select(Site).where(Site.id == body.site_id, Site.tenant_id == current_user.tenant_id)
+            )).scalar_one_or_none()
+            if site is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
+        await db.execute(
+            Device.__table__.update().where(Device.id.in_(ids)).values(site_id=body.site_id)
+        )
+        await db.commit()
+
+    elif body.action == BulkAction.set_collector:
+        from ..models.site import RemoteCollector
+        if body.collector_id is not None:
+            collector = (await db.execute(
+                select(RemoteCollector).where(
+                    RemoteCollector.id == body.collector_id,
+                    RemoteCollector.tenant_id == current_user.tenant_id,
+                )
+            )).scalar_one_or_none()
+            if collector is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Collector not found")
+
+        touched_collector_ids = {d.collector_id for d in devices if d.collector_id}
+        if body.collector_id:
+            touched_collector_ids.add(body.collector_id)
+
+        await db.execute(
+            Device.__table__.update().where(Device.id.in_(ids)).values(collector_id=body.collector_id)
+        )
+        await db.commit()
+
+        if touched_collector_ids:
+            collectors = (await db.execute(
+                select(RemoteCollector).where(RemoteCollector.id.in_(touched_collector_ids))
+            )).scalars().all()
+            for c in collectors:
+                if c.wg_ip and c.api_key_hash:
+                    asyncio.create_task(_nudge_collector(str(c.wg_ip), c.api_key_hash))
+
+    elif body.action == BulkAction.set_polling_interval:
+        if body.polling_interval_s is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="'polling_interval_s' is required")
+        await db.execute(
+            Device.__table__.update().where(Device.id.in_(ids)).values(polling_interval_s=body.polling_interval_s)
+        )
+        await db.commit()
+
+    elif body.action == BulkAction.set_credential:
+        if body.credential_id is None:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="'credential_id' is required")
+        cred = (await db.execute(
+            select(Credential).where(
+                Credential.id == body.credential_id,
+                Credential.tenant_id == current_user.tenant_id,
+            )
+        )).scalar_one_or_none()
+        if cred is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Credential not found")
+
+        already_linked = set((await db.execute(
+            select(DeviceCredential.device_id).where(
+                DeviceCredential.device_id.in_(ids),
+                DeviceCredential.credential_id == body.credential_id,
+            )
+        )).scalars().all())
+
+        for device_id in ids:
+            if device_id not in already_linked:
+                db.add(DeviceCredential(device_id=device_id, credential_id=body.credential_id, priority=0))
+        await db.commit()
+
+        if cred.type in ("snmp_v3", "snmp_v2c"):
+            snmp_v = "v3" if cred.type == "snmp_v3" else "v2c"
+            await db.execute(
+                Device.__table__.update().where(Device.id.in_(ids)).values(snmp_version=snmp_v)
+            )
+            await db.commit()
+
+        if cred.type == "snmp_v3":
+            from .collectors import _push_trap_config
+            collector_ids = {d.collector_id for d in devices}
+            for collector_id in collector_ids:
+                asyncio.create_task(_push_trap_config(
+                    str(collector_id) if collector_id else None, str(current_user.tenant_id)
+                ))
+
+    elif body.action == BulkAction.delete:
+        await db.execute(
+            Device.__table__.delete().where(Device.id.in_(ids))
+        )
+        await db.commit()
+
+    updated = len(devices)
+    logger.info("devices_bulk_action", action=body.action.value, count=updated)
+    return BulkDeviceResponse(updated=updated)
 
 
 # ── Sub-resources ──────────────────────────────────────────────────────────────

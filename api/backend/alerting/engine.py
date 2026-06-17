@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import math
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,7 @@ from . import notify
 from .maintenance import device_in_maintenance, load_active_windows
 from .settings import get_effective_alerting_settings, load_platform_defaults
 from .suppression import SuppressionMap, compute_suppression_map
+from .ws_manager import manager as ws_manager
 from ..platform_health import (
     alert_engine_alerts_fired,
     alert_engine_alerts_suppressed,
@@ -32,6 +34,7 @@ from .evaluators import (
     eval_custom_oid, eval_ospf_state, eval_route_missing, eval_flow_bandwidth,
     eval_syslog_match, eval_bgp_session_down, eval_bgp_session_flapping,
     eval_bgp_prefix_drop, eval_device_latency, eval_snmp_trap, fetch_syslog_context,
+    eval_interface_discards, eval_isis_state, eval_config_change, eval_collector_offline,
     resolve_devices,
 )
 
@@ -120,8 +123,10 @@ def _build_title(rule: AlertRule, breach: Breach) -> str:
         "interface_flap":  f"interface flapping ({int(min(breach.value or 0, 1e9))} changes)",
         "temperature":     f"temperature {breach.value:.1f}°C" if breach.value is not None else "temperature high",
         "interface_errors":   f"interface errors ({int(breach.value) if breach.value and math.isfinite(breach.value) else 0})",
+        "interface_discards": f"interface discards ({int(breach.value) if breach.value and math.isfinite(breach.value) else 0})",
         "interface_util_pct": f"bandwidth {breach.value:.1f}%" if breach.value is not None else "bandwidth high",
         "ospf_state":      f"OSPF neighbor {breach.extra.get('neighbor','')} {breach.extra.get('ospf_state','')}",
+        "isis_state":      f"IS-IS adjacency {breach.extra.get('neighbor','')} {breach.extra.get('isis_state','')}",
         "uptime":          f"rebooted (uptime {int(breach.value) if breach.value and math.isfinite(breach.value) else 0}s)",
         "route_missing":    f"route {breach.extra.get('prefix', rule.custom_oid or '?')} missing",
         "flow_bandwidth":  f"flow bandwidth {breach.value / 1e6:.1f} Mbps ({breach.extra.get('flow_filter','')}) high" if breach.value is not None else "flow bandwidth high",
@@ -140,6 +145,7 @@ def _build_title(rule: AlertRule, breach: Breach) -> str:
             if breach.extra.get("metric") == "rtt_ms"
             else f"packet loss —% (threshold {breach.extra.get('threshold_pct','?')}%)"
         ),
+        "collector_offline": f"collector {breach.extra.get('collector_name','?')} offline",
     }
     return f"{base}: {metric_labels.get(rule.metric, rule.metric)}"
 
@@ -191,6 +197,7 @@ class AlertEngine:
                     pass
                 self._wake_event.clear()
                 pending: list[_PendingNotif] = []
+                dirty_tenants: set[uuid.UUID] = set()
                 async with AsyncSessionLocal() as db:
                     # Load platform-wide setting defaults once per cycle
                     platform = await load_platform_defaults(db)
@@ -198,7 +205,7 @@ class AlertEngine:
                     try:
                         import time as _time
                         _t0 = _time.monotonic()
-                        pending = await self._evaluate_all(db, platform)
+                        pending, dirty_tenants = await self._evaluate_all(db, platform)
                         await db.commit()
                         alert_engine_cycle_duration().observe(_time.monotonic() - _t0)
                     except Exception as exc:
@@ -214,6 +221,10 @@ class AlertEngine:
                 # Dispatch notifications after the commit — never inside the eval transaction.
                 for alert, rule, resolved in pending:
                     await _safe_dispatch(alert, rule, resolved=resolved)
+
+                # Push live updates to connected /alerts/ws clients.
+                for tid in dirty_tenants:
+                    await ws_manager.broadcast(tid, {"event": "alerts_changed"})
             except asyncio.CancelledError:
                 logger.info("alert_engine_stopped")
                 return
@@ -265,6 +276,8 @@ class AlertEngine:
                     if closed:
                         logger.info("auto_closed_stale_alerts", count=closed, days=auto_close_days, tenant_id=tid)
                     await db.commit()
+                if closed:
+                    await ws_manager.broadcast(uuid.UUID(tid), {"event": "alerts_changed"})
             except Exception as exc:
                 logger.error("housekeeping_error", error=str(exc), tenant_id=tid)
 
@@ -293,9 +306,12 @@ class AlertEngine:
                           ) AS to_close
                          WHERE a.id = to_close.id
                     """), {"lim": storm_limit, "tid": tid})
-                    if result.rowcount:
-                        logger.info("storm_protection_auto_resolved", count=result.rowcount, tenant_id=tid)
+                    storm_resolved = result.rowcount
+                    if storm_resolved:
+                        logger.info("storm_protection_auto_resolved", count=storm_resolved, tenant_id=tid)
                     await db.commit()
+                if storm_resolved:
+                    await ws_manager.broadcast(uuid.UUID(tid), {"event": "alerts_changed"})
             except Exception as exc:
                 logger.error("housekeeping_storm_resolve_error", error=str(exc), tenant_id=tid)
 
@@ -319,6 +335,7 @@ class AlertEngine:
                        AND NOT EXISTS (
                            SELECT 1 FROM alerts p
                             WHERE p.id = alerts.suppressed_by_alert_id
+                              AND p.tenant_id = alerts.tenant_id
                               AND p.status IN ('open','acknowledged')
                        )
                 """))
@@ -369,7 +386,7 @@ class AlertEngine:
                         stale_fps=len(stale),
                         remaining_fps=len(self._fp_last_seen))
 
-    async def _evaluate_all(self, db: AsyncSession, platform: dict | None = None) -> list[_PendingNotif]:
+    async def _evaluate_all(self, db: AsyncSession, platform: dict | None = None) -> tuple[list[_PendingNotif], set[uuid.UUID]]:
         rules = (await db.execute(
             select(AlertRule)
             .where(AlertRule.is_enabled == True)  # noqa: E712
@@ -409,7 +426,13 @@ class AlertEngine:
                 logger.error("effective_settings_error", tenant_id=tid, error=str(exc))
                 settings_by_tenant[tid] = platform
 
+        # Per-cycle device resolution cache. resolve_devices() is a pure read and
+        # devices don't change within a single cycle's snapshot, so rules sharing
+        # the same (tenant, selector) reuse one query instead of re-running it.
+        device_cache: dict[tuple[str, str], list[dict]] = {}
+
         pending: list[_PendingNotif] = []
+        dirty_tenants: set[uuid.UUID] = set()
         for rule in rules:
             rule_id_str = str(rule.id)  # capture before any potential failure
             # Use a savepoint so a failing rule only rolls back its own changes,
@@ -420,6 +443,8 @@ class AlertEngine:
                     db, rule, rules_by_metric.get(rule.metric, []), active_windows,
                     settings_by_tenant.get(str(rule.tenant_id), platform),
                     suppression=suppression_by_tenant.get(str(rule.tenant_id), SuppressionMap()),
+                    device_cache=device_cache,
+                    dirty_tenants=dirty_tenants,
                 )
                 await sp.commit()
                 pending.extend(rule_pending)
@@ -428,7 +453,7 @@ class AlertEngine:
                 logger.error("rule_eval_error", rule_id=rule_id_str, error=str(exc), exc_info=True)
 
         await self._purge_expired_windows(db)
-        return pending
+        return pending, dirty_tenants
 
     async def _purge_expired_windows(self, db: AsyncSession) -> None:
         """Delete one-time maintenance windows that have passed their end time."""
@@ -447,12 +472,23 @@ class AlertEngine:
                               peer_rules: Optional[list[AlertRule]] = None,
                               active_windows: Optional[list] = None,
                               platform: dict | None = None,
-                              suppression: Optional[SuppressionMap] = None) -> list[_PendingNotif]:
+                              suppression: Optional[SuppressionMap] = None,
+                              device_cache: Optional[dict] = None,
+                              dirty_tenants: Optional[set[uuid.UUID]] = None) -> list[_PendingNotif]:
         peer_rules = peer_rules or []
         active_windows = active_windows or []
         suppression = suppression or SuppressionMap()
+        dirty_tenants = dirty_tenants if dirty_tenants is not None else set()
         tenant_id = str(rule.tenant_id)
-        devices = await resolve_devices(db, tenant_id, rule.device_selector)
+
+        # Reuse the per-cycle device resolution for rules sharing a selector.
+        cache_key = (tenant_id, json.dumps(rule.device_selector, sort_keys=True, default=str))
+        if device_cache is not None and cache_key in device_cache:
+            devices = device_cache[cache_key]
+        else:
+            devices = await resolve_devices(db, tenant_id, rule.device_selector)
+            if device_cache is not None:
+                device_cache[cache_key] = devices
         if not devices:
             return []
 
@@ -509,10 +545,15 @@ class AlertEngine:
                 if b: breaches.append(b)
             elif rule.metric == "interface_errors":
                 breaches.extend(await eval_interface_errors(db, device, rule.threshold or 100))
+            elif rule.metric == "interface_discards":
+                breaches.extend(await eval_interface_discards(db, device, rule.threshold or 100))
             elif rule.metric == "interface_util_pct":
                 breaches.extend(await eval_interface_util(db, device, rule.threshold or 80))
             elif rule.metric == "ospf_state":
                 b = await eval_ospf_state(db, device)
+                if b: breaches.append(b)
+            elif rule.metric == "isis_state":
+                b = await eval_isis_state(db, device)
                 if b: breaches.append(b)
             elif rule.metric == "custom_oid" and rule.custom_oid:
                 b = await eval_custom_oid(db, device, rule.custom_oid,
@@ -552,6 +593,12 @@ class AlertEngine:
                 loss_thresh = float(rule.extra_conditions[0].get("threshold", 10.0)) \
                               if rule.extra_conditions else 10.0
                 breaches.extend(await eval_device_latency(device, rtt_thresh, loss_thresh))
+            elif rule.metric == "config_change":
+                b = await eval_config_change(db, device, rule.duration_seconds or 300)
+                if b: breaches.append(b)
+            elif rule.metric == "collector_offline":
+                b = await eval_collector_offline(db, device)
+                if b: breaches.append(b)
 
             # Extra conditions — ALL must also be true (AND logic)
             if len(breaches) > pre_breach_count and rule.extra_conditions:
@@ -711,6 +758,7 @@ class AlertEngine:
                                 last_notified_at=now,
                             )
                             db.add(storm_alert)
+                            dirty_tenants.add(rule.tenant_id)
                             pending.append((storm_alert, rule, False))
                         continue
 
@@ -746,6 +794,7 @@ class AlertEngine:
                     suppressed_by_alert_id=parent_aid,
                 )
                 db.add(alert)
+                dirty_tenants.add(rule.tenant_id)
                 if not suppressed:
                     logger.info("alert_fired", rule=rule.name, device=breach.device_name,
                                 iface=breach.interface_name, severity=rule.severity)
@@ -764,6 +813,7 @@ class AlertEngine:
                     existing.status = "open"
                     existing.suppressed_by_alert_id = None
                     existing.last_notified_at = now
+                    dirty_tenants.add(rule.tenant_id)
                     pending.append((existing, rule, False))
             elif existing.status == "open":
                 # Parent fired AFTER this child was opened — retroactively suppress.
@@ -773,6 +823,7 @@ class AlertEngine:
                 if parent_aid is not None:
                     existing.status = "suppressed"
                     existing.suppressed_by_alert_id = parent_aid
+                    dirty_tenants.add(rule.tenant_id)
                     logger.info("alert_retro_suppressed",
                                 alert_id=str(existing.id),
                                 parent_id=str(parent_aid),
@@ -791,10 +842,17 @@ class AlertEngine:
                 )
             )).scalars().all()
             for alert in open_alerts:
+                fp = alert.fingerprint or ""
+                if fp not in breaching_fps:
+                    # Condition has cleared (entering the stable_for_seconds
+                    # countdown / about to resolve below) -- don't escalate
+                    # an alert that's about to be resolved.
+                    continue
                 age = (now - alert.triggered_at).total_seconds()
                 if age >= rule.escalation_seconds:
                     alert.severity = rule.escalation_severity
                     alert.last_notified_at = now
+                    dirty_tenants.add(rule.tenant_id)
                     logger.info("alert_escalated", alert_id=str(alert.id),
                                 to=rule.escalation_severity, rule=rule.name)
                     pending.append((alert, rule, False))
@@ -823,9 +881,10 @@ class AlertEngine:
                         pending.append((alert, rule, False))
                 continue
 
-            # Acknowledged alerts are not auto-resolved — operator must clear them
-            if alert.status == "acknowledged":
-                continue
+            # Acknowledged alerts auto-resolve too once the condition clears and
+            # stays clear (same stability gate as open alerts below) — otherwise
+            # an acked-then-cleared alert sits forever and silently absorbs any
+            # future recurrence via the fingerprint dedup check above.
 
             # Condition cleared — start or check the stable clock
             if rule.stable_for_seconds > 0:
@@ -838,6 +897,7 @@ class AlertEngine:
             # Resolve
             alert.status = "resolved"
             alert.resolved_at = now
+            dirty_tenants.add(rule.tenant_id)
             self._breach_since.pop(fp, None)
             self._clear_since.pop(fp, None)
             self._last_clear[fp] = now

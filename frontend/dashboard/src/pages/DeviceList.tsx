@@ -1,12 +1,15 @@
 import { useState, useMemo } from 'react'
-import { useQuery, useQueryClient } from '@tanstack/react-query'
-import { useNavigate } from 'react-router-dom'
-import { fetchDevices, createDevice } from '../api/devices'
+import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
+import { useNavigate, useSearchParams } from 'react-router-dom'
+import { fetchDevices, createDevice, fetchSites, bulkDeviceAction } from '../api/devices'
+import type { BulkAction, BulkDeviceRequest } from '../api/devices'
 import { fetchCredentials } from '../api/credentials'
 import { fetchCollectors } from '../api/collectors'
 import { fetchMaintenanceWindows } from '../api/maintenance'
 import { DeviceTypeIcon, DEVICE_TYPE_COLOR, DEVICE_TYPE_LABEL } from '../components/DeviceTypeIcon'
 import VendorBadge from '../components/VendorBadge'
+import SavedViewsMenu from '../components/SavedViewsMenu'
+import { useRole, hasRole } from '../hooks/useCurrentUser'
 import type { DeviceListItem } from '../api/types'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
@@ -60,7 +63,13 @@ function StatPill({ label, count, color, active, onClick }: {
 
 // ── Device card ────────────────────────────────────────────────────────────
 
-function DeviceCard({ device, inMaintenance }: { device: DeviceListItem; inMaintenance: boolean }) {
+function DeviceCard({ device, inMaintenance, selectable, selected, onToggle }: {
+  device: DeviceListItem
+  inMaintenance: boolean
+  selectable?: boolean
+  selected?: boolean
+  onToggle?: (id: string) => void
+}) {
   const navigate = useNavigate()
   const color   = DEVICE_TYPE_COLOR[device.device_type] ?? '#475569'
   const sc      = STATUS_COLOR[device.status]  ?? '#94a3b8'
@@ -72,6 +81,17 @@ function DeviceCard({ device, inMaintenance }: { device: DeviceListItem; inMaint
       className={`group relative bg-white border-l-4 ${border} rounded-xl border border-l-[4px] border-slate-200 px-5 py-4 cursor-pointer hover:shadow-md hover:-translate-y-px transition-all duration-150 flex items-center gap-4`}
       style={{ borderLeftColor: sc }}
     >
+      {/* Select checkbox */}
+      {selectable && (
+        <input
+          type="checkbox"
+          checked={!!selected}
+          onChange={() => onToggle?.(device.id)}
+          onClick={e => e.stopPropagation()}
+          className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 shrink-0"
+        />
+      )}
+
       {/* Icon */}
       <div
         className="w-10 h-10 rounded-xl flex items-center justify-center shrink-0"
@@ -296,14 +316,258 @@ function AddDeviceModal({ onClose }: AddDeviceModalProps) {
   )
 }
 
+// ── Bulk action modal ──────────────────────────────────────────────────────
+
+const BULK_ACTION_TITLE: Record<BulkAction, string> = {
+  add_tag:              'Add tag',
+  remove_tag:           'Remove tag',
+  set_site:             'Change site',
+  set_collector:        'Change collector',
+  set_credential:       'Apply credential',
+  set_polling_interval: 'Set polling interval',
+  delete:               'Delete devices',
+}
+
+interface BulkActionModalProps {
+  action: BulkAction
+  deviceIds: string[]
+  onClose: () => void
+  onDone: () => void
+}
+
+function BulkActionModal({ action, deviceIds, onClose, onDone }: BulkActionModalProps) {
+  const queryClient = useQueryClient()
+  const count = deviceIds.length
+  const isDelete = action === 'delete'
+
+  const [tag, setTag]                   = useState('')
+  const [siteId, setSiteId]             = useState('')
+  const [collectorId, setCollectorId]   = useState('')
+  const [credentialId, setCredentialId] = useState('')
+  const [pollingInterval, setPollingInterval] = useState(60)
+  const [formError, setFormError]       = useState('')
+
+  const { data: sites = [] } = useQuery({
+    queryKey: ['sites'],
+    queryFn:  () => fetchSites(),
+    enabled:  action === 'set_site',
+  })
+  const { data: collectors = [] } = useQuery({
+    queryKey: ['collectors'],
+    queryFn:  () => fetchCollectors(),
+    enabled:  action === 'set_collector',
+  })
+  const { data: credentials = [] } = useQuery({
+    queryKey: ['credentials'],
+    queryFn:  () => fetchCredentials(),
+    enabled:  action === 'set_credential',
+  })
+
+  const mutation = useMutation({
+    mutationFn: (body: BulkDeviceRequest) => bulkDeviceAction(body),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['devices'] })
+      onDone()
+    },
+  })
+
+  const apiError = (mutation.error as { response?: { data?: { detail?: string } } })
+    ?.response?.data?.detail
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault()
+    setFormError('')
+
+    const body: BulkDeviceRequest = { device_ids: deviceIds, action }
+    switch (action) {
+      case 'add_tag':
+      case 'remove_tag':
+        if (!tag.trim()) { setFormError('Tag is required'); return }
+        body.tag = tag.trim()
+        break
+      case 'set_site':
+        body.site_id = siteId || null
+        break
+      case 'set_collector':
+        body.collector_id = collectorId || null
+        break
+      case 'set_credential':
+        if (!credentialId) { setFormError('Select a credential'); return }
+        body.credential_id = credentialId
+        break
+      case 'set_polling_interval':
+        body.polling_interval_s = pollingInterval
+        break
+    }
+    mutation.mutate(body)
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div className="absolute inset-0 bg-black/40" onClick={onClose} />
+      <div className="relative z-10 bg-white rounded-2xl border border-slate-200 shadow-xl w-full max-w-md mx-4 p-6">
+        <div className="flex items-center justify-between mb-5">
+          <h2 className="text-base font-semibold text-slate-800">
+            {BULK_ACTION_TITLE[action]} &mdash; {count} device{count === 1 ? '' : 's'}
+          </h2>
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path d="M6 18 18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="space-y-4">
+
+          {(action === 'add_tag' || action === 'remove_tag') && (
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Tag</label>
+              <input
+                type="text"
+                autoFocus
+                value={tag}
+                onChange={e => setTag(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                placeholder="e.g. prod"
+              />
+            </div>
+          )}
+
+          {action === 'set_site' && (
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Site</label>
+              <select
+                value={siteId}
+                onChange={e => setSiteId(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">Unassigned</option>
+                {sites.map(s => (
+                  <option key={s.id} value={s.id}>{s.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {action === 'set_collector' && (
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Collector</label>
+              <select
+                value={collectorId}
+                onChange={e => setCollectorId(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">Hub (local)</option>
+                {collectors.map(c => (
+                  <option key={c.id} value={c.id}>{c.name}</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {action === 'set_credential' && (
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Credential</label>
+              <select
+                value={credentialId}
+                onChange={e => setCredentialId(e.target.value)}
+                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+              >
+                <option value="">Select a credential…</option>
+                {credentials.map(c => (
+                  <option key={c.id} value={c.id}>{c.name} ({c.type})</option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {action === 'set_polling_interval' && (
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">Polling interval (seconds)</label>
+              <input
+                type="number"
+                min={10}
+                max={86400}
+                value={pollingInterval}
+                onChange={e => setPollingInterval(Number(e.target.value))}
+                className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+              />
+              <p className="mt-1 text-[10px] text-slate-400">Between 10 and 86400 seconds.</p>
+            </div>
+          )}
+
+          {isDelete && (
+            <p className="text-xs text-red-700 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+              This will permanently delete {count} device{count === 1 ? '' : 's'} and all their history.
+              This cannot be undone.
+            </p>
+          )}
+
+          {(formError || apiError) && (
+            <p className="text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{formError || apiError}</p>
+          )}
+
+          <div className="flex items-center justify-end gap-3 pt-1">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-sm text-slate-600 border border-slate-200 rounded-lg hover:bg-slate-50 transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={mutation.isPending}
+              className={`px-4 py-2 text-sm font-medium text-white rounded-lg disabled:opacity-50 transition-colors ${
+                isDelete ? 'bg-red-600 hover:bg-red-700' : 'bg-blue-600 hover:bg-blue-700'
+              }`}
+            >
+              {mutation.isPending
+                ? 'Applying…'
+                : isDelete
+                  ? `Delete ${count} device${count === 1 ? '' : 's'}`
+                  : `Apply to ${count} device${count === 1 ? '' : 's'}`}
+            </button>
+          </div>
+
+        </form>
+      </div>
+    </div>
+  )
+}
+
 // ── Page ───────────────────────────────────────────────────────────────────
 
 type StatusFilter = 'all' | 'up' | 'down' | 'unreachable' | 'unknown'
 
 export default function DeviceList() {
-  const [search,        setSearch]        = useState('')
-  const [statusFilter,  setStatusFilter]  = useState<StatusFilter>('all')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const search       = searchParams.get('q') ?? ''
+  const statusFilter = (searchParams.get('status') as StatusFilter | null) ?? 'all'
   const [showAddModal,  setShowAddModal]  = useState(false)
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+  const [bulkAction, setBulkAction] = useState<BulkAction | null>(null)
+
+  const role = useRole()
+  const canBulk   = hasRole(role, 'operator')
+  const canDelete = hasRole(role, 'admin')
+
+  const setSearch = (q: string) => {
+    setSelected(new Set())
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (q === '') next.delete('q'); else next.set('q', q)
+      return next
+    })
+  }
+  const setStatusFilter = (s: StatusFilter) => {
+    setSelected(new Set())
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (s === 'all') next.delete('status'); else next.set('status', s)
+      return next
+    })
+  }
 
   const { data, isLoading, error } = useQuery({
     queryKey: ['devices'],
@@ -348,6 +612,16 @@ export default function DeviceList() {
     })
   }, [devices, statusFilter, search])
 
+  const toggle = (id: string) => setSelected(s => {
+    const next = new Set(s)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+  const toggleAll = () => setSelected(s =>
+    s.size === filtered.length ? new Set() : new Set(filtered.map(d => d.id))
+  )
+  const clearSelection = () => setSelected(new Set())
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -370,6 +644,8 @@ export default function DeviceList() {
           <h1 className="text-base font-semibold text-slate-800">Devices</h1>
           <p className="text-xs text-slate-400 mt-0.5">{data?.total ?? 0} in inventory</p>
         </div>
+        <div className="flex items-center gap-2">
+        <SavedViewsMenu page="devices" query={searchParams.toString()} onApply={q => setSearchParams(new URLSearchParams(q))} />
         <button
           onClick={() => setShowAddModal(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
@@ -379,12 +655,26 @@ export default function DeviceList() {
           </svg>
           Add device
         </button>
+        </div>
       </div>
 
       <div className="px-6 py-5 space-y-4 max-w-5xl">
 
         {/* Stats + search row */}
         <div className="flex flex-wrap items-center gap-3">
+          {/* Select all */}
+          {canBulk && filtered.length > 0 && (
+            <label className="flex items-center gap-1.5 text-xs text-slate-500 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={selected.size > 0 && selected.size === filtered.length}
+                onChange={toggleAll}
+                className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+              />
+              Select all
+            </label>
+          )}
+
           {/* Status filter pills */}
           <div className="flex items-center gap-2 flex-wrap">
             <StatPill label="All"         count={counts.all}         color="#475569" active={statusFilter === 'all'}         onClick={() => setStatusFilter('all')} />
@@ -416,6 +706,35 @@ export default function DeviceList() {
           </div>
         </div>
 
+        {/* Bulk action bar */}
+        {canBulk && selected.size > 0 && (
+          <div className="flex items-center gap-2 flex-wrap bg-blue-50 border border-blue-200 rounded-lg px-3 py-2 sticky top-0 z-10">
+            <span className="text-xs font-semibold text-blue-800">{selected.size} selected</span>
+            <button onClick={clearSelection} className="text-xs text-blue-600 hover:underline">Clear</button>
+            <div className="flex-1" />
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <button onClick={() => setBulkAction('add_tag')} className="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:border-slate-300 transition-colors">Add tag</button>
+              <button onClick={() => setBulkAction('remove_tag')} className="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:border-slate-300 transition-colors">Remove tag</button>
+              <button onClick={() => setBulkAction('set_site')} className="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:border-slate-300 transition-colors">Change site</button>
+              <button onClick={() => setBulkAction('set_collector')} className="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:border-slate-300 transition-colors">Change collector</button>
+              <button onClick={() => setBulkAction('set_credential')} className="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:border-slate-300 transition-colors">Apply credential</button>
+              <button onClick={() => setBulkAction('set_polling_interval')} className="px-2.5 py-1 text-xs font-medium text-slate-600 bg-white border border-slate-200 rounded-lg hover:border-slate-300 transition-colors">Set polling interval</button>
+              {canDelete && (
+                <button onClick={() => setBulkAction('delete')} className="px-2.5 py-1 text-xs font-medium text-red-600 bg-white border border-red-200 rounded-lg hover:bg-red-50 transition-colors">Delete</button>
+              )}
+            </div>
+          </div>
+        )}
+
+        {bulkAction && (
+          <BulkActionModal
+            action={bulkAction}
+            deviceIds={Array.from(selected)}
+            onClose={() => setBulkAction(null)}
+            onDone={() => { setBulkAction(null); clearSelection() }}
+          />
+        )}
+
         {/* Device cards */}
         {filtered.length === 0 ? (
           <div className="bg-white rounded-2xl border border-slate-200 py-16 text-center">
@@ -431,7 +750,14 @@ export default function DeviceList() {
         ) : (
           <div className="space-y-2">
             {filtered.map(d => (
-              <DeviceCard key={d.id} device={d} inMaintenance={inMaintenance.has(d.id)} />
+              <DeviceCard
+                key={d.id}
+                device={d}
+                inMaintenance={inMaintenance.has(d.id)}
+                selectable={canBulk}
+                selected={selected.has(d.id)}
+                onToggle={toggle}
+              />
             ))}
           </div>
         )}

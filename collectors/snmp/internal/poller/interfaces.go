@@ -198,6 +198,151 @@ func PollInterfaces(s *client.Session, deviceID uuid.UUID, sysUpTimeTicks uint32
 	return results, nil
 }
 
+// PollInterfaceState fetches only admin/oper status and naming fields — no
+// counters. It walks the individual column subtrees rather than full ifTable/
+// ifXTable, which is cheaper at the higher state-ticker cadence (15 s).
+func PollInterfaceState(s *client.Session, deviceID uuid.UUID) ([]*model.InterfaceResult, error) {
+	type row struct {
+		descr       string
+		ifType      int
+		mtu         int
+		speed       uint64
+		adminStatus int
+		operStatus  int
+		name        string
+		alias       string
+		highSpeed   uint64
+	}
+	rows := make(map[int]*row)
+	ensure := func(idx int) *row {
+		if r, ok := rows[idx]; ok {
+			return r
+		}
+		r := &row{}
+		rows[idx] = r
+		return r
+	}
+
+	// IfDescr (ifTable.2)
+	if pdus, err := s.BulkWalkAll(oid.IfDescr); err == nil {
+		for _, pdu := range pdus {
+			_, idx := splitTableOID(pdu.Name, oid.IfDescr)
+			if idx >= 0 {
+				ensure(idx).descr = client.PDUString(pdu)
+			}
+		}
+	}
+	// IfType (ifTable.3)
+	if pdus, err := s.BulkWalkAll(oid.IfType); err == nil {
+		for _, pdu := range pdus {
+			_, idx := splitTableOID(pdu.Name, oid.IfType)
+			if idx >= 0 {
+				ensure(idx).ifType = client.PDUInt(pdu)
+			}
+		}
+	}
+	// IfMtu (ifTable.4)
+	if pdus, err := s.BulkWalkAll(oid.IfMtu); err == nil {
+		for _, pdu := range pdus {
+			_, idx := splitTableOID(pdu.Name, oid.IfMtu)
+			if idx >= 0 {
+				ensure(idx).mtu = client.PDUInt(pdu)
+			}
+		}
+	}
+	// IfSpeed (ifTable.5)
+	if pdus, err := s.BulkWalkAll(oid.IfSpeed); err == nil {
+		for _, pdu := range pdus {
+			_, idx := splitTableOID(pdu.Name, oid.IfSpeed)
+			if idx >= 0 {
+				ensure(idx).speed = client.PDUUint64(pdu)
+			}
+		}
+	}
+	// IfAdminStatus (ifTable.7) — must succeed or the state poll is pointless
+	pdus, err := s.BulkWalkAll(oid.IfAdminStatus)
+	if err != nil {
+		return nil, fmt.Errorf("walk IfAdminStatus: %w", err)
+	}
+	for _, pdu := range pdus {
+		_, idx := splitTableOID(pdu.Name, oid.IfAdminStatus)
+		if idx >= 0 {
+			ensure(idx).adminStatus = client.PDUInt(pdu)
+		}
+	}
+	// IfOperStatus (ifTable.8) — must succeed
+	pdus, err = s.BulkWalkAll(oid.IfOperStatus)
+	if err != nil {
+		return nil, fmt.Errorf("walk IfOperStatus: %w", err)
+	}
+	for _, pdu := range pdus {
+		_, idx := splitTableOID(pdu.Name, oid.IfOperStatus)
+		if idx >= 0 {
+			ensure(idx).operStatus = client.PDUInt(pdu)
+		}
+	}
+	// IfName (ifXTable.1)
+	if pdus, err := s.BulkWalkAll(oid.IfName); err == nil {
+		for _, pdu := range pdus {
+			_, idx := splitTableOID(pdu.Name, oid.IfName)
+			if idx >= 0 {
+				ensure(idx).name = client.PDUString(pdu)
+			}
+		}
+	}
+	// IfHighSpeed (ifXTable.15)
+	if pdus, err := s.BulkWalkAll(oid.IfHighSpeed); err == nil {
+		for _, pdu := range pdus {
+			_, idx := splitTableOID(pdu.Name, oid.IfHighSpeed)
+			if idx >= 0 {
+				ensure(idx).highSpeed = client.PDUUint64(pdu)
+			}
+		}
+	}
+	// IfAlias (ifXTable.18)
+	if pdus, err := s.BulkWalkAll(oid.IfAlias); err == nil {
+		for _, pdu := range pdus {
+			_, idx := splitTableOID(pdu.Name, oid.IfAlias)
+			if idx >= 0 {
+				ensure(idx).alias = client.PDUString(pdu)
+			}
+		}
+	}
+
+	now := time.Now().UTC()
+	results := make([]*model.InterfaceResult, 0, len(rows))
+	for ifIdx, r := range rows {
+		res := &model.InterfaceResult{
+			DeviceID:    deviceID,
+			IfIndex:     ifIdx,
+			IfDescr:     r.descr,
+			IfName:      r.name,
+			IfAlias:     r.alias,
+			IfType:      oid.IfTypeName(r.ifType),
+			MTU:         r.mtu,
+			AdminStatus: ifStatusName(r.adminStatus),
+			OperStatus:  ifOperStatusName(r.operStatus),
+			PollTime:    now,
+		}
+		if r.highSpeed > 0 {
+			res.SpeedBPS = r.highSpeed * 1_000_000
+		} else {
+			res.SpeedBPS = r.speed
+		}
+		results = append(results, res)
+	}
+
+	// Populate IP addresses.
+	ipMap, _ := pollIPAddrTable(s)
+	for _, res := range results {
+		if ips, ok := ipMap[res.IfIndex]; ok {
+			res.IPAddresses = ips
+		}
+	}
+
+	return results, nil
+}
+
 // pollIPAddrTable walks ipAddrTable and returns a map of ifIndex → []InterfaceIP.
 func pollIPAddrTable(s *client.Session) (map[int][]model.InterfaceIP, error) {
 	pdus, err := s.BulkWalkAll(oid.IPAddrTable)

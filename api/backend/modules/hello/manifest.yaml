@@ -1,0 +1,7 @@
+name: hello
+version: 1.0.0
+# The license module key this feature requires. The module's router is mounted
+# only when a valid license lists "hello" in its modules. This is the sample
+# module that proves the gating end-to-end; it ships no real functionality.
+license_key: hello
+router: backend.modules.hello.router:router

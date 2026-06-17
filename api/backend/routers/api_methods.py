@@ -221,7 +221,10 @@ async def probe_all(
 async def _get_device(device_id: str, principal: Principal, db: AsyncSession, min_role: str = "readonly") -> Device:
     await assert_device_access(principal, uuid.UUID(device_id), min_role, db)
     dev = (await db.execute(
-        select(Device).where(Device.id == device_id)
+        select(Device).where(
+            Device.id == device_id,
+            Device.tenant_id == principal.active_tenant_id,
+        )
     )).scalar_one_or_none()
     if dev is None:
         raise HTTPException(404, "device not found")

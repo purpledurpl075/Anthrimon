@@ -1,21 +1,23 @@
 import api from './client'
 
 export interface RemoteCollector {
-  id:            string
-  name:          string
-  hostname:      string | null
-  site_id:       string | null
-  status:        'pending' | 'online' | 'offline' | 'revoked'
-  timezone:      string
-  wg_ip:         string | null
-  wg_public_key: string | null
-  ip_address:    string | null
-  version:       string | null
-  capabilities:  string[]
-  last_seen:     string | null
-  registered_at: string | null
-  is_active:     boolean
-  created_at:    string
+  id:                 string
+  name:               string
+  hostname:           string | null
+  site_id:            string | null
+  status:             'pending' | 'online' | 'offline' | 'revoked'
+  timezone:           string
+  wg_ip:              string | null
+  wg_public_key:      string | null
+  ip_address:         string | null
+  version:            string | null
+  capabilities:       string[]
+  last_seen:          string | null
+  registered_at:      string | null
+  is_active:          boolean
+  created_at:         string
+  state_interval_s:   number | null
+  counter_interval_s: number | null
   // Only present immediately after creation / token regeneration
   registration_token?: string
   ca_cert?:            string
@@ -83,7 +85,7 @@ export const fetchCollectorLogs = (id: string, minutes = 120, limit = 100) =>
 export const fetchCollectorOwnLogs = (id: string, minutes = 120, limit = 200) =>
   api.get<CollectorOwnLogs>(`/collectors/${id}/collector-logs`, { params: { minutes, limit } }).then(r => r.data)
 
-export const patchCollector     = (id: string, body: { timezone?: string; name?: string }) =>
+export const patchCollector     = (id: string, body: { timezone?: string; name?: string; state_interval_s?: number | null; counter_interval_s?: number | null }) =>
   api.patch<RemoteCollector>(`/collectors/${id}`, body).then(r => r.data)
 
 export const deleteCollector    = (id: string) =>

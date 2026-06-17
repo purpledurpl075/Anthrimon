@@ -15,10 +15,14 @@ const METRICS = [
   { value: 'interface_flap',    label: 'Interface flapping',         hasThreshold: true,  conditions: [],            unit: 'changes', thresholdLabel: 'Changes in window', simple: true },
   { value: 'uptime',            label: 'Device rebooted (low uptime)', hasThreshold: true, conditions: ['lt'],       unit: 's',    thresholdLabel: 'Uptime below (s)',   simple: true },
   { value: 'temperature',       label: 'Temperature sensor high',    hasThreshold: true,  conditions: ['gt'],        unit: '°C',   thresholdLabel: 'Threshold °C',       simple: true },
+  { value: 'device_latency',    label: 'Device latency (ping RTT)',  hasThreshold: true,  conditions: ['gt','gte'], unit: 'ms',   thresholdLabel: 'RTT threshold (ms)', simple: true },
   { value: 'interface_errors',  label: 'Interface errors',           hasThreshold: true,  conditions: ['gt'],        unit: '',     thresholdLabel: 'Error count (5 min)', simple: true },
+  { value: 'interface_discards', label: 'Interface discards',        hasThreshold: true,  conditions: ['gt'],        unit: '',     thresholdLabel: 'Discard count (5 min)', simple: true },
   { value: 'interface_util_pct', label: 'Interface utilisation',    hasThreshold: true,  conditions: ['gt'],        unit: '%',    thresholdLabel: 'Utilisation % (5 min)', simple: true },
   { value: 'ospf_state',        label: 'OSPF neighbor not full',    hasThreshold: false, conditions: [],            unit: '',     thresholdLabel: '',                   simple: true },
+  { value: 'isis_state',        label: 'IS-IS adjacency not up',    hasThreshold: false, conditions: [],            unit: '',     thresholdLabel: '',                   simple: true },
   { value: 'route_missing',     label: 'Route prefix missing',       hasThreshold: false, conditions: [],            unit: '',     thresholdLabel: '',                   simple: true },
+  { value: 'collector_offline', label: 'Remote collector offline',   hasThreshold: false, conditions: [],            unit: '',     thresholdLabel: '',                   simple: true },
   { value: 'flow_bandwidth',   label: 'Flow bandwidth',              hasThreshold: true,  conditions: ['gt'],           unit: 'B/s', thresholdLabel: 'Threshold (bytes/s)', simple: true },
   { value: 'syslog_match',     label: 'Syslog pattern match',        hasThreshold: true,  conditions: ['gt'],           unit: 'matches', thresholdLabel: 'Min occurrences', simple: true },
   { value: 'config_change',   label: 'Config change detected',      hasThreshold: false, conditions: [],               unit: '',        thresholdLabel: '',               simple: true },
@@ -26,6 +30,7 @@ const METRICS = [
   { value: 'bgp_session_flapping', label: 'BGP session flapping',    hasThreshold: true,  conditions: ['gt','gte'], unit: 'flaps', thresholdLabel: 'Min flaps in window',       simple: false },
   { value: 'bgp_prefix_drop',      label: 'BGP prefix count drop',   hasThreshold: true,  conditions: ['gt','gte'], unit: '%',    thresholdLabel: 'Min drop % from 24h avg',   simple: true },
   { value: 'custom_oid',        label: 'Custom OID',                 hasThreshold: true,  conditions: ['gt','lt','eq'], unit: '', thresholdLabel: 'Threshold value',   simple: false },
+  { value: 'snmp_trap',          label: 'SNMP trap received',        hasThreshold: true,  conditions: ['gt','gte'], unit: 'traps', thresholdLabel: 'Min occurrences in window', simple: false },
 ]
 
 const COND_LABEL: Record<string, string> = { gt: '>', lt: '<', gte: '≥', lte: '≤' }
@@ -394,7 +399,8 @@ function RuleModal({ editing, onClose }: { editing: AlertRule | null; onClose: (
         metric: f.metric,
         condition: m.conditions[0] ?? f.condition,
         threshold: m.hasThreshold ? Number(f.threshold) : null,
-        custom_oid: (f.metric === 'custom_oid' || f.metric === 'route_missing') ? (f.custom_oid || null) : null,
+        custom_oid: ['custom_oid', 'route_missing', 'flow_bandwidth', 'syslog_match', 'snmp_trap'].includes(f.metric)
+          ? (f.custom_oid || null) : null,
         duration_seconds: Number(f.duration_seconds),
         severity: f.severity,
         escalation_severity: f.escalation_severity || null,
@@ -483,6 +489,16 @@ function RuleModal({ editing, onClose }: { editing: AlertRule | null; onClose: (
           )}
           {f.metric === 'syslog_match' && (
             <SyslogMatchFilter value={f.custom_oid} onChange={v => set('custom_oid', v)} />
+          )}
+          {f.metric === 'snmp_trap' && (
+            <div>
+              <label className="block text-xs font-medium text-slate-600 mb-1">
+                Trap type <span className="text-slate-400 font-normal">exact name or SQL LIKE pattern, e.g. linkDown or cisco.bgp%</span>
+              </label>
+              <input value={f.custom_oid} onChange={e => set('custom_oid', e.target.value)}
+                placeholder="linkDown"
+                className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm font-mono focus:outline-none focus:ring-2 focus:ring-blue-500" />
+            </div>
           )}
 
           {/* Threshold + condition */}

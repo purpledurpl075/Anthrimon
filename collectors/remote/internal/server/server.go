@@ -123,6 +123,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/poll", s.handlePoll)
 	mux.HandleFunc("/config-exec", s.handleConfigExec)
 	mux.HandleFunc("/api-probe", s.handleAPIProbe)
+	mux.HandleFunc("/aoscx-rest", s.handleAOSCXRest)
 	mux.HandleFunc("/trap-config", s.handleTrapConfig)
 
 	addr := net.JoinHostPort(s.wgIP, fmt.Sprintf("%d", s.port))

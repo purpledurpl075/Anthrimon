@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import time
 import uuid
 from typing import Optional
@@ -11,6 +12,22 @@ import structlog
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+def _canon_port(s: Optional[str]) -> str:
+    """Canonicalise an interface/port name so vendor abbreviations match:
+    collapse the leading media-type word to its first two letters and keep only
+    the numeric path. e.g. 'GigabitEthernet0/1' & 'Gi0/1' → 'gi0/1';
+    'Ethernet1' & 'Et1' → 'et1'; 'Port-channel10' & 'Po10' → 'po10';
+    '1/1/1' → '1/1/1'; a plain alpha name (e.g. 'console') is left as-is."""
+    s = (s or "").strip().lower()
+    if not s:
+        return ""
+    m = re.match(r"^([a-z]+)(.*)$", s)
+    if m:
+        digits = re.sub(r"[^0-9/.:]", "", m.group(2))
+        return (m.group(1)[:2] + digits) if digits else s
+    return re.sub(r"[^0-9/.:]", "", s)
+
 
 from ..dependencies import (
     get_current_principal, get_db, Principal,
@@ -88,14 +105,46 @@ async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
 
     ifaces_r, lldp_r, cdp_r = await asyncio.gather(ifaces_q, lldp_q, cdp_q)
 
-    iface_info: dict[str, dict] = {
-        f"{str(i.device_id)}:{i.name}": {
-            "id":        str(i.id),
-            "speed_bps": i.speed_bps,
-            "if_index":  i.if_index,
-        }
-        for i in ifaces_r.scalars().all()
-    }
+    # Build several lookup indexes per device so a neighbor's port reference can
+    # be matched to an interface even when the LLDP/CDP port name differs from the
+    # SNMP ifName (e.g. "GigabitEthernet0/1" vs "Gi0/1", an ifIndex, or an ifAlias).
+    iface_info:     dict[str, dict] = {}   # device:exact-name
+    iface_by_canon: dict[str, dict] = {}   # device:canonical-name (abbrev-normalised)
+    iface_by_index: dict[str, dict] = {}   # device:if_index
+    iface_by_desc:  dict[str, dict] = {}   # device:lowercased description (ifAlias)
+    for i in ifaces_r.scalars().all():
+        dev = str(i.device_id)
+        info = {"id": str(i.id), "speed_bps": i.speed_bps, "if_index": i.if_index}
+        iface_info[f"{dev}:{i.name}"] = info
+        iface_by_canon.setdefault(f"{dev}:{_canon_port(i.name)}", info)
+        if i.if_index is not None:
+            iface_by_index.setdefault(f"{dev}:{i.if_index}", info)
+        if i.description:
+            iface_by_desc.setdefault(f"{dev}:{i.description.strip().lower()}", info)
+
+    def resolve_iface(dev_id: str, *candidates: Optional[str]) -> dict:
+        """Resolve an interface for a device from one or more port references,
+        trying exact name → canonical name → ifIndex → ifAlias in turn."""
+        for c in candidates:
+            if not c:
+                continue
+            # Some agents report the port as a quoted ifAlias (e.g. Arista
+            # '"P2P -> vEOS7 Eth1"'); strip surrounding quotes before matching.
+            cs = str(c).strip().strip('"').strip("'").strip()
+            if not cs:
+                continue
+            hit = (iface_info.get(f"{dev_id}:{cs}")
+                   or iface_by_canon.get(f"{dev_id}:{_canon_port(cs)}"))
+            if hit:
+                return hit
+            if cs.isdigit():
+                hit = iface_by_index.get(f"{dev_id}:{int(cs)}")
+                if hit:
+                    return hit
+            hit = iface_by_desc.get(f"{dev_id}:{cs.lower()}")
+            if hit:
+                return hit
+        return {}
 
     edges: list[dict] = []
     seen_pairs: set[frozenset] = set()
@@ -109,11 +158,10 @@ async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
         if pair in seen_pairs:
             continue
         seen_pairs.add(pair)
-        src_iface = iface_info.get(f"{src_id}:{n.local_port_name}", {})
-        # Try to resolve target interface via remote_port_desc (usually the SNMP name),
-        # falling back to remote_port_id.
-        remote_port = n.remote_port_desc or n.remote_port_id
-        dst_iface = iface_info.get(f"{dst_id}:{remote_port}", {}) if remote_port else {}
+        src_iface = resolve_iface(src_id, n.local_port_name)
+        # Resolve target interface via remote_port_desc (usually the SNMP name)
+        # then remote_port_id (name / ifIndex / ifAlias, depending on subtype).
+        dst_iface = resolve_iface(dst_id, n.remote_port_desc, n.remote_port_id)
         edges.append({
             "id":               f"lldp-{src_id[:8]}-{dst_id[:8]}",
             "source":           src_id,
@@ -137,8 +185,8 @@ async def _compute_edges(devices: list, db: AsyncSession) -> list[dict]:
         if pair in seen_pairs:
             continue
         seen_pairs.add(pair)
-        src_iface = iface_info.get(f"{src_id}:{n.local_port_name}", {})
-        dst_iface = iface_info.get(f"{dst_id}:{n.remote_port_id}", {}) if n.remote_port_id else {}
+        src_iface = resolve_iface(src_id, n.local_port_name)
+        dst_iface = resolve_iface(dst_id, n.remote_port_id)
         edges.append({
             "id":               f"cdp-{src_id[:8]}-{dst_id[:8]}",
             "source":           src_id,
@@ -258,6 +306,7 @@ async def _refresh_topology(tenant_id: str) -> None:
                     "device_type": d.device_type,
                     "status":      d.status,
                     "connected":   str(d.id) in connected_ids,
+                    "site_id":     str(d.site_id) if d.site_id else None,
                 }
                 for d in devices
             ],
@@ -373,6 +422,7 @@ async def get_topology(
                     "device_type": d.device_type,
                     "status":      d.status,
                     "connected":   str(d.id) in connected_ids,
+                    "site_id":     str(d.site_id) if d.site_id else None,
                 }
                 for d in devices
             ],

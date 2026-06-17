@@ -36,24 +36,24 @@ type DeviceInfo struct {
 // HC (64-bit) counters are always populated when available; the 32-bit fallbacks
 // are used only for devices that don't support ifXTable.
 type InterfaceResult struct {
-	DeviceID   uuid.UUID
-	IfIndex    int
-	IfDescr    string  // ifDescr (raw port name from device)
-	IfName     string  // ifName (canonical name, from ifXTable)
-	IfAlias    string  // ifAlias (operator description)
-	IfType     string  // IANA type name, e.g. "ethernetCsmacd"
-	SpeedBPS   uint64  // ifHighSpeed*1e6 when available, else ifSpeed
-	MTU        int
-	MACAddress string  // "aa:bb:cc:dd:ee:ff" or ""
+	DeviceID    uuid.UUID
+	IfIndex     int
+	IfDescr     string // ifDescr (raw port name from device)
+	IfName      string // ifName (canonical name, from ifXTable)
+	IfAlias     string // ifAlias (operator description)
+	IfType      string // IANA type name, e.g. "ethernetCsmacd"
+	SpeedBPS    uint64 // ifHighSpeed*1e6 when available, else ifSpeed
+	MTU         int
+	MACAddress  string // "aa:bb:cc:dd:ee:ff" or ""
 	AdminStatus string // "up" | "down" | "testing"
 	OperStatus  string // "up" | "down" | "testing" | "unknown" | "dormant" | …
 
 	// Prefer HC (64-bit) counters when non-zero; the poller always fills these.
-	InOctets    uint64
-	InUcastPkts uint64
-	InDiscards  uint64
-	InErrors    uint64
-	OutOctets   uint64
+	InOctets     uint64
+	InUcastPkts  uint64
+	InDiscards   uint64
+	InErrors     uint64
+	OutOctets    uint64
 	OutUcastPkts uint64
 	OutDiscards  uint64
 	OutErrors    uint64
@@ -89,17 +89,17 @@ type MemorySample struct {
 
 // TempSample holds a single temperature sensor reading.
 type TempSample struct {
-	SensorName  string  // human-readable sensor label
-	Celsius     float64
-	StatusOK    bool // false = warning or critical threshold exceeded
+	SensorName string // human-readable sensor label
+	Celsius    float64
+	StatusOK   bool // false = warning or critical threshold exceeded
 }
 
 // OpticalSample holds a DOM optical power reading for one interface.
 // Direction is "tx" or "rx". Value is in dBm.
 type OpticalSample struct {
-	IfaceName  string  // "Ethernet2"
-	SensorName string  // full ENTITY-SENSOR-MIB description
-	Direction  string  // "tx" | "rx" | "unknown"
+	IfaceName  string // "Ethernet2"
+	SensorName string // full ENTITY-SENSOR-MIB description
+	Direction  string // "tx" | "rx" | "unknown"
 	PowerDBm   float64
 }
 
@@ -172,8 +172,8 @@ type MACEntry struct {
 
 // LLDPNeighbor is a single entry from the lldpRemTable for one device.
 type LLDPNeighbor struct {
-	DeviceID   uuid.UUID
-	LocalPort  string // lldpLocPortDesc (ifName of the local interface)
+	DeviceID  uuid.UUID
+	LocalPort string // lldpLocPortDesc (ifName of the local interface)
 	// Remote
 	ChassisIDSubtype string // "macAddress" | "networkAddress" | "local" | …
 	ChassisID        string // formatted chassis ID (MAC or string)
@@ -209,9 +209,45 @@ type VLANResult struct {
 // IfIndex is resolved to interface_id by the writer.
 type InterfaceVLANResult struct {
 	DeviceID uuid.UUID
-	IfIndex  int  // resolved to interface_id by writer
+	IfIndex  int // resolved to interface_id by writer
 	VlanID   int
 	Tagged   bool // true = tagged (trunk), false = untagged (access/native)
+}
+
+// ISISArea is one configured area address from isisSysAreaAddrTable for a device.
+type ISISArea struct {
+	DeviceID uuid.UUID
+	Instance string // IS-IS instance name, "" = default
+	AreaAddr string // ISO area address, e.g. "49.0001"
+}
+
+// ISISCircuitLevel is one row from isisCircLevelTable: per-circuit, per-level
+// IS-IS link parameters (metric, hello/hold timers, DIS election).
+type ISISCircuitLevel struct {
+	DeviceID      uuid.UUID
+	Instance      string // IS-IS instance name, "" = default
+	InterfaceName string // local interface name, resolved from isisCircIfIndex
+	Level         string // "level-1" | "level-2"
+	Metric        int    // wide metric if set, else narrow metric
+	HelloInterval int    // seconds
+	HoldTimer     int    // seconds (hello_interval * hello_multiplier)
+	Priority      int    // DIS election priority
+	DISID         string // formatted LAN-DIS system ID, "" if no DIS elected
+}
+
+// ISISLSP is one row from isisLSPSummaryTable: a single LSP in a device's
+// link-state database.
+type ISISLSP struct {
+	DeviceID          uuid.UUID
+	Instance          string // IS-IS instance name, "" = default
+	Level             string // "level-1" | "level-2"
+	LSPID             string // formatted 8-byte LSP ID, e.g. "0100.1001.0001.00-00"
+	SequenceNumber    int64
+	Checksum          int
+	RemainingLifetime int // seconds
+	PDULength         int
+	OverloadBit       bool
+	AttachedBit       bool
 }
 
 // ISISAdjacency is one row from isisISAdjTable for a device.
@@ -265,11 +301,11 @@ type SNMPV3Credential struct {
 // DeviceRow is a minimal database record describing a device to be polled.
 // Populated by the writer package when refreshing the device list.
 type DeviceRow struct {
-	ID                uuid.UUID
-	MgmtIP            string
-	SNMPVersion       string // "v2c" | "v3"
-	SNMPPort          int
-	PollingIntervalS  int
-	CredentialType    string // "snmp_v2c" | "snmp_v3"
-	CredentialData    []byte // raw (possibly encrypted) JSONB bytes
+	ID               uuid.UUID
+	MgmtIP           string
+	SNMPVersion      string // "v2c" | "v3"
+	SNMPPort         int
+	PollingIntervalS int
+	CredentialType   string // "snmp_v2c" | "snmp_v3"
+	CredentialData   []byte // raw (possibly encrypted) JSONB bytes
 }

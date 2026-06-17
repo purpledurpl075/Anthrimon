@@ -20,112 +20,95 @@ const base = (size = 20) => ({
   strokeLinejoin: 'round' as const,
 })
 
-// Classic Cisco-style router: cylinder drum + routing arrow
+// Router — chassis with 4-way routing arrows (the universal router glyph)
 export function RouterIcon({ size, className, style }: IconProps) {
   return (
     <svg {...base(size)} className={className} style={style}>
-      {/* Cylinder top */}
-      <ellipse cx="12" cy="7" rx="8" ry="2.5"/>
-      {/* Cylinder sides */}
-      <line x1="4" y1="7" x2="4" y2="17"/>
-      <line x1="20" y1="7" x2="20" y2="17"/>
-      {/* Cylinder bottom */}
-      <ellipse cx="12" cy="17" rx="8" ry="2.5"/>
-      {/* Routing arrow through center */}
-      <path d="M8 12h8M14 10l2 2-2 2"/>
+      {/* central chassis */}
+      <rect x="6.5" y="6.5" width="11" height="11" rx="3"/>
+      {/* arrows radiating to the four directions */}
+      <path d="M12 6.5V2.5M10.6 3.9 12 2.5l1.4 1.4"/>
+      <path d="M12 17.5v4M10.6 20.1 12 21.5l1.4-1.4"/>
+      <path d="M6.5 12H2.5M3.9 10.6 2.5 12l1.4 1.4"/>
+      <path d="M17.5 12h4M20.1 10.6 21.5 12l-1.4 1.4"/>
     </svg>
   )
 }
 
-// Flat 1U switch with visible port rectangles
+// Switch — clean 1U chassis with a row of front ports
 export function SwitchIcon({ size, className, style }: IconProps) {
   return (
     <svg {...base(size)} className={className} style={style}>
-      {/* 1U chassis body */}
-      <rect x="2" y="8" width="20" height="8" rx="1.5"/>
-      {/* Port slots */}
-      <rect x="4"  y="10.5" width="2.2" height="3" rx="0.5"/>
-      <rect x="7"  y="10.5" width="2.2" height="3" rx="0.5"/>
-      <rect x="10" y="10.5" width="2.2" height="3" rx="0.5"/>
-      <rect x="13" y="10.5" width="2.2" height="3" rx="0.5"/>
-      <rect x="16" y="10.5" width="2.2" height="3" rx="0.5"/>
-      {/* Status LED */}
-      <circle cx="20" cy="12" r="0.8" fill="currentColor" stroke="none"/>
+      <rect x="2" y="8.5" width="20" height="8" rx="2"/>
+      <rect x="4.6"  y="11.2" width="2" height="3" rx="0.5"/>
+      <rect x="7.6"  y="11.2" width="2" height="3" rx="0.5"/>
+      <rect x="10.6" y="11.2" width="2" height="3" rx="0.5"/>
+      <rect x="13.6" y="11.2" width="2" height="3" rx="0.5"/>
+      <rect x="16.6" y="11.2" width="2" height="3" rx="0.5"/>
     </svg>
   )
 }
 
-// Ceiling-mount AP: circular body + wifi arcs radiating up
+// Access point — concentric Wi-Fi waves over a node
 export function AccessPointIcon({ size, className, style }: IconProps) {
   return (
     <svg {...base(size)} className={className} style={style}>
-      {/* WiFi arcs (upward) */}
-      <path d="M8.5 9.5a5 5 0 0 1 7 0"/>
-      <path d="M5.5 6.5a10 10 0 0 1 13 0"/>
-      {/* AP body dot */}
-      <circle cx="12" cy="13" r="2" fill="currentColor" stroke="none"/>
-      {/* Mount stem + base */}
-      <path d="M12 15v3M9 18h6"/>
+      <path d="M5 11a9 9 0 0 1 14 0"/>
+      <path d="M8 14a5 5 0 0 1 8 0"/>
+      <circle cx="12" cy="17.5" r="1.4" fill="currentColor" stroke="none"/>
     </svg>
   )
 }
 
-// Shield with padlock — unmistakably a firewall
+// Firewall — brick wall (unmistakable)
 export function FirewallIcon({ size, className, style }: IconProps) {
   return (
     <svg {...base(size)} className={className} style={style}>
-      {/* Shield outline */}
-      <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>
-      {/* Lock body */}
-      <rect x="9" y="12.5" width="6" height="4.5" rx="1"/>
-      {/* Lock shackle */}
-      <path d="M9.5 12.5V11a2.5 2.5 0 0 1 5 0v1.5"/>
+      <rect x="3" y="5.5" width="18" height="13" rx="1.5"/>
+      <path d="M3 9.83h18M3 14.17h18"/>
+      <path d="M9 5.5v4.33M15 5.5v4.33"/>
+      <path d="M6 9.83v4.34M12 9.83v4.34M18 9.83v4.34"/>
+      <path d="M9 14.17v4.33M15 14.17v4.33"/>
     </svg>
   )
 }
 
-// 1U rack with antenna + wifi arc on panel
+// Wireless controller — 1U rack with Wi-Fi waves
 export function WirelessControllerIcon({ size, className, style }: IconProps) {
   return (
     <svg {...base(size)} className={className} style={style}>
-      {/* 1U rack body */}
-      <rect x="2" y="8" width="20" height="9" rx="2"/>
-      {/* Antenna */}
-      <path d="M17 8V4.5M15 4.5h4"/>
-      {/* Port dots */}
-      <circle cx="6"  cy="12.5" r="1" fill="currentColor" stroke="none"/>
-      <circle cx="10" cy="12.5" r="1" fill="currentColor" stroke="none"/>
-      {/* WiFi arc on right side of panel */}
-      <path d="M14 11a2.5 2.5 0 0 1 0 3"/>
+      <rect x="2" y="12.5" width="20" height="6.5" rx="1.8"/>
+      <circle cx="5.8" cy="15.75" r="0.9" fill="currentColor" stroke="none"/>
+      <circle cx="8.4" cy="15.75" r="0.9" fill="currentColor" stroke="none"/>
+      <path d="M8.5 8.7a5 5 0 0 1 7 0"/>
+      <path d="M6 6a9 9 0 0 1 12 0"/>
     </svg>
   )
 }
 
-// Load balancer: single input → forked to two outputs
+// Load balancer — one input distributed to three outputs
 export function LoadBalancerIcon({ size, className, style }: IconProps) {
   return (
     <svg {...base(size)} className={className} style={style}>
-      {/* Input */}
-      <circle cx="5" cy="12" r="2"/>
-      <path d="M7 12h3"/>
-      {/* Fork */}
-      <path d="M10 12l3-4h4"/>
-      <path d="M10 12l3 4h4"/>
-      {/* Outputs */}
-      <circle cx="17" cy="8"  r="2"/>
-      <circle cx="17" cy="16" r="2"/>
+      <circle cx="4" cy="12" r="2"/>
+      <path d="M6 12h5"/>
+      <path d="M11 12V7h4M11 12h4M11 12v5h4"/>
+      <circle cx="18" cy="7"  r="2"/>
+      <circle cx="18" cy="12" r="2"/>
+      <circle cx="18" cy="17" r="2"/>
     </svg>
   )
 }
 
-// Generic device: server box with question mark
+// Generic device — a stacked server
 export function UnknownDeviceIcon({ size, className, style }: IconProps) {
   return (
     <svg {...base(size)} className={className} style={style}>
-      <rect x="3" y="5" width="18" height="14" rx="2"/>
-      <path d="M3 10h18"/>
-      <path d="M9.5 14a2.5 2.5 0 0 1 5 0c0 1.5-2.5 2-2.5 2"/>
-      <circle cx="12" cy="17.5" r=".6" fill="currentColor" stroke="none"/>
+      <rect x="3" y="4.5" width="18" height="6.5" rx="1.5"/>
+      <rect x="3" y="13"  width="18" height="6.5" rx="1.5"/>
+      <circle cx="6.5" cy="7.75"  r="0.9" fill="currentColor" stroke="none"/>
+      <circle cx="6.5" cy="16.25" r="0.9" fill="currentColor" stroke="none"/>
+      <path d="M16 7.75h2.5M16 16.25h2.5"/>
     </svg>
   )
 }

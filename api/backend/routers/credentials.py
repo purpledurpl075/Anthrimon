@@ -95,7 +95,12 @@ async def create_credential(
         data=_encrypt_data(body.data),
     )
     db.add(cred)
-    await db.flush()
+    try:
+        await db.flush()
+    except Exception as exc:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                             detail=f"A credential named '{body.name}' already exists") from exc
     from ..audit import audit as _audit
     await _audit(db, action="create", resource_type="credential",
                  resource_id=cred.id, new_value={"name": cred.name, "type": cred.type},

@@ -61,8 +61,14 @@ func (w *PostgresWriter) Handle(ctx context.Context, result *poller.PollResult) 
 	}
 
 	if len(result.Interfaces) > 0 {
-		if err := w.upsertInterfaces(ctx, result.DeviceID, result.Interfaces); err != nil {
-			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert interfaces failed")
+		if result.StateOnly {
+			if err := w.upsertInterfaceState(ctx, result.DeviceID, result.Interfaces); err != nil {
+				w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert interface state failed")
+			}
+		} else {
+			if err := w.upsertInterfaces(ctx, result.DeviceID, result.Interfaces); err != nil {
+				w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert interfaces failed")
+			}
 		}
 	}
 
@@ -72,25 +78,43 @@ func (w *PostgresWriter) Handle(ctx context.Context, result *poller.PollResult) 
 		}
 	}
 
-	if len(result.RouteEntries) > 0 {
+	if result.RouteEntries != nil {
 		if err := w.upsertRouteEntries(ctx, result.DeviceID, result.RouteEntries); err != nil {
 			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert route entries failed")
 		}
 	}
 
-	if len(result.OSPFNeighbours) > 0 {
+	if result.OSPFNeighbours != nil {
 		if err := w.upsertOSPFNeighbours(ctx, result.DeviceID, result.OSPFNeighbours); err != nil {
 			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert ospf neighbours failed")
 		}
 	}
 
-	if len(result.ISISAdjacencies) > 0 {
+	if result.ISISAdjacencies != nil {
 		if err := w.upsertISISAdjacencies(ctx, result.DeviceID, result.ISISAdjacencies); err != nil {
 			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert isis adjacencies failed")
 		}
 	}
 
-	if len(result.BGPSessions) > 0 {
+	if len(result.ISISAreas) > 0 {
+		if err := w.upsertISISAreas(ctx, result.DeviceID, result.ISISAreas); err != nil {
+			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert isis areas failed")
+		}
+	}
+
+	if len(result.ISISCircuitLevels) > 0 {
+		if err := w.upsertISISCircuitLevels(ctx, result.DeviceID, result.ISISCircuitLevels); err != nil {
+			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert isis circuit levels failed")
+		}
+	}
+
+	if len(result.ISISLSPs) > 0 {
+		if err := w.upsertISISLSPs(ctx, result.DeviceID, result.ISISLSPs); err != nil {
+			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert isis lsps failed")
+		}
+	}
+
+	if result.BGPSessions != nil {
 		if err := w.upsertBGPSessions(ctx, result.DeviceID, result.BGPSessions); err != nil {
 			w.log.Error().Err(err).Str("device_id", result.DeviceID.String()).Msg("upsert bgp sessions failed")
 		}
@@ -266,6 +290,88 @@ func (w *PostgresWriter) upsertInterfaces(ctx context.Context, deviceID uuid.UUI
 	return nil
 }
 
+// upsertInterfaceState writes only state columns (admin/oper status, name,
+// speed, type, IPs) without touching counter columns. Used by the fast
+// state ticker (15 s) so counters from the 60 s counter ticker are preserved.
+func (w *PostgresWriter) upsertInterfaceState(ctx context.Context, deviceID uuid.UUID, ifaces []*model.InterfaceResult) error {
+	currentStatus, err := w.fetchIfaceStatus(ctx, deviceID)
+	if err != nil {
+		return fmt.Errorf("fetch current interface status: %w", err)
+	}
+
+	batch := &pgx.Batch{}
+
+	for _, iface := range ifaces {
+		ipJSON := marshalIPs(iface.IPAddresses)
+
+		batch.Queue(`
+			INSERT INTO interfaces (
+				device_id, if_index, name, description, if_type,
+				speed_bps, mtu,
+				admin_status, oper_status,
+				ip_addresses, updated_at
+			) VALUES (
+				$1, $2, $3, $4, $5,
+				$6, $7,
+				$8::if_status, $9::if_status,
+				$10, $11
+			)
+			ON CONFLICT (device_id, if_index) DO UPDATE SET
+				name         = EXCLUDED.name,
+				description  = EXCLUDED.description,
+				if_type      = EXCLUDED.if_type,
+				speed_bps    = EXCLUDED.speed_bps,
+				mtu          = EXCLUDED.mtu,
+				admin_status = EXCLUDED.admin_status,
+				oper_status  = EXCLUDED.oper_status,
+				ip_addresses = CASE
+					WHEN EXCLUDED.ip_addresses != '[]'::jsonb
+					THEN EXCLUDED.ip_addresses
+					ELSE interfaces.ip_addresses
+				END,
+				updated_at   = EXCLUDED.updated_at
+		`,
+			deviceID, iface.IfIndex, ifName(iface), nullStr(iface.IfAlias), nullStr(iface.IfType),
+			nullUint64(iface.SpeedBPS), nullInt(iface.MTU),
+			iface.AdminStatus, iface.OperStatus,
+			ipJSON, iface.PollTime,
+		)
+
+		prev, hasPrev := currentStatus[iface.IfIndex]
+		if hasPrev && prev != iface.OperStatus {
+			batch.Queue(`
+				INSERT INTO interface_status_log (interface_id, device_id, prev_status, new_status, recorded_at)
+				SELECT id, $1, $2::if_status, $3::if_status, $4
+				FROM interfaces
+				WHERE device_id = $1 AND if_index = $5
+			`,
+				deviceID, prev, iface.OperStatus, iface.PollTime, iface.IfIndex,
+			)
+		}
+	}
+
+	br := w.pool.SendBatch(ctx, batch)
+	defer br.Close()
+
+	for i := 0; i < batch.Len(); i++ {
+		if _, err := br.Exec(); err != nil {
+			w.log.Error().Err(err).Msg("batch exec error")
+		}
+	}
+
+	// Touch last_polled so the device doesn't appear stale.
+	if len(ifaces) > 0 {
+		t := ifaces[0].PollTime
+		if _, err := w.pool.Exec(ctx,
+			`UPDATE devices SET last_polled = $1, last_seen = $1, status = 'up'::device_status WHERE id = $2`,
+			t, deviceID,
+		); err != nil {
+			w.log.Error().Err(err).Msg("touch last_polled failed")
+		}
+	}
+	return nil
+}
+
 // fetchIfaceStatus returns a map of ifIndex → current oper_status for a device.
 func (w *PostgresWriter) fetchIfaceStatus(ctx context.Context, deviceID uuid.UUID) (map[int]string, error) {
 	rows, err := w.pool.Query(ctx,
@@ -366,8 +472,45 @@ func (w *PostgresWriter) upsertRouteEntries(ctx context.Context, deviceID uuid.U
 // ── OSPF ──────────────────────────────────────────────────────────────────────
 
 func (w *PostgresWriter) upsertOSPFNeighbours(ctx context.Context, deviceID uuid.UUID, neighbours []*model.OSPFNeighbour) error {
+	// Snapshot current state so the upsert's last_state_change CASE compares
+	// against the true pre-poll state (the live column is still correct here
+	// because we upsert BEFORE any mark-down runs).
+	type ospfKey struct{ routerID, iface string }
+	type ospfPrev struct {
+		state           string
+		lastStateChange *time.Time
+	}
+	prev := map[ospfKey]ospfPrev{}
+	prevRows, err := w.pool.Query(ctx,
+		`SELECT neighbor_router_id::text, interface_name, state::text, last_state_change FROM ospf_neighbors WHERE device_id = $1`,
+		deviceID,
+	)
+	if err == nil {
+		for prevRows.Next() {
+			var routerID, iface, state string
+			var lastStateChange *time.Time
+			if scanErr := prevRows.Scan(&routerID, &iface, &state, &lastStateChange); scanErr == nil {
+				prev[ospfKey{strings.Split(routerID, "/")[0], iface}] = ospfPrev{state: state, lastStateChange: lastStateChange}
+			}
+		}
+		prevRows.Close()
+	}
+
+	// Upsert active neighbours FIRST so they are already at their real state
+	// before the orphan-mark runs. This eliminates the race window that
+	// existed when we marked all rows 'down' then restored them: the alert
+	// engine can no longer observe a spurious all-down intermediate state.
+	type seenKey struct{ routerID, iface string }
+	seen := make([]seenKey, 0, len(neighbours))
 	batch := &pgx.Batch{}
 	for _, n := range neighbours {
+		seen = append(seen, seenKey{strings.Split(n.RouterID, "/")[0], n.InterfaceName})
+		var prevState *string
+		var prevLSC *time.Time
+		if p, ok := prev[ospfKey{strings.Split(n.RouterID, "/")[0], n.InterfaceName}]; ok {
+			prevState = &p.state
+			prevLSC = p.lastStateChange
+		}
 		batch.Queue(`
 			INSERT INTO ospf_neighbors (
 				device_id, neighbor_router_id, neighbor_ip,
@@ -382,23 +525,53 @@ func (w *PostgresWriter) upsertOSPFNeighbours(ctx context.Context, deviceID uuid
 				state          = EXCLUDED.state,
 				priority       = EXCLUDED.priority,
 				last_state_change = CASE
-					WHEN ospf_neighbors.state != EXCLUDED.state THEN NOW()
-					ELSE ospf_neighbors.last_state_change
+					WHEN $8::ospf_neighbor_state IS DISTINCT FROM EXCLUDED.state THEN NOW()
+					ELSE COALESCE($9::timestamptz, NOW())
 				END,
 				updated_at     = NOW()
 		`,
 			deviceID,
 			nullStr(n.RouterID), nullStr(n.NeighbourIP),
-			&n.InterfaceName, nullStr(n.Area),  // InterfaceName: always store string (even "") so unique constraint fires
+			&n.InterfaceName, nullStr(n.Area),
 			n.State, n.Priority,
+			prevState,
+			prevLSC,
 		)
 	}
-	br := w.pool.SendBatch(ctx, batch)
-	defer br.Close()
-	for i := 0; i < batch.Len(); i++ {
-		if _, err := br.Exec(); err != nil {
-			w.log.Error().Err(err).Msg("ospf neighbour batch exec error")
+	if batch.Len() > 0 {
+		br := w.pool.SendBatch(ctx, batch)
+		defer br.Close()
+		for i := 0; i < batch.Len(); i++ {
+			if _, err := br.Exec(); err != nil {
+				w.log.Error().Err(err).Msg("ospf neighbour batch exec error")
+			}
 		}
+	}
+
+	// Mark neighbours that were NOT in this poll as down (neighbour disappeared
+	// from device's OSPF table). Runs after the upsert so active neighbours are
+	// already at their correct state — no spurious all-down window.
+	// Build arrays of (router_id, interface_name) pairs we just upserted and
+	// mark any existing row NOT matching those pairs as down.
+	seenRouterIDs := make([]string, 0, len(seen))
+	seenIfaces := make([]string, 0, len(seen))
+	for _, s := range seen {
+		seenRouterIDs = append(seenRouterIDs, s.routerID)
+		seenIfaces = append(seenIfaces, s.iface)
+	}
+	if _, err := w.pool.Exec(ctx, `
+		UPDATE ospf_neighbors SET state = 'down', last_state_change = NOW(), updated_at = NOW()
+		WHERE device_id = $1
+		  AND state != 'down'
+		  AND NOT EXISTS (
+		      SELECT 1
+		      FROM unnest($2::text[], $3::text[]) AS t(rid, iface)
+		      WHERE host(ospf_neighbors.neighbor_router_id) = t.rid
+		        AND ospf_neighbors.interface_name           = t.iface
+		  )`,
+		deviceID, seenRouterIDs, seenIfaces,
+	); err != nil {
+		w.log.Error().Err(err).Msg("ospf orphan-mark failed")
 	}
 	return nil
 }
@@ -406,9 +579,13 @@ func (w *PostgresWriter) upsertOSPFNeighbours(ctx context.Context, deviceID uuid
 // ── IS-IS ─────────────────────────────────────────────────────────────────────
 
 func (w *PostgresWriter) upsertISISAdjacencies(ctx context.Context, deviceID uuid.UUID, adjs []*model.ISISAdjacency) error {
-	// Mark all existing rows unknown first; upserts below restore active ones.
+	// Mark existing rows down first; upserts below restore active ones. A row
+	// left in 'down' after the batch means the adjacency disappeared from the
+	// device's table -- the alert evaluator ignores 'unknown', so that state
+	// would otherwise mask a real adjacency-down event.
 	if _, err := w.pool.Exec(ctx,
-		`UPDATE isis_neighbors SET adjacency_state = 'unknown', updated_at = NOW() WHERE device_id = $1`,
+		`UPDATE isis_neighbors SET adjacency_state = 'down', last_state_change = NOW(), updated_at = NOW()
+		 WHERE device_id = $1 AND adjacency_state != 'down'`,
 		deviceID,
 	); err != nil {
 		w.log.Error().Err(err).Msg("isis stale-row mark failed")
@@ -457,38 +634,174 @@ func (w *PostgresWriter) upsertISISAdjacencies(ctx context.Context, deviceID uui
 	return nil
 }
 
+// upsertISISAreas records the configured area addresses for each IS-IS
+// instance on a device. Area addresses rarely change, so this is a plain
+// upsert with no stale-row handling -- the unique constraint already
+// prevents duplicates, and a removed area simply stops being refreshed.
+func (w *PostgresWriter) upsertISISAreas(ctx context.Context, deviceID uuid.UUID, areas []*model.ISISArea) error {
+	batch := &pgx.Batch{}
+	for _, a := range areas {
+		instance := a.Instance
+		if instance == "" {
+			instance = "default"
+		}
+		batch.Queue(`
+			INSERT INTO isis_areas (device_id, instance, area_addr, updated_at)
+			VALUES ($1, $2, $3, NOW())
+			ON CONFLICT (device_id, instance, area_addr) DO UPDATE SET
+				updated_at = NOW()
+		`, deviceID, instance, a.AreaAddr)
+	}
+	br := w.pool.SendBatch(ctx, batch)
+	defer br.Close()
+	for i := 0; i < batch.Len(); i++ {
+		if _, err := br.Exec(); err != nil {
+			w.log.Error().Err(err).Msg("isis area batch exec error")
+		}
+	}
+	return nil
+}
+
+// upsertISISCircuitLevels records per-circuit, per-level IS-IS link
+// parameters (metric, hello/hold timers, DIS). Plain upsert with no
+// stale-row handling -- link parameters rarely change, and a removed
+// circuit simply stops being refreshed (matching upsertISISAreas).
+func (w *PostgresWriter) upsertISISCircuitLevels(ctx context.Context, deviceID uuid.UUID, levels []*model.ISISCircuitLevel) error {
+	batch := &pgx.Batch{}
+	for _, l := range levels {
+		instance := l.Instance
+		if instance == "" {
+			instance = "default"
+		}
+		batch.Queue(`
+			INSERT INTO isis_circuit_levels (
+				device_id, instance, interface_name, level,
+				metric, hello_interval, hold_timer, priority, dis_id, updated_at
+			) VALUES (
+				$1, $2, $3, $4,
+				$5, $6, $7, $8, $9, NOW()
+			)
+			ON CONFLICT (device_id, instance, interface_name, level) DO UPDATE SET
+				metric         = EXCLUDED.metric,
+				hello_interval = EXCLUDED.hello_interval,
+				hold_timer     = EXCLUDED.hold_timer,
+				priority       = EXCLUDED.priority,
+				dis_id         = EXCLUDED.dis_id,
+				updated_at     = NOW()
+		`,
+			deviceID, instance, l.InterfaceName, l.Level,
+			nullInt(l.Metric), nullInt(l.HelloInterval), nullInt(l.HoldTimer), nullInt(l.Priority), nullStr(l.DISID),
+		)
+	}
+	br := w.pool.SendBatch(ctx, batch)
+	defer br.Close()
+	for i := 0; i < batch.Len(); i++ {
+		if _, err := br.Exec(); err != nil {
+			w.log.Error().Err(err).Msg("isis circuit level batch exec error")
+		}
+	}
+	return nil
+}
+
+// upsertISISLSPs records the device's IS-IS link-state database. Uses the
+// snapshot-replace pattern (see upsertRouteEntries): every LSP currently
+// reported is upserted with a single pollAt timestamp, then any row not
+// refreshed this cycle -- an LSP that aged out of the database -- is purged.
+func (w *PostgresWriter) upsertISISLSPs(ctx context.Context, deviceID uuid.UUID, lsps []*model.ISISLSP) error {
+	pollAt := time.Now()
+
+	batch := &pgx.Batch{}
+	for _, l := range lsps {
+		instance := l.Instance
+		if instance == "" {
+			instance = "default"
+		}
+		batch.Queue(`
+			INSERT INTO isis_lsps (
+				device_id, instance, level, lsp_id,
+				sequence_number, checksum, remaining_lifetime, pdu_length,
+				overload_bit, attached_bit, updated_at
+			) VALUES (
+				$1, $2, $3, $4,
+				$5, $6, $7, $8,
+				$9, $10, $11
+			)
+			ON CONFLICT (device_id, instance, level, lsp_id) DO UPDATE SET
+				sequence_number    = EXCLUDED.sequence_number,
+				checksum           = EXCLUDED.checksum,
+				remaining_lifetime = EXCLUDED.remaining_lifetime,
+				pdu_length         = EXCLUDED.pdu_length,
+				overload_bit       = EXCLUDED.overload_bit,
+				attached_bit       = EXCLUDED.attached_bit,
+				updated_at         = EXCLUDED.updated_at
+		`,
+			deviceID, instance, l.Level, l.LSPID,
+			nullInt64(l.SequenceNumber), nullInt(l.Checksum), nullInt(l.RemainingLifetime), nullInt(l.PDULength),
+			l.OverloadBit, l.AttachedBit, pollAt,
+		)
+	}
+	br := w.pool.SendBatch(ctx, batch)
+	for i := 0; i < batch.Len(); i++ {
+		if _, err := br.Exec(); err != nil {
+			w.log.Error().Err(err).Msg("isis lsp batch exec error")
+		}
+	}
+	if err := br.Close(); err != nil {
+		w.log.Error().Err(err).Str("device_id", deviceID.String()).Msg("isis lsp batch close error")
+	}
+
+	if _, err := w.pool.Exec(ctx,
+		`DELETE FROM isis_lsps WHERE device_id = $1 AND updated_at < $2`,
+		deviceID, pollAt,
+	); err != nil {
+		w.log.Error().Err(err).Str("device_id", deviceID.String()).Msg("purge stale isis lsps failed")
+	}
+	return nil
+}
+
 // ── BGP ───────────────────────────────────────────────────────────────────────
 
 func (w *PostgresWriter) upsertBGPSessions(ctx context.Context, deviceID uuid.UUID, sessions []*model.BGPSession) error {
-	if len(sessions) == 0 {
-		return nil
-	}
-
-	// Snapshot current state + flap_count so we can detect transitions.
+	// Snapshot current state so we can (a) detect real transitions for event
+	// logging and (b) restore the correct last_state_change on rows that didn't
+	// actually change state this cycle.
 	type snap struct {
-		id        string
-		peerIP    string
-		state     string
-		flapCount int64
+		id              string
+		peerIP          string
+		state           string
+		flapCount       int64
+		lastStateChange *time.Time
 	}
 	snapRows, err := w.pool.Query(ctx,
-		`SELECT id::text, peer_ip::text, session_state::text, flap_count FROM bgp_sessions WHERE device_id = $1`,
+		`SELECT id::text, peer_ip::text, session_state::text, flap_count, last_state_change FROM bgp_sessions WHERE device_id = $1`,
 		deviceID,
 	)
 	prev := map[string]snap{}
 	if err == nil {
 		for snapRows.Next() {
 			var sn snap
-			if scanErr := snapRows.Scan(&sn.id, &sn.peerIP, &sn.state, &sn.flapCount); scanErr == nil {
-				prev[sn.peerIP] = sn
+			if scanErr := snapRows.Scan(&sn.id, &sn.peerIP, &sn.state, &sn.flapCount, &sn.lastStateChange); scanErr == nil {
+				// peer_ip::text comes back as "x.x.x.x/32"; strip netmask for lookup key.
+				prev[strings.Split(sn.peerIP, "/")[0]] = sn
 			}
 		}
 		snapRows.Close()
 	}
 
-	// Upsert all sessions.
+	// Upsert active sessions FIRST so they are already at their real state
+	// before any orphan-marking runs. This eliminates the race window where a
+	// "mark-all-idle then restore" pattern lets the alert engine observe an
+	// intermediate all-idle state between the two separate DB writes.
 	batch := &pgx.Batch{}
+	seenIPs := make([]string, 0, len(sessions))
 	for _, s := range sessions {
+		seenIPs = append(seenIPs, s.PeerIP)
+		var prevState *string
+		var prevLSC *time.Time
+		if p, ok := prev[s.PeerIP]; ok {
+			prevState = &p.state
+			prevLSC = p.lastStateChange
+		}
 		batch.Queue(`
 			INSERT INTO bgp_sessions (
 				device_id, peer_ip, peer_router_id, peer_description,
@@ -522,8 +835,8 @@ func (w *PostgresWriter) upsertBGPSessions(ctx context.Context, deviceID uuid.UU
 				out_updates       = EXCLUDED.out_updates,
 				flap_count        = EXCLUDED.flap_count,
 				last_state_change = CASE
-					WHEN bgp_sessions.session_state != EXCLUDED.session_state THEN NOW()
-					ELSE bgp_sessions.last_state_change
+					WHEN $13::bgp_session_state IS DISTINCT FROM EXCLUDED.session_state THEN NOW()
+					ELSE COALESCE($14::timestamptz, NOW())
 				END,
 				updated_at = NOW()
 		`,
@@ -536,17 +849,34 @@ func (w *PostgresWriter) upsertBGPSessions(ctx context.Context, deviceID uuid.UU
 			s.UptimeSeconds,
 			s.InUpdates, s.OutUpdates,
 			s.FlapCount,
+			prevState,
+			prevLSC,
 		)
 	}
-	br := w.pool.SendBatch(ctx, batch)
-	defer br.Close()
-	for i := 0; i < batch.Len(); i++ {
-		if _, err := br.Exec(); err != nil {
-			w.log.Error().Err(err).Msg("bgp session upsert error")
+	if batch.Len() > 0 {
+		br := w.pool.SendBatch(ctx, batch)
+		defer br.Close()
+		for i := 0; i < batch.Len(); i++ {
+			if _, err := br.Exec(); err != nil {
+				w.log.Error().Err(err).Msg("bgp session upsert error")
+			}
 		}
 	}
 
-	// Log an event for every state transition detected since last poll.
+	// Mark sessions that were NOT in this poll as idle (peer disappeared from
+	// device's BGP table). Runs after the upsert so active sessions are already
+	// at their correct state — the alert engine never sees a spurious all-idle window.
+	if _, err := w.pool.Exec(ctx,
+		`UPDATE bgp_sessions SET session_state = 'idle', last_state_change = NOW(), updated_at = NOW()
+		 WHERE device_id = $1
+		   AND session_state != 'idle'
+		   AND peer_ip != ALL($2::inet[])`,
+		deviceID, seenIPs,
+	); err != nil {
+		w.log.Error().Err(err).Msg("bgp orphan-mark failed")
+	}
+
+	// Log an event for every real state transition detected since last poll.
 	eventBatch := &pgx.Batch{}
 	for _, s := range sessions {
 		p, existed := prev[s.PeerIP]
@@ -970,4 +1300,3 @@ func marshalIPs(ips []model.InterfaceIP) []byte {
 	b, _ := json.Marshal(entries)
 	return b
 }
-

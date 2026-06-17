@@ -266,7 +266,6 @@ func (c *SNMPCollector) pollAll(ctx context.Context) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	var lines []string
-	var routes []map[string]any
 
 outer:
 	for _, dev := range devices {
@@ -304,19 +303,27 @@ outer:
 			}
 
 			lines = append(lines, devLines...)
-			routes = append(routes, devRoutes...)
+
+			// Routes: SNMP is not the source of truth for Arista-eAPI or
+			// Aruba-CX-REST devices (their routes come from those
+			// collectors' own per-device PostRoutes calls) -- skip posting
+			// here so we don't tell the hub "zero routes, purge" for a
+			// device whose routes are maintained elsewhere. For all other
+			// devices, post unconditionally (even when devRoutes is empty)
+			// so the hub can purge a now-empty table.
+			routeSourceIsSNMP := !((dev.Vendor == "arista" && dev.EapiEnabled) ||
+				(dev.Vendor == "aruba_cx" && dev.RestCollectionEnabled))
+			if routeSourceIsSNMP {
+				if err := c.hub.PostRoutes(ctx, dev.ID, devRoutes); err != nil {
+					c.log.Error().Err(err).Str("device_id", dev.ID).Msg("failed to post routes to hub")
+				} else {
+					c.log.Debug().Str("device_id", dev.ID).Int("routes", len(devRoutes)).Msg("routes posted")
+				}
+			}
 		}()
 	}
 
 	wg.Wait()
-
-	if len(routes) > 0 {
-		if err := c.hub.PostRoutes(ctx, routes); err != nil {
-			c.log.Error().Err(err).Msg("failed to post routes to hub")
-		} else {
-			c.log.Debug().Int("routes", len(routes)).Msg("routes posted")
-		}
-	}
 
 	if len(lines) == 0 {
 		return

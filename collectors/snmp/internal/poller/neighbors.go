@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
 	"github.com/purpledurpl075/anthri-mon/collectors/snmp/internal/client"
 	"github.com/purpledurpl075/anthri-mon/collectors/snmp/internal/model"
 	"github.com/purpledurpl075/anthri-mon/collectors/snmp/internal/oid"
@@ -319,6 +320,7 @@ func PollCDPNeighbors(s *client.Session, deviceID uuid.UUID, ifByIndex map[int]s
 		return nil, err
 	}
 	if len(pdus) == 0 {
+		log.Debug().Str("device_id", deviceID.String()).Msg("cdp: cdpCacheTable empty (CDP not enabled, or no neighbors)")
 		// Successful poll, no CDP neighbors.  Non-nil empty slice signals the
 		// writer to prune stale rows (nil would mean "poll did not run").
 		return []*model.CDPNeighbor{}, nil
@@ -351,24 +353,27 @@ func PollCDPNeighbors(s *client.Session, deviceID uuid.UUID, ifByIndex map[int]s
 		}
 		k := rowKey{ifIdx, devIdx}
 		r := ensure(k)
+		// CISCO-CDP-MIB cdpCacheEntry columns: 3=AddressType, 4=Address,
+		// 5=Version, 6=DeviceId, 7=DevicePort, 8=Platform, 9=Capabilities,
+		// 10=VTPMgmtDomain, 11=NativeVLAN, 12=Duplex.
 		switch col {
-		case 3:
+		case 4:
 			if b, ok := pdu.Value.([]byte); ok {
 				r.addresses = b
 			}
-		case 5:
-			r.deviceID = client.PDUString(pdu)
 		case 6:
-			r.devicePort = client.PDUString(pdu)
+			r.deviceID = client.PDUString(pdu)
 		case 7:
-			r.platform = client.PDUString(pdu)
+			r.devicePort = client.PDUString(pdu)
 		case 8:
+			r.platform = client.PDUString(pdu)
+		case 9:
 			if b, ok := pdu.Value.([]byte); ok {
 				r.caps = b
 			}
-		case 10:
-			r.nativeVLAN = client.PDUInt(pdu)
 		case 11:
+			r.nativeVLAN = client.PDUInt(pdu)
+		case 12:
 			r.duplex = client.PDUInt(pdu)
 		}
 	}
@@ -391,6 +396,7 @@ func PollCDPNeighbors(s *client.Session, deviceID uuid.UUID, ifByIndex map[int]s
 			Duplex:       cdpDuplexName(r.duplex),
 		})
 	}
+	log.Debug().Str("device_id", deviceID.String()).Int("cdp_neighbors", len(results)).Msg("cdp: cdpCacheTable parsed")
 	return results, nil
 }
 

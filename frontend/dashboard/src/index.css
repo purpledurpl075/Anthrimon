@@ -1,4 +1,5 @@
 @import "tailwindcss";
+@import "./modern.css";
 @plugin "@tailwindcss/typography";
 
 /* Enable class-based dark mode for Tailwind dark: utilities */

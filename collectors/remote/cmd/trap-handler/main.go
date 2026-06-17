@@ -31,7 +31,7 @@ import (
 	"time"
 )
 
-const version = "0.1.6"
+const version = "0.1.7"
 
 const defaultCACertPath = "/etc/anthrimon/ca.crt"
 
@@ -106,9 +106,13 @@ var _enterpriseTraps = []enterpriseTrap{
 	{Prefix: "1.3.6.1.2.1.68.",    Name: "vrrp.trap",         Severity: "info"},
 
 	// ── Arista ───────────────────────────────────────────────────────────────
-	{Prefix: "1.3.6.1.4.1.30065.3.9",  Name: "arista.bgpPeerStateChange", Severity: "warning"},
-	{Prefix: "1.3.6.1.4.1.30065.3.10", Name: "arista.linkStateChange",    Severity: "warning"},
-	{Prefix: "1.3.6.1.4.1.30065.",     Name: "arista.trap",                Severity: "info"},
+	{Prefix: "1.3.6.1.4.1.30065.3.9",    Name: "arista.bgpPeerStateChange", Severity: "warning"},
+	{Prefix: "1.3.6.1.4.1.30065.3.10",   Name: "arista.linkStateChange",    Severity: "warning"},
+	// ARISTA-BRIDGE-EXT-MIB (aristaMibs.2) notifications
+	{Prefix: "1.3.6.1.4.1.30065.3.2.0.1", Name: "arista.macMove",  Severity: "info"},
+	{Prefix: "1.3.6.1.4.1.30065.3.2.0.2", Name: "arista.macLearn", Severity: "info"},
+	{Prefix: "1.3.6.1.4.1.30065.3.2.0.3", Name: "arista.macAge",   Severity: "info"},
+	{Prefix: "1.3.6.1.4.1.30065.",        Name: "arista.trap",     Severity: "info"},
 
 	// ── Aruba CX ─────────────────────────────────────────────────────────────
 	{Prefix: "1.3.6.1.4.1.47196.4.1.1.3.20", Name: "aruba_cx.linkStateChange", Severity: "warning"},

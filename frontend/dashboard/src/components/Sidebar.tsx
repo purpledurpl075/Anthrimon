@@ -1,10 +1,15 @@
 import { useState, createContext, useContext, useRef, useEffect, useCallback } from 'react'
 import { NavLink, useNavigate, useLocation } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
+import { Star, Share2 } from 'lucide-react'
 import api from '../api/client'
 import { hasRole } from '../hooks/useCurrentUser'
+import { useLicense } from '../hooks/useLicense'
+import { MODERN_NAV } from '../icons'
 import { useTheme, type Theme } from '../hooks/useTheme'
 import { fetchSearch, type SearchResult, type ResultType } from '../api/search'
+import { fetchDashboards } from '../api/dashboards'
+import { licensedFeaturesIn } from '../features'
 
 // ── Wiki index (loaded once) ───────────────────────────────────────────────
 interface WikiEntry { slug: string; title: string; category: string; description: string }
@@ -34,36 +39,11 @@ const fetchAlertCount = () =>
 const CollapsedCtx = createContext(false)
 
 // ── Icons ──────────────────────────────────────────────────────────────────
-const I = {
-  grid:        <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>,
-  monitor:     <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><rect x="2" y="3" width="20" height="14" rx="2"/><path d="M8 21h8M12 17v4"/></svg>,
-  topology:    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><path d="m8.59 13.51 6.83 3.98M15.41 6.51l-6.82 3.98"/></svg>,
-  list:        <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10"/></svg>,
-  search:      <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>,
-  bell:        <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>,
-  rules:       <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M9 5H7a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2h-2M9 5a2 2 0 0 0 2 2h2a2 2 0 0 0 2-2M9 5a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2m-6 9 2 2 4-4"/></svg>,
-  policies:    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M9 12h6m-6 4h6m2 5H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5.586a1 1 0 0 1 .707.293l5.414 5.414a1 1 0 0 1 .293.707V19a2 2 0 0 1-2 2z"/></svg>,
-  key:         <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0 3 3L22 7l-3-3m-3.5 3.5L19 4"/></svg>,
-  settings:    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
-  calendar:    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>,
-  flow:        <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>,
-  syslog:      <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M4 6h16M4 10h16M4 14h10M4 18h6"/></svg>,
-  config:      <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 0 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg>,
-  bgp:         <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><path d="M7 12h5m5-5.5-5 5m0 1 5 5"/></svg>,
-  collectors:  <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>,
-  // Observability section icon — activity/pulse
-  observability: <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>,
-  // Analysis section icon — magnifier + chart
-  analysis:    <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="m7 16 4-4 4 4 4-6"/></svg>,
-  // Alerting section icon — shield with exclamation
-  alerting:    <svg className="w-3.5 h-3.5 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M12 8v4M12 16h.01"/></svg>,
-  wiki:        <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>,
-  logout:      <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>,
-  chevronDown: <svg className="w-3 h-3 shrink-0" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></svg>,
-  chevronLeft: <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg>,
-  chevronRight:<svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg>,
-  platform:    <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>,
-  users:       <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></svg>,
+
+/** Sidebar icon set. Components alias this to `I` locally so all existing
+ *  `I.x` references resolve to the right icon. */
+function useIcons(): Record<string, React.ReactNode> {
+  return MODERN_NAV
 }
 
 // ── Sidebar search ─────────────────────────────────────────────────────────
@@ -104,6 +84,7 @@ function saveRecent(r: SearchResult) {
 }
 
 function SidebarSearch({ collapsed }: { collapsed: boolean }) {
+  const I = useIcons()
   const navigate  = useNavigate()
   const inputRef  = useRef<HTMLInputElement>(null)
   const panelRef  = useRef<HTMLDivElement>(null)
@@ -317,6 +298,7 @@ function SidebarSearch({ collapsed }: { collapsed: boolean }) {
 interface TenantSummary { id: string; name: string; slug: string; is_active: boolean }
 
 function TenantSwitcher({ me }: { me: MeData }) {
+  const I = useIcons()
   const [open, setOpen]       = useState(false)
   const [search, setSearch]   = useState('')
   const ref                   = useRef<HTMLDivElement>(null)
@@ -531,6 +513,7 @@ function Section({ label, icon, defaultOpen = true, children }: {
   defaultOpen?: boolean
   children: React.ReactNode
 }) {
+  const I = useIcons()
   const collapsed = useContext(CollapsedCtx)
   const [open, setOpen] = useState(defaultOpen)
 
@@ -567,6 +550,90 @@ function Section({ label, icon, defaultOpen = true, children }: {
       >
         <div className="space-y-0.5 pb-1">{children}</div>
       </div>
+    </div>
+  )
+}
+
+// ── Dashboards nav item (with quick-access dropdown) ────────────────────────
+function DashboardsNavItem() {
+  const I = useIcons()
+  const collapsed = useContext(CollapsedCtx)
+  const location = useLocation()
+  const [open, setOpen] = useState(false)
+
+  const { data: dashboards } = useQuery({
+    queryKey: ['dashboards'],
+    queryFn: fetchDashboards,
+    staleTime: 30_000,
+    retry: false,
+  })
+
+  if (collapsed) {
+    return <Item to="/dashboards" label="Dashboards" icon={I.dashboard} />
+  }
+
+  const isActive = location.pathname.startsWith('/dashboards')
+  const items = dashboards ?? []
+  const visible = items.slice(0, 8)
+  const overflow = items.length - visible.length
+
+  return (
+    <div className="space-y-0.5">
+      <div className={`group relative flex items-center rounded-lg text-sm transition-all duration-150 gap-1 px-2.5 py-2 ${
+        isActive ? 'bg-blue-950/60 text-white' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+      }`}>
+        {isActive && <span className="absolute left-0 top-1 bottom-1 w-0.5 rounded-full bg-blue-400" />}
+        <NavLink to="/dashboards" className="flex items-center gap-2.5 flex-1 min-w-0">
+          <span className={`shrink-0 transition-colors ${isActive ? 'text-blue-400' : 'text-slate-500 group-hover:text-slate-300'}`}>
+            {I.dashboard}
+          </span>
+          <span className="flex-1 truncate font-[450]">Dashboards</span>
+        </NavLink>
+        {items.length > 0 && (
+          <button
+            onClick={() => setOpen(o => !o)}
+            title={open ? 'Hide quick access' : 'Show quick access'}
+            className="p-1 -mr-1 rounded-md text-slate-500 hover:text-slate-200 hover:bg-white/5 transition-colors shrink-0"
+          >
+            <span className={`inline-block transition-transform duration-200 ${open ? '' : '-rotate-90'}`}>
+              {I.chevronDown}
+            </span>
+          </button>
+        )}
+      </div>
+
+      {items.length > 0 && (
+        <div
+          className="overflow-hidden transition-all duration-200"
+          style={{ maxHeight: open ? '600px' : '0', opacity: open ? 1 : 0 }}
+        >
+          <div className="space-y-0.5 pb-1 pl-6">
+            {visible.map(d => (
+              <NavLink
+                key={d.id}
+                to={`/dashboards/${d.id}`}
+                className={({ isActive: linkActive }) =>
+                  `flex items-center gap-1.5 px-2 py-1.5 rounded-md text-xs transition-colors min-w-0 ${
+                    linkActive ? 'bg-blue-950/60 text-white' : 'text-slate-500 hover:text-slate-200 hover:bg-white/5'
+                  }`
+                }
+              >
+                {d.is_default
+                  ? <Star className="w-3 h-3 text-amber-400 shrink-0" />
+                  : d.is_shared
+                    ? <Share2 className="w-3 h-3 text-blue-400 shrink-0" />
+                    : <span className="w-3 h-3 shrink-0" />}
+                <span className="truncate">{d.name}</span>
+              </NavLink>
+            ))}
+            {overflow > 0 && (
+              <NavLink to="/dashboards" className="flex items-center px-2 py-1.5 rounded-md text-xs text-slate-600 hover:text-slate-300 hover:bg-white/5 transition-colors">
+                +{overflow} more…
+              </NavLink>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -618,6 +685,10 @@ export default function Sidebar() {
   }
 
   const { data: me } = useQuery({ queryKey: ['me'], queryFn: fetchMe, retry: false })
+  const I = useIcons()
+  const { data: lic } = useLicense()
+  const isLicensed = (key: string) =>
+    !!lic?.valid && (lic.modules.includes('*') || lic.modules.includes(key))
   const { data: openAlerts } = useQuery({
     queryKey: ['alert-count'],
     queryFn: fetchAlertCount,
@@ -686,49 +757,51 @@ export default function Sidebar() {
             return null
           })()}
 
-          {/* Overview — standalone home item */}
-          <Item to="/" label="Overview" icon={I.grid} end />
+          {/* Dashboards — home item with quick-access dropdown */}
+          <DashboardsNavItem />
 
-          {/* Network — infrastructure */}
+          {/* Network — infrastructure + pathing */}
           <Section label="Network" icon={I.topology}>
-            <Item to="/devices"   label="Devices"   icon={I.monitor} />
-            <Item to="/topology"  label="Topology"  icon={I.topology} />
-            <Item to="/addresses" label="Addresses" icon={I.list} />
-            <Item to="/discover"  label="Discover"  icon={I.search} />
+            <Item to="/devices"    label="Devices"    icon={I.monitor} />
+            <Item to="/topology"   label="Topology"   icon={I.topology} />
+            <Item to="/addresses"  label="Addresses"  icon={I.list} />
+            <Item to="/path-trace" label="Path Trace" icon={I.topology} />
+            <Item to="/discover"   label="Discover"   icon={I.search} />
           </Section>
 
-          {/* Observability — live operational telemetry */}
-          <Section label="Observability" icon={I.observability}>
+          {/* Monitoring — live operational telemetry */}
+          <Section label="Monitoring" icon={I.observability}>
             <Item to="/alerts"  label="Alerts"  icon={I.bell}   badge={openAlerts} />
             <Item to="/flow"    label="Flow"    icon={I.flow} />
             <Item to="/syslog"  label="Logging" icon={I.syslog} />
+            {licensedFeaturesIn('Monitoring', isLicensed).map(f => (
+              <Item key={f.key} to={f.to} label={f.label} icon={I.observability} />
+            ))}
           </Section>
 
           {/* Analysis — deeper investigation */}
           <Section label="Analysis" icon={I.analysis}>
-            <Item to="/routing"     label="Routing"     icon={I.bgp} />
-            <Item to="/config"      label="Config"      icon={I.config} />
-            <Item to="/path-trace"  label="Path Trace"  icon={I.topology} />
+            <Item to="/routing" label="Routing" icon={I.bgp} />
+            <Item to="/config"  label="Config"  icon={I.config} />
+            {licensedFeaturesIn('Analysis', isLicensed).map(f => (
+              <Item key={f.key} to={f.to} label={f.label} icon={I.analysis} />
+            ))}
           </Section>
 
-          {/* Alerting — alert management / policy authoring */}
-          <Section label="Alerting" icon={I.alerting}>
+          {/* Automation — alert rules / policy authoring / maintenance */}
+          <Section label="Automation" icon={I.alerting}>
             <Item to="/alert-rules"  label="Alert Rules"  icon={I.rules} />
             <Item to="/policies"     label="Policies"     icon={I.policies} />
             <Item to="/maintenance"  label="Maintenance"  icon={I.calendar} />
           </Section>
 
-          {/* System — credentials, collectors, admin */}
-          <Section label="System" icon={I.settings} defaultOpen={false}>
+          {/* Admin — credentials, collectors, users, operations */}
+          <Section label="Admin" icon={I.settings} defaultOpen={false}>
             <Item to="/credentials" label="Credentials" icon={I.key} />
             <Item to="/collectors"  label="Collectors"  icon={I.collectors} />
             <Item to="/probes"      label="Probes"      icon={I.search} />
-            <Item to="/wiki"        label="Wiki"         icon={I.wiki} />
             {(hasRole(me?.role ?? 'readonly', 'admin') || me?.is_platform_admin) && (
               <Item to="/users" label="Users" icon={I.users} />
-            )}
-            {hasRole(me?.role ?? 'readonly', 'admin') && (
-              <Item to="/admin" label="Administration" icon={I.settings} />
             )}
             {hasRole(me?.role ?? 'readonly', 'admin') && (
               <Item to="/audit" label="Audit Log" icon={I.list} />
@@ -736,6 +809,14 @@ export default function Sidebar() {
             {hasRole(me?.role ?? 'readonly', 'admin') && (
               <Item to="/platform-health" label="Platform Health" icon={I.settings} />
             )}
+            {hasRole(me?.role ?? 'readonly', 'admin') && (
+              <Item to="/admin" label="Administration" icon={I.settings} />
+            )}
+          </Section>
+
+          {/* Help */}
+          <Section label="Help" icon={I.wiki} defaultOpen={false}>
+            <Item to="/wiki" label="Wiki" icon={I.wiki} />
           </Section>
 
           {/* Platform — only for platform admins */}

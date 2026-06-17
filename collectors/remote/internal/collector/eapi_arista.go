@@ -32,24 +32,32 @@ import (
 
 var eapiLog = zlog.Logger.With().Str("subsystem", "arista_eapi").Logger()
 
-const eapiCollectEvery = 5 * time.Minute
-
 // ── AristaEAPICollector ───────────────────────────────────────────────────────
 
-// AristaEAPICollector collects IS-IS adjacency state from Arista EOS devices
-// via eAPI and forwards results to the hub.
+// AristaEAPICollector collects routing state and topology data from Arista EOS
+// devices via eAPI and forwards results to the hub.
+//
+// Two polling tiers are used:
+//   - State tier (stateInterval, default 15s): BGP sessions + IS-IS neighbors.
+//     These are time-sensitive; fast detection drives alert latency.
+//   - Counter tier (counterInterval, default 60s): STP ports + route table.
+//     Heavier walks, but changes are less time-critical.
 type AristaEAPICollector struct {
-	hubClient *hub.Client
-	mu        sync.RWMutex
-	devices   []hub.Device
-	logger    zerolog.Logger
+	hubClient       *hub.Client
+	mu              sync.RWMutex
+	devices         []hub.Device
+	stateInterval   time.Duration
+	counterInterval time.Duration
+	logger          zerolog.Logger
 }
 
-// NewAristaEAPICollector creates a new Arista eAPI IS-IS collector.
+// NewAristaEAPICollector creates a new Arista eAPI collector with default intervals.
 func NewAristaEAPICollector(hubClient *hub.Client, logger zerolog.Logger) *AristaEAPICollector {
 	return &AristaEAPICollector{
-		hubClient: hubClient,
-		logger:    logger.With().Str("subsystem", "arista_eapi").Logger(),
+		hubClient:       hubClient,
+		stateInterval:   15 * time.Second,
+		counterInterval: 60 * time.Second,
+		logger:          logger.With().Str("subsystem", "arista_eapi").Logger(),
 	}
 }
 
@@ -60,37 +68,62 @@ func (c *AristaEAPICollector) SetDevices(devices []hub.Device) {
 	c.devices = devices
 }
 
-// Run starts the periodic eAPI collection loop.
-func (c *AristaEAPICollector) Run(ctx context.Context) {
-	ticker := time.NewTicker(eapiCollectEvery)
-	defer ticker.Stop()
+// SetIntervals configures the state and counter poll cadences. A zero or
+// negative value retains the current default. Changes take effect on the
+// next collector restart (tickers are created once in Run).
+func (c *AristaEAPICollector) SetIntervals(stateS, counterS int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if stateS > 0 {
+		c.stateInterval = time.Duration(stateS) * time.Second
+	}
+	if counterS > 0 {
+		c.counterInterval = time.Duration(counterS) * time.Second
+	}
+}
 
-	c.collectAll(ctx)
+// Run starts the dual-ticker eAPI collection loop.
+func (c *AristaEAPICollector) Run(ctx context.Context) {
+	c.mu.RLock()
+	stateInterval   := c.stateInterval
+	counterInterval := c.counterInterval
+	c.mu.RUnlock()
+
+	if stateInterval <= 0 || stateInterval >= counterInterval {
+		stateInterval = counterInterval / 4
+	}
+
+	stateTicker   := time.NewTicker(stateInterval)
+	counterTicker := time.NewTicker(counterInterval)
+	defer stateTicker.Stop()
+	defer counterTicker.Stop()
+
+	c.collectState(ctx)
+	c.collectCounters(ctx)
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			c.collectAll(ctx)
+		case <-stateTicker.C:
+			c.collectState(ctx)
+		case <-counterTicker.C:
+			c.collectCounters(ctx)
 		}
 	}
 }
 
-// collectAll runs IS-IS and STP collection for every eAPI-enabled Arista device.
-func (c *AristaEAPICollector) collectAll(ctx context.Context) {
+// collectState polls BGP sessions and IS-IS neighbors for every eAPI-enabled
+// Arista device. These are time-sensitive state fields that drive alert latency.
+func (c *AristaEAPICollector) collectState(ctx context.Context) {
 	c.mu.RLock()
 	devices := make([]hub.Device, len(c.devices))
 	copy(devices, c.devices)
 	c.mu.RUnlock()
 
 	for _, dev := range devices {
-		if !dev.EapiEnabled {
+		if !dev.EapiEnabled || dev.Vendor != "arista" {
 			continue
 		}
-		if dev.Vendor != "arista" {
-			continue
-		}
-
 		cred := dev.SSHCredential()
 		if cred == nil {
 			c.logger.Warn().Str("device", dev.Hostname).Msg("no ssh credential for eapi")
@@ -99,28 +132,71 @@ func (c *AristaEAPICollector) collectAll(ctx context.Context) {
 		username, _ := cred.Data["username"].(string)
 		password, _ := cred.Data["password"].(string)
 
-		results, err := eapiCall(ctx, dev.MgmtIP, username, password,
-			[]string{"show isis neighbors", "show spanning-tree", "show ip route vrf all"})
+		// IS-IS neighbors — always posted even when empty so the hub can mark
+		// a fully-isolated device's adjacencies as down.
+		isisResults, err := eapiCall(ctx, dev.MgmtIP, username, password, []string{"show isis neighbors"})
 		if err != nil {
-			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("arista eapi collection failed")
-			continue
-		}
-
-		// IS-IS neighbors (result[0])
-		if len(results) > 0 {
-			adjs := parseISISNeighbors(dev.ID, results[0])
-			if len(adjs) > 0 {
-				if err := c.hubClient.PostISISNeighbors(ctx, adjs); err != nil {
-					c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("isis post to hub failed")
-				} else {
-					c.logger.Info().Str("device", dev.Hostname).Int("adjacencies", len(adjs)).Msg("isis neighbors posted")
-				}
+			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("arista isis collection failed")
+		} else if len(isisResults) > 0 {
+			adjs := parseISISNeighbors(dev.ID, isisResults[0])
+			if err := c.hubClient.PostISISNeighbors(ctx, dev.ID, adjs); err != nil {
+				c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("isis post to hub failed")
+			} else {
+				c.logger.Info().Str("device", dev.Hostname).Int("adjacencies", len(adjs)).Msg("isis neighbors posted")
 			}
 		}
 
-		// STP ports (result[1])
-		if len(results) > 1 {
-			stpPorts := parseAristaSTP(dev.ID, results[1])
+		// BGP session state — separate eAPI call so a failure here doesn't
+		// discard IS-IS results. "show ip bgp summary vrf all" is used instead
+		// of "show bgp summary vrf all" for broader EOS image compatibility.
+		bgpResults, err := eapiCall(ctx, dev.MgmtIP, username, password, []string{"show ip bgp summary vrf all"})
+		if err != nil {
+			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("arista bgp summary collection failed")
+		} else if len(bgpResults) > 0 {
+			sessions := parseBGPSummary(dev.ID, bgpResults[0])
+			if len(sessions) == 0 {
+				if raw, mErr := json.Marshal(bgpResults[0]); mErr == nil {
+					c.logger.Warn().Str("device", dev.Hostname).Str("raw", string(raw)).Msg("bgp summary parsed zero sessions")
+				}
+			}
+			if err := c.hubClient.PostBGPSessions(ctx, dev.ID, sessions); err != nil {
+				c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("bgp post to hub failed")
+			} else {
+				c.logger.Info().Str("device", dev.Hostname).Int("sessions", len(sessions)).Msg("bgp sessions posted")
+			}
+		}
+	}
+}
+
+// collectCounters polls STP ports and the route table for every eAPI-enabled
+// Arista device. These are heavier walks that are less time-sensitive.
+func (c *AristaEAPICollector) collectCounters(ctx context.Context) {
+	c.mu.RLock()
+	devices := make([]hub.Device, len(c.devices))
+	copy(devices, c.devices)
+	c.mu.RUnlock()
+
+	for _, dev := range devices {
+		if !dev.EapiEnabled || dev.Vendor != "arista" {
+			continue
+		}
+		cred := dev.SSHCredential()
+		if cred == nil {
+			continue
+		}
+		username, _ := cred.Data["username"].(string)
+		password, _ := cred.Data["password"].(string)
+
+		results, err := eapiCall(ctx, dev.MgmtIP, username, password,
+			[]string{"show spanning-tree", "show ip route vrf all"})
+		if err != nil {
+			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("arista counter collection failed")
+			continue
+		}
+
+		// STP ports (result[0])
+		if len(results) > 0 {
+			stpPorts := parseAristaSTP(dev.ID, results[0])
 			if len(stpPorts) > 0 {
 				if err := c.hubClient.PostSTPPorts(ctx, stpPorts); err != nil {
 					c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("stp post to hub failed")
@@ -130,38 +206,17 @@ func (c *AristaEAPICollector) collectAll(ctx context.Context) {
 			}
 		}
 
-		// Route table (result[2])
-		if len(results) > 2 {
-			routes := parseAristaRoutes(dev.ID, results[2])
-			if len(routes) > 0 {
-				if err := c.hubClient.PostRoutes(ctx, routes); err != nil {
-					c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("routes post to hub failed")
-				} else {
-					c.logger.Info().Str("device", dev.Hostname).Int("routes", len(routes)).Msg("routes posted")
-				}
+		// Route table (result[1]) — always posted even when empty so the hub
+		// can prune previously-reported routes for a device whose table is empty.
+		if len(results) > 1 {
+			routes := parseAristaRoutes(dev.ID, results[1])
+			if err := c.hubClient.PostRoutes(ctx, dev.ID, routes); err != nil {
+				c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("routes post to hub failed")
+			} else {
+				c.logger.Info().Str("device", dev.Hostname).Int("routes", len(routes)).Msg("routes posted")
 			}
 		}
 	}
-}
-
-// collectDevice is retained for backward-compat but no longer used by collectAll.
-func (c *AristaEAPICollector) collectDevice(ctx context.Context, dev hub.Device) ([]map[string]any, error) {
-	cred := dev.SSHCredential()
-	if cred == nil {
-		return nil, fmt.Errorf("no credential for %s", dev.Hostname)
-	}
-	username, _ := cred.Data["username"].(string)
-	password, _ := cred.Data["password"].(string)
-
-	result, err := eapiCall(ctx, dev.MgmtIP, username, password, []string{"show isis neighbors"})
-	if err != nil {
-		return nil, err
-	}
-	if len(result) == 0 {
-		return nil, nil
-	}
-
-	return parseISISNeighbors(dev.ID, result[0]), nil
 }
 
 // ── eAPI HTTP client ──────────────────────────────────────────────────────────
@@ -296,6 +351,83 @@ func parseISISNeighbors(deviceID string, result map[string]any) []map[string]any
 		}
 	}
 	return rows
+}
+
+// parseBGPSummary converts "show bgp summary" JSON output into
+// bgp_sessions-shaped records for the hub's /collectors/bgp-sessions endpoint.
+// EOS reports peer/local ASNs as strings (to accommodate 4-byte ASNs) and
+// upDownTime as the epoch timestamp of the last state change. Without "vrf
+// all", some EOS versions nest the result under vrfs.default like the
+// multi-VRF form, others return the default VRF's fields at the top level —
+// handle both.
+func parseBGPSummary(deviceID string, result map[string]any) []map[string]any {
+	var rows []map[string]any
+	nowSecs := float64(time.Now().Unix())
+
+	vrfs, _ := result["vrfs"].(map[string]any)
+	if vrfs == nil {
+		if _, ok := result["peers"]; ok {
+			vrfs = map[string]any{"default": result}
+		}
+	}
+	for vrfName, vrfRaw := range vrfs {
+		vrf, _ := vrfRaw.(map[string]any)
+		localASN := eosNum(vrf["asn"])
+
+		peers, _ := vrf["peers"].(map[string]any)
+		for peerIP, peerRaw := range peers {
+			peer, _ := peerRaw.(map[string]any)
+			stateRaw, _ := peer["peerState"].(string)
+
+			uptimeSecs := 0
+			if v, ok := peer["upDownTime"].(float64); ok && v > 0 {
+				if v > 1e9 { // epoch timestamp, not a duration
+					uptimeSecs = int(math.Max(0, nowSecs-v))
+				} else {
+					uptimeSecs = int(v)
+				}
+			}
+
+			rows = append(rows, map[string]any{
+				"device_id":         deviceID,
+				"vrf":               vrfName,
+				"peer_ip":           peerIP,
+				"peer_asn":          eosNum(peer["asn"]),
+				"local_asn":         localASN,
+				"state":             normEOSBGPState(stateRaw),
+				"uptime_s":          uptimeSecs,
+				"in_updates":        jsonInt(peer["msgReceived"]),
+				"out_updates":       jsonInt(peer["msgSent"]),
+				"prefixes_received": jsonInt(peer["prefixReceived"]),
+			})
+		}
+	}
+	return rows
+}
+
+// eosNum converts an Arista eAPI numeric field that may be encoded as either
+// a JSON number or a string (EOS does this for ASNs) to an int.
+func eosNum(v any) int {
+	switch n := v.(type) {
+	case float64:
+		return int(n)
+	case string:
+		var i int
+		fmt.Sscanf(n, "%d", &i)
+		return i
+	}
+	return 0
+}
+
+// normEOSBGPState maps EOS "peerState" values to the bgp_session_state enum
+// (idle, connect, active, opensent, openconfirm, established, unknown).
+func normEOSBGPState(raw string) string {
+	switch strings.ToLower(raw) {
+	case "idle", "connect", "active", "opensent", "openconfirm", "established":
+		return strings.ToLower(raw)
+	default:
+		return "unknown"
+	}
 }
 
 // parseAristaSTP converts "show spanning-tree" JSON output into flat records

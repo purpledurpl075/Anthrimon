@@ -27,31 +27,49 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/sshtofu"
 )
 
 // configStep is one send/expect interaction.  A literal "{{URL}}" in Command is
 // replaced with the URL of the one-shot config server (rollback only).
+// Expect2/Response2/Delay2 are an optional second prompt/response pair,
+// checked against the latest output after Expect/Response is handled (or
+// against the first read if Expect didn't match) -- used by AOS-CX's SFTP
+// rollback recipe, whose host-key-trust prompt is sometimes skipped, leaving
+// only the password prompt. A literal "{{SFTP_PASSWORD}}" in Response2 (or
+// Command) is replaced with the one-shot SFTP server's password.
+// MinWait, if > 0, overrides the default floor (400ms) before readFor's
+// idle-exit check kicks in for this step's first read and its post-Response
+// read -- needed for commands like AOS-CX's SFTP copy, which echo
+// immediately but then go silent for over a second before their real output
+// (a progress spinner) starts.
 type configStep struct {
-	Command  string  `json:"command"`
-	Expect   string  `json:"expect"`
-	Response string  `json:"response"`
-	Delay    float64 `json:"delay"`
+	Command   string  `json:"command"`
+	Expect    string  `json:"expect"`
+	Response  string  `json:"response"`
+	Delay     float64 `json:"delay"`
+	Expect2   string  `json:"expect2"`
+	Response2 string  `json:"response2"`
+	Delay2    float64 `json:"delay2"`
+	MinWait   float64 `json:"min_wait"`
 }
 
 // configExecReq is the POST body for /config-exec.
 type configExecReq struct {
-	Operation     string       `json:"operation"` // backup | deploy | rollback (informational)
-	DeviceIP      string       `json:"device_ip"`
-	SSHPort       int          `json:"ssh_port"`
-	Vendor        string       `json:"vendor"`
-	Username      string       `json:"username"`
-	Password      string       `json:"password"`
-	EnableSecret  string       `json:"enable_secret"`
-	EnterEnable   bool         `json:"enter_enable"`
-	Steps         []configStep `json:"steps"`
-	FinalRead     string       `json:"final_read_command"`
-	ServeConfig   string       `json:"serve_config"`
-	ExpectedSrcIP string       `json:"expected_source_ip"`
+	Operation      string       `json:"operation"` // backup | deploy | rollback (informational)
+	DeviceIP       string       `json:"device_ip"`
+	SSHPort        int          `json:"ssh_port"`
+	Vendor         string       `json:"vendor"`
+	Username       string       `json:"username"`
+	Password       string       `json:"password"`
+	EnableSecret   string       `json:"enable_secret"`
+	EnterEnable    bool         `json:"enter_enable"`
+	Steps          []configStep `json:"steps"`
+	FinalRead      string       `json:"final_read_command"`
+	ServeConfig    string       `json:"serve_config"`
+	ServeTransport string       `json:"serve_transport"` // "http" (default) | "sftp"
+	ExpectedSrcIP  string       `json:"expected_source_ip"`
 }
 
 type configExecResp struct {
@@ -191,7 +209,7 @@ func startConfigServer(deviceIP, expectedSrc, text string) (*configServer, error
 
 // ── SSH session executor ──────────────────────────────────────────────────────
 
-func runConfigSession(ctx context.Context, req *configExecReq, serveURL string) (string, error) {
+func runConfigSession(ctx context.Context, req *configExecReq, serveURL, sftpPassword string) (string, error) {
 	port := req.SSHPort
 	if port == 0 {
 		port = 22
@@ -199,7 +217,7 @@ func runConfigSession(ctx context.Context, req *configExecReq, serveURL string) 
 
 	cfg := &ssh.ClientConfig{
 		User:            req.Username,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		HostKeyCallback: sshtofu.HostKeyCallback(),
 		Timeout:         30 * time.Second,
 	}
 	if req.Password != "" {
@@ -246,18 +264,23 @@ func runConfigSession(ctx context.Context, req *configExecReq, serveURL string) 
 	}
 
 	write := func(s string) { _, _ = io.WriteString(stdin, s+"\n") }
+	const idleGap = 1200 * time.Millisecond        // quiet period that means "done"
+	const defaultMinWait = 400 * time.Millisecond  // let the command at least echo
 	// readFor returns everything the device emitted since byte offset `start`.
 	// `maxWait` is a hard cap; within it we return early once output has started
 	// and then gone idle for idleGap — so a `show running-config` that finishes
 	// in 3 s doesn't cost the full 30 s cap.  A `start`-relative growth check
 	// avoids declaring idle before the device has emitted anything (e.g. while a
 	// `configure replace` thinks before printing its confirm prompt).
-	readFor := func(start int, maxWait float64) string {
+	// `minWait` is a floor before idle-exit is even considered -- some commands
+	// (e.g. AOS-CX's SFTP copy) echo immediately, then pause for over a second
+	// before their real output (a progress spinner) starts; a minWait shorter
+	// than that pause causes readFor to return with just the echo, before the
+	// text Expect is looking for has appeared.
+	readFor := func(start int, maxWait float64, minWait time.Duration) string {
 		if maxWait <= 0 {
 			maxWait = 1.0
 		}
-		const idleGap = 1200 * time.Millisecond // quiet period that means "done"
-		const minWait = 400 * time.Millisecond  // let the command at least echo
 		deadline := time.Now().Add(time.Duration(maxWait * float64(time.Second)))
 		floor := time.Now().Add(minWait)
 		lastLen := buf.len()
@@ -280,27 +303,40 @@ func runConfigSession(ctx context.Context, req *configExecReq, serveURL string) 
 	}
 
 	// Drain the login banner / first prompt.
-	readFor(0, 1.5)
+	readFor(0, 1.5, defaultMinWait)
 
 	if req.EnterEnable {
 		start := buf.len()
 		write("enable")
-		out := readFor(start, 1.5)
+		out := readFor(start, 1.5, defaultMinWait)
 		if req.EnableSecret != "" && regexp.MustCompile(`(?i)password`).MatchString(out) {
 			write(req.EnableSecret)
-			readFor(buf.len(), 1.5)
+			readFor(buf.len(), 1.5, defaultMinWait)
 		}
 	}
 
 	for _, st := range req.Steps {
 		cmd := strings.ReplaceAll(st.Command, "{{URL}}", serveURL)
+		cmd = strings.ReplaceAll(cmd, "{{SFTP_PASSWORD}}", sftpPassword)
+		minWait := defaultMinWait
+		if st.MinWait > 0 {
+			minWait = time.Duration(st.MinWait * float64(time.Second))
+		}
 		start := buf.len()
 		write(cmd)
-		out := readFor(start, st.Delay)
+		out := readFor(start, st.Delay, minWait)
 		if st.Expect != "" {
 			if matched, _ := regexp.MatchString("(?i)"+st.Expect, out); matched {
-				write(st.Response)
-				readFor(buf.len(), st.Delay)
+				resp := strings.ReplaceAll(st.Response, "{{SFTP_PASSWORD}}", sftpPassword)
+				write(resp)
+				out = readFor(buf.len(), st.Delay, minWait)
+			}
+		}
+		if st.Expect2 != "" {
+			if matched, _ := regexp.MatchString("(?i)"+st.Expect2, out); matched {
+				resp2 := strings.ReplaceAll(st.Response2, "{{SFTP_PASSWORD}}", sftpPassword)
+				write(resp2)
+				readFor(buf.len(), st.Delay2, defaultMinWait)
 			}
 		}
 	}
@@ -308,11 +344,11 @@ func runConfigSession(ctx context.Context, req *configExecReq, serveURL string) 
 	if req.FinalRead != "" {
 		start := buf.len()
 		write(req.FinalRead)
-		readFor(start, 30)
+		readFor(start, 30, defaultMinWait)
 	}
 
 	write("exit")
-	readFor(buf.len(), 0.5)
+	readFor(buf.len(), 0.5, defaultMinWait)
 	_ = session.Close()
 
 	return buf.String(), nil
@@ -350,21 +386,31 @@ func (s *Server) handleConfigExec(w http.ResponseWriter, r *http.Request) {
 		Bool("serve", req.ServeConfig != "").
 		Msg("config-exec requested")
 
-	var cs *configServer
 	serveURL := ""
+	sftpPassword := ""
+	var wasServed func() bool
 	if req.ServeConfig != "" {
-		var err error
-		cs, err = startConfigServer(req.DeviceIP, req.ExpectedSrcIP, req.ServeConfig)
-		if err != nil {
-			http.Error(w, "config server: "+err.Error(), http.StatusInternalServerError)
-			return
+		if req.ServeTransport == "sftp" {
+			ss, err := startSFTPServer(req.DeviceIP, req.ExpectedSrcIP, req.ServeConfig)
+			if err != nil {
+				http.Error(w, "config server: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			serveURL, sftpPassword, wasServed = ss.url, ss.password, ss.wasServed
+			defer ss.shutdown()
+		} else {
+			cs, err := startConfigServer(req.DeviceIP, req.ExpectedSrcIP, req.ServeConfig)
+			if err != nil {
+				http.Error(w, "config server: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+			serveURL, wasServed = cs.url, cs.wasServed
+			defer cs.shutdown()
 		}
-		serveURL = cs.url
-		defer cs.shutdown()
 	}
 
-	out, err := runConfigSession(r.Context(), &req, serveURL)
-	served := cs != nil && cs.wasServed()
+	out, err := runConfigSession(r.Context(), &req, serveURL, sftpPassword)
+	served := wasServed != nil && wasServed()
 	if err != nil {
 		s.log.Warn().Err(err).Str("device", req.DeviceIP).Msg("config-exec failed")
 		w.Header().Set("Content-Type", "application/json")

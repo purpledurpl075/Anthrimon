@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { useNavigate, useLocation } from 'react-router-dom'
 import {
   ReactFlow, ReactFlowProvider, Controls, Background, MiniMap, Panel, useReactFlow,
+  useViewport,
   EdgeLabelRenderer, getStraightPath, applyNodeChanges,
   Handle, Position,
   type NodeProps, type Node, type Edge, type EdgeProps,
@@ -15,7 +16,17 @@ import {
   type LinkUtilisation,
 } from '../api/topology'
 import { DeviceTypeIcon, DEVICE_TYPE_COLOR as TYPE_COLOR, DEVICE_TYPE_LABEL as TYPE_LABEL } from '../components/DeviceTypeIcon'
+import { fetchSites } from '../api/devices'
+
+/** Short vendor cue shown under each node. */
+const VENDOR_SHORT: Record<string, string> = {
+  cisco_ios: 'Cisco', cisco_iosxe: 'Cisco', cisco_iosxr: 'Cisco', cisco_nxos: 'Cisco',
+  arista: 'Arista', aruba_cx: 'Aruba', aruba_ap: 'Aruba', procurve: 'HPE',
+  juniper: 'Juniper', fortios: 'Fortinet', ubiquiti: 'Ubiquiti', unknown: '',
+}
 import api from '../api/client'
+
+const UNASSIGNED_SITE = '__unassigned__'
 
 // ── Palettes ───────────────────────────────────────────────────────────────
 
@@ -76,6 +87,8 @@ const ROOT_PRIO: Record<string, number> = {
 // Device types that are treated as WAN border / uplink devices → get cloud connection
 const BORDER_TYPES = new Set(['router', 'firewall', 'load_balancer'])
 const CLOUD_NODE_ID = 'synthetic-internet-cloud'
+// One cloud node per site WAN gateway — id is keyed off the gateway device.
+const cloudNodeId = (gatewayId: string) => `${CLOUD_NODE_ID}-${gatewayId}`
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -292,6 +305,11 @@ function DeviceNode({ data, selected }: NodeProps) {
         <div className="text-[9px] font-mono text-slate-400 truncate px-1">
           {d.mgmt_ip || '—'}
         </div>
+        {VENDOR_SHORT[d.vendor] ? (
+          <div className="mt-0.5 inline-block text-[8px] font-semibold uppercase tracking-wide text-slate-500 bg-slate-100 rounded px-1.5 py-px">
+            {VENDOR_SHORT[d.vendor]}
+          </div>
+        ) : null}
       </div>
     </div>
   )
@@ -866,6 +884,49 @@ function loadSavedLayout(): Record<string, { x: number; y: number }> {
 
 // ── Page ───────────────────────────────────────────────────────────────────
 
+// ── Modern site containers (flow-coordinate backdrop) ────────────────────────
+// Rendered behind the React Flow canvas; tracks the viewport transform so the
+// boxes pan/zoom with the graph. Each box bounds a site's devices (collapse/show
+// via the existing Sites filter).
+function FlowBackdrop({ nodes, siteName }: { nodes: Node[]; siteName: (id: string) => string }) {
+  const { x, y, zoom } = useViewport()
+  const devs = nodes.filter(n => n.type === 'device')
+  if (devs.length === 0) return null
+
+  const bySite = new Map<string, Node[]>()
+  devs.forEach(n => {
+    const s = (n.data as Record<string, unknown>).site_id as string | null
+    if (!s) return
+    if (!bySite.has(s)) bySite.set(s, [])
+    bySite.get(s)!.push(n)
+  })
+  if (bySite.size === 0) return null
+
+  return (
+    <div className="absolute inset-0 overflow-hidden pointer-events-none" style={{ zIndex: 0 }}>
+      <div style={{ transformOrigin: '0 0', transform: `translate(${x}px, ${y}px) scale(${zoom})` }}>
+        {[...bySite.entries()].map(([sid, ns]) => {
+          const sxs = ns.map(n => n.position.x), sys = ns.map(n => n.position.y)
+          const l = Math.min(...sxs) - 20, t = Math.min(...sys) - 34
+          const w = Math.max(...sxs) + NODE_W + 20 - l, h = Math.max(...sys) + CIRCLE_SIZE + 34 - t
+          return (
+            <div key={`site-${sid}`} style={{
+              position: 'absolute', left: l, top: t, width: w, height: h, borderRadius: 20,
+              border: '1.5px dashed rgba(99,102,241,0.38)',
+            }}>
+              <span style={{
+                position: 'absolute', left: 14, top: -10, background: '#eef2ff', color: '#4f46e5',
+                fontSize: 10, fontWeight: 700, padding: '2px 9px', borderRadius: 999,
+                border: '1px solid #e0e7ff',
+              }}>{siteName(sid)}</span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 export default function TopologyPage() {
   return (
     <ReactFlowProvider>
@@ -878,6 +939,10 @@ function TopologyPageInner() {
   const navigate = useNavigate()
   const location = useLocation()
   const { fitView } = useReactFlow()
+
+  // Hover tooltip + canvas ref for PNG export
+  const [hoverInfo, setHoverInfo] = useState<{ node: Node; x: number; y: number } | null>(null)
+  const canvasRef = useRef<HTMLDivElement>(null)
 
   // Path-trace overlay (set once from router state on first mount)
   const [pathHighlight, setPathHighlight] = useState<PathTraceHighlight | null>(() => {
@@ -893,8 +958,10 @@ function TopologyPageInner() {
   const [showLabels,     setShowLabels]    = useState(true)
   const [protocolFilter, setProtocol]      = useState<'all' | 'lldp' | 'cdp'>('all')
   const [hiddenTypes,    setHiddenTypes]   = useState<Set<string>>(new Set())
+  const [hiddenSites,    setHiddenSites]   = useState<Set<string>>(new Set())
   const [hiddenNodeIds,  setHiddenNodeIds] = useState<Set<string>>(new Set())
   const [typeMenuOpen,   setTypeMenuOpen]  = useState(false)
+  const [siteMenuOpen,   setSiteMenuOpen]  = useState(false)
   const [search,         setSearch]        = useState('')
   const [showUtilLegend, setShowUtilLegend] = useState(false)
 
@@ -904,11 +971,37 @@ function TopologyPageInner() {
   const saveTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
   const savedLayout = useMemo(() => loadSavedLayout(), [])
 
+  // ── Filter dropdown outside-click handling ──────────────────────────────
+  // (mouseleave-to-close is too touchy: re-renders triggered by clicking a
+  // checkbox can momentarily put the cursor outside the menu's bounds)
+  const typeMenuRef = useRef<HTMLDivElement>(null)
+  const siteMenuRef = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    if (!typeMenuOpen && !siteMenuOpen) return
+    function handle(e: MouseEvent) {
+      if (typeMenuOpen && typeMenuRef.current && !typeMenuRef.current.contains(e.target as Node)) {
+        setTypeMenuOpen(false)
+      }
+      if (siteMenuOpen && siteMenuRef.current && !siteMenuRef.current.contains(e.target as Node)) {
+        setSiteMenuOpen(false)
+      }
+    }
+    document.addEventListener('mousedown', handle)
+    return () => document.removeEventListener('mousedown', handle)
+  }, [typeMenuOpen, siteMenuOpen])
+
   // ── Main topology query ────────────────────────────────────────────────
   const { data, isLoading, refetch, isFetching } = useQuery({
     queryKey:  ['topology'],
     queryFn:   fetchTopology,
     staleTime: 30_000,
+  })
+
+  // ── Sites (for the site filter) ────────────────────────────────────────
+  const { data: sites } = useQuery({
+    queryKey:  ['sites'],
+    queryFn:   fetchSites,
+    staleTime: 300_000,
   })
 
   // ── Alert summary query ────────────────────────────────────────────────
@@ -1010,12 +1103,28 @@ function TopologyPageInner() {
   const nodesById = Object.fromEntries((data?.nodes ?? []).map(n => [n.id, n]))
   const deviceTypes = [...new Set((data?.nodes ?? []).map(n => n.device_type))].filter(Boolean)
 
+  const siteNameById = useMemo(
+    () => Object.fromEntries((sites ?? []).map(s => [s.id, s.name])),
+    [sites]
+  )
+
+  const siteOptions = useMemo(() => {
+    const usedIds = new Set((data?.nodes ?? []).map(n => n.site_id ?? UNASSIGNED_SITE))
+    const opts = [...usedIds]
+      .filter(id => id !== UNASSIGNED_SITE)
+      .map(id => ({ id, name: siteNameById[id] ?? 'Unknown site' }))
+      .sort((a, b) => a.name.localeCompare(b.name))
+    if (usedIds.has(UNASSIGNED_SITE)) opts.push({ id: UNASSIGNED_SITE, name: 'Unassigned' })
+    return opts
+  }, [siteNameById, data?.nodes])
+
   useEffect(() => {
     if (!data) return
 
     const visible = data.nodes.filter(n =>
       pathNodeIdSet.has(n.id) ||
-      (!hiddenTypes.has(n.device_type) && !hiddenNodeIds.has(n.id) && (showIsolated || n.connected))
+      (!hiddenTypes.has(n.device_type) && !hiddenSites.has(n.site_id ?? UNASSIGNED_SITE) &&
+       !hiddenNodeIds.has(n.id) && (showIsolated || n.connected))
     )
     const { pos, layer } = hierLayout(visible, data.edges)
     const nodeIds = new Set(visible.map(n => n.id))
@@ -1031,24 +1140,33 @@ function TopologyPageInner() {
     }
 
     // ── Cloud / WAN node synthesis ─────────────────────────────────────────
-    // Pick the SINGLE WAN gateway: the border device (router/firewall/LB)
-    // that sits at the lowest BFS layer — i.e. the top of the hierarchy.
-    // Among ties, prefer the one with the fewest topology-layer peers (more
-    // likely to be a solo uplink device than a core router).
+    // Pick one WAN gateway PER SITE: the border device (router/firewall/LB)
+    // that sits at the lowest BFS layer within that site — i.e. the top of
+    // the per-site hierarchy. Among ties, prefer the one with the fewest
+    // topology-layer peers (more likely to be a solo uplink device than a
+    // core router).
     const borderNodes = visible.filter(n => BORDER_TYPES.has(n.device_type) && n.connected)
-    const wanGateway = borderNodes.length > 0
-      ? borderNodes.reduce((best, n) => {
-          const ln = layer[n.id] ?? 99
-          const lb = layer[best.id] ?? 99
-          return ln < lb ? n : best
-        })
-      : null
+    const gatewayBySite = new Map<string, typeof borderNodes[number]>()
+    borderNodes.forEach(n => {
+      const siteKey = n.site_id ?? UNASSIGNED_SITE
+      const existing = gatewayBySite.get(siteKey)
+      if (!existing || (layer[n.id] ?? 99) < (layer[existing.id] ?? 99)) {
+        gatewayBySite.set(siteKey, n)
+      }
+    })
+    const wanGateways = [...gatewayBySite.values()]
+    const cloudLabel = (gw: typeof borderNodes[number]) =>
+      wanGateways.length <= 1
+        ? 'Internet'
+        : (gw.site_id ? (siteNameById[gw.site_id] ?? 'Unknown site') : 'Unassigned')
 
     const isPathMode = pathNodeIdSet.size > 0
-    // Path ends at the WAN gateway with traffic exiting to an unmonitored
-    // next hop (e.g. a default route to the internet) — highlight the cloud too.
-    const pathExitsToCloud = isPathMode && !!pathHighlight?.exitsToCloud &&
-      !!wanGateway && pathHighlight.deviceIds.at(-1) === wanGateway.id
+    // Path ends at a WAN gateway with traffic exiting to an unmonitored
+    // next hop (e.g. a default route to the internet) — highlight that
+    // gateway's cloud too.
+    const pathExitGatewayId = isPathMode && pathHighlight?.exitsToCloud
+      ? pathHighlight.deviceIds.at(-1) ?? null
+      : null
 
     setRfNodes(prev => {
       const prevById = Object.fromEntries(prev.map(n => [n.id, n]))
@@ -1069,34 +1187,36 @@ function TopologyPageInner() {
             dimmed:    isPathMode ? !isPathHit : (isSearchDimmed || isIssuesDimmed),
             searchHit: isPathMode ? false : isSearchHit,
             pathOrder: isPathHit ? (pathOrderMap.get(n.id) ?? null) : null,
+            _layer:    layer[n.id] ?? 0,
           } as unknown as Record<string, unknown>,
           draggable: true,
         }
       })
 
-      // Cloud node: positioned directly above the single WAN gateway
-      const cloudRfNode: Node[] = []
-      if (wanGateway) {
-        const gwPos    = pos[wanGateway.id] ?? { x: 0, y: 0 }
+      // Cloud nodes: one per site's WAN gateway, positioned directly above it
+      const cloudRfNodes: Node[] = wanGateways.map(gw => {
+        const id       = cloudNodeId(gw.id)
+        const gwPos    = pos[gw.id] ?? { x: 0, y: 0 }
         const fallback = { x: gwPos.x - CLOUD_W / 2 + NODE_W / 2, y: gwPos.y - V_STEP * 1.4 }
-        const cloudPos = prevById[CLOUD_NODE_ID]?.position
-          ?? savedLayout[CLOUD_NODE_ID]
+        const cloudPos = prevById[id]?.position
+          ?? savedLayout[id]
           ?? fallback
 
+        const exitsToCloud = pathExitGatewayId === gw.id
         const isCloudDimmed = isPathMode
-          ? !pathExitsToCloud
+          ? !exitsToCloud
           : (searchMatchIds !== null && searchMatchIds.size > 0) || showIssuesOnly
 
-        cloudRfNode.push({
-          id:        CLOUD_NODE_ID,
+        return {
+          id,
           type:      'cloud',
           position:  cloudPos,
           draggable: true,
-          data:      { dimmed: isCloudDimmed, label: 'Internet' } as unknown as Record<string, unknown>,
-        })
-      }
+          data:      { dimmed: isCloudDimmed, label: cloudLabel(gw) } as unknown as Record<string, unknown>,
+        }
+      })
 
-      return [...deviceRfNodes, ...cloudRfNode]
+      return [...deviceRfNodes, ...cloudRfNodes]
     })
 
     // ── API edges ──────────────────────────────────────────────────────────
@@ -1107,7 +1227,10 @@ function TopologyPageInner() {
       )
       .map(e => {
         const isAdj = !selectedId || e.source === selectedId || e.target === selectedId
-        const label = showLabels
+        // Show port labels by default on key (≥1 Gbps) links even when the
+        // global Labels toggle is off.
+        const keyLink = (e.source_speed_bps ?? 0) >= 1e9
+        const label = (showLabels || keyLink)
           ? (e.source_port && e.target_port
               ? `${e.source_port} → ${e.target_port}`
               : e.source_port ?? e.target_port ?? '')
@@ -1157,45 +1280,38 @@ function TopologyPageInner() {
         }
       })
 
-    // ── WAN / cloud edge ───────────────────────────────────────────────────
-    // Single dashed edge from the cloud to the WAN gateway device.
-    // The "WAN interface" is any port on the gateway that does NOT appear
-    // in the LLDP/CDP edge table (those are internal-facing).
-    let wanEdges: Edge[] = []
-    if (wanGateway) {
-      // Collect all interface names this device uses in known LLDP/CDP edges
-      const internalPorts = new Set<string>()
-      data.edges.forEach(e => {
-        if (e.source === wanGateway.id && e.source_port) internalPorts.add(e.source_port)
-        if (e.target === wanGateway.id && e.target_port) internalPorts.add(e.target_port)
-      })
-      // We can't know the WAN interface name without the full interface list,
-      // but we label the edge with the gateway hostname so it's clear.
+    // ── WAN / cloud edges ──────────────────────────────────────────────────
+    // One dashed edge per site, from that site's cloud to its WAN gateway
+    // device. We don't know the exact WAN interface name without the full
+    // interface list, so the edge is labeled "WAN" and shows the gateway
+    // hostname as the target port.
+    const wanEdges: Edge[] = wanGateways.map(gw => {
+      const exitsToCloud = pathExitGatewayId === gw.id
       const wanDimmed = isPathMode
-        ? !pathExitsToCloud
+        ? !exitsToCloud
         : (searchMatchIds !== null && searchMatchIds.size > 0) || showIssuesOnly
-      wanEdges = [{
-        id:     `wan-edge-${wanGateway.id}`,
-        source: CLOUD_NODE_ID,
-        target: wanGateway.id,
+      return {
+        id:     `wan-edge-${gw.id}`,
+        source: cloudNodeId(gw.id),
+        target: gw.id,
         type:   'topology',
         data:   {
           label:           showLabels ? 'WAN' : '',
           protocol:        'wan',
-          highlighted:     pathExitsToCloud,
+          highlighted:     exitsToCloud,
           dimmed:          wanDimmed,
           source_port:     'Internet',
-          target_port:     wanGateway.hostname,
+          target_port:     gw.hostname,
           speed_bps:       null,
           util_pct:        null,
           util_in_pct:     null,
           util_out_pct:    null,
         },
-      }]
-    }
+      }
+    })
 
     setRfEdges([...apiEdges, ...wanEdges])
-  }, [data, showIsolated, showIssuesOnly, hiddenTypes, selectedId, protocolFilter, showLabels,
+  }, [data, showIsolated, showIssuesOnly, hiddenTypes, hiddenSites, selectedId, protocolFilter, showLabels,
       alertsByDevice, utilBatch, searchMatchIds, savedLayout,
       pathHighlight, pathNodeIdSet, pathEdgeIdSet, pathOrderMap])
 
@@ -1215,10 +1331,10 @@ function TopologyPageInner() {
 
   const onNodeClick: NodeMouseHandler = useCallback((_, node) => {
     // Cloud node: fit view to it + the WAN gateway node directly below it
-    if (node.id === CLOUD_NODE_ID) {
-      const wanEdge = rfEdges.find(e => e.id.startsWith('wan-edge-'))
+    if (node.type === 'cloud') {
+      const wanEdge = rfEdges.find(e => e.source === node.id)
       const gatewayId = wanEdge?.target
-      const focusIds = new Set([CLOUD_NODE_ID, ...(gatewayId ? [gatewayId] : [])])
+      const focusIds = new Set([node.id, ...(gatewayId ? [gatewayId] : [])])
       setTimeout(() => {
         fitView({ nodes: rfNodes.filter(n => focusIds.has(n.id)), padding: 0.5, duration: 450 })
       }, 30)
@@ -1248,7 +1364,7 @@ function TopologyPageInner() {
   }, [data?.edges, rfNodes, rfEdges, fitView])
 
   const onNodeDoubleClick: NodeMouseHandler = (_, node) => {
-    if (node.id === CLOUD_NODE_ID) return   // cloud node has no device page
+    if (node.type === 'cloud') return   // cloud nodes have no device page
     navigate(`/devices/${node.id}`)
   }
 
@@ -1264,6 +1380,8 @@ function TopologyPageInner() {
   const selectedNode = selectedId ? nodesById[selectedId] : null
   const toggleType   = (t: string) =>
     setHiddenTypes(s => { const n = new Set(s); n.has(t) ? n.delete(t) : n.add(t); return n })
+  const toggleSite   = (id: string) =>
+    setHiddenSites(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n })
 
   if (isLoading) {
     return <div className="flex items-center justify-center h-full text-slate-400 text-sm">Loading topology…</div>
@@ -1357,7 +1475,7 @@ function TopologyPageInner() {
           </div>
 
           {/* Device type filter */}
-          <div className="relative">
+          <div className="relative" ref={typeMenuRef}>
             <button onClick={() => setTypeMenuOpen(o => !o)}
               className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium border transition-colors ${
                 hiddenTypes.size > 0 ? 'bg-blue-50 text-blue-600 border-blue-200' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'
@@ -1367,8 +1485,7 @@ function TopologyPageInner() {
               {hiddenTypes.size > 0 && <span className="bg-blue-600 text-white rounded-full px-1 text-[10px]">{hiddenTypes.size}</span>}
             </button>
             {typeMenuOpen && (
-              <div className="absolute top-full left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-50 py-2 min-w-[160px]"
-                onMouseLeave={() => setTypeMenuOpen(false)}>
+              <div className="absolute top-full left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-50 py-2 min-w-[160px]">
                 {deviceTypes.map(t => (
                   <label key={t} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer">
                     <input type="checkbox" checked={!hiddenTypes.has(t)} onChange={() => toggleType(t)} className="rounded border-slate-300 text-blue-600"/>
@@ -1382,6 +1499,33 @@ function TopologyPageInner() {
               </div>
             )}
           </div>
+
+          {/* Site filter */}
+          {siteOptions.length > 1 && (
+            <div className="relative" ref={siteMenuRef}>
+              <button onClick={() => setSiteMenuOpen(o => !o)}
+                className={`flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium border transition-colors ${
+                  hiddenSites.size > 0 ? 'bg-blue-50 text-blue-600 border-blue-200' : 'bg-white text-slate-500 border-slate-200 hover:border-slate-400'
+                }`}>
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M3 9.5 12 3l9 6.5V20a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg>
+                <span className="hidden sm:inline">Sites</span>
+                {hiddenSites.size > 0 && <span className="bg-blue-600 text-white rounded-full px-1 text-[10px]">{hiddenSites.size}</span>}
+              </button>
+              {siteMenuOpen && (
+                <div className="absolute top-full left-0 mt-1 bg-white border border-slate-200 rounded-xl shadow-lg z-50 py-2 min-w-[180px]">
+                  {siteOptions.map(s => (
+                    <label key={s.id} className="flex items-center gap-2.5 px-3 py-2 hover:bg-slate-50 cursor-pointer">
+                      <input type="checkbox" checked={!hiddenSites.has(s.id)} onChange={() => toggleSite(s.id)} className="rounded border-slate-300 text-blue-600"/>
+                      <span className={`text-xs text-slate-600 ${s.id === UNASSIGNED_SITE ? 'italic text-slate-400' : ''}`}>{s.name}</span>
+                    </label>
+                  ))}
+                  {hiddenSites.size > 0 && (
+                    <button onClick={() => setHiddenSites(new Set())} className="w-full text-left px-3 py-1.5 text-xs text-blue-600 hover:bg-slate-50 border-t border-slate-100 mt-1">Show all</button>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
 
           <Pill active={showLabels} onClick={() => setShowLabels(v => !v)}>
             <span className="hidden sm:inline">{showLabels ? 'Labels on' : 'Labels off'}</span>
@@ -1421,7 +1565,7 @@ function TopologyPageInner() {
             onClick={() => {
               try { localStorage.removeItem(LAYOUT_KEY) } catch { /* ignore */ }
               if (data) {
-                const visible = data.nodes.filter(n => !hiddenTypes.has(n.device_type) && !hiddenNodeIds.has(n.id) && (showIsolated || n.connected))
+                const visible = data.nodes.filter(n => !hiddenTypes.has(n.device_type) && !hiddenSites.has(n.site_id ?? UNASSIGNED_SITE) && !hiddenNodeIds.has(n.id) && (showIsolated || n.connected))
                 const { pos } = hierLayout(visible, data.edges)
                 setRfNodes(prev => prev.map(n => ({ ...n, position: pos[n.id] ?? n.position })))
               }
@@ -1495,7 +1639,7 @@ function TopologyPageInner() {
       </div>
 
       {/* Canvas */}
-      <div className="flex-1 relative">
+      <div className="flex-1 relative" ref={canvasRef}>
         {rfNodes.length === 0 ? (
           <div className="flex items-center justify-center h-full">
             <div className="text-center">
@@ -1505,6 +1649,7 @@ function TopologyPageInner() {
           </div>
         ) : (
           <>
+            <FlowBackdrop nodes={rfNodes} siteName={id => siteNameById[id] ?? 'Site'} />
             <ReactFlow
               nodes={rfNodes}
               edges={rfEdges}
@@ -1514,11 +1659,16 @@ function TopologyPageInner() {
               onNodeClick={onNodeClick}
               onNodeDoubleClick={onNodeDoubleClick}
               onEdgeClick={onEdgeClick}
+              onNodeMouseEnter={(e, node) => {
+                if (node.type === 'device') setHoverInfo({ node, x: e.clientX, y: e.clientY })
+              }}
+              onNodeMouseLeave={() => setHoverInfo(null)}
               onPaneClick={() => {
                 setSelectedId(null)
                 setSelectedEdgeId(null)
                 setEdgePanelPos(null)
                 setTypeMenuOpen(false)
+                setHoverInfo(null)
               }}
               fitView
               fitViewOptions={{ padding: 0.22 }}
@@ -1530,6 +1680,32 @@ function TopologyPageInner() {
               <Controls showFitView={false} />
               <Panel position="top-right" className="flex gap-1.5 mt-1 mr-1">
                 <FitBtn />
+                <button
+                  title="Export topology as PNG"
+                  onClick={async () => {
+                    if (!canvasRef.current) return
+                    const { toPng } = await import('html-to-image')
+                    try {
+                      const url = await toPng(canvasRef.current, {
+                        pixelRatio: 2,
+                        backgroundColor: '#ffffff',
+                        filter: (el) => {
+                          const c = (el as HTMLElement).classList
+                          return !c || !(c.contains('react-flow__minimap') || c.contains('react-flow__controls') || c.contains('react-flow__panel'))
+                        },
+                      })
+                      const a = document.createElement('a')
+                      a.href = url
+                      a.download = 'topology.png'
+                      a.click()
+                    } catch { /* ignore export errors */ }
+                  }}
+                  className="flex items-center justify-center w-7 h-7 rounded-lg bg-white border border-slate-200 text-slate-500 hover:text-blue-600 hover:border-blue-300 shadow-sm"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                    <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                  </svg>
+                </button>
               </Panel>
               <MiniMap
                 nodeColor={n => TYPE_COLOR[(n.data as unknown as TopologyNode)?.device_type] ?? '#475569'}
@@ -1562,9 +1738,36 @@ function TopologyPageInner() {
               ) : null
             })()}
 
+            {/* Hover tooltip */}
+            {hoverInfo && (() => {
+              const hd = hoverInfo.node.data as unknown as NodeData
+              const a = hd.alerts
+              return (
+                <div
+                  className="fixed z-50 pointer-events-none bg-slate-900/95 text-white rounded-lg shadow-xl px-3 py-2 text-xs max-w-[230px]"
+                  style={{ left: hoverInfo.x + 14, top: hoverInfo.y + 14 }}
+                >
+                  <div className="font-semibold text-[12px] truncate">{hd.hostname}</div>
+                  <div className="mt-0.5 text-slate-300 flex flex-wrap gap-x-3 gap-y-0.5">
+                    <span>{TYPE_LABEL[hd.device_type] ?? hd.device_type}</span>
+                    {VENDOR_SHORT[hd.vendor] && <span>{VENDOR_SHORT[hd.vendor]}</span>}
+                    <span className={hd.status === 'up' ? 'text-emerald-300' : hd.status === 'down' ? 'text-red-300' : 'text-amber-300'}>
+                      {hd.status}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 font-mono text-[10px] text-slate-400">{hd.mgmt_ip || '—'}</div>
+                  {a && a.count > 0 && (
+                    <div className="mt-1 text-[10px] font-medium" style={{ color: SEVERITY_COLOR[a.severity] ?? '#f87171' }}>
+                      {a.count} active alert{a.count !== 1 ? 's' : ''} · {a.severity}
+                    </div>
+                  )}
+                </div>
+              )
+            })()}
+
             {/* Hint */}
             <div className="absolute bottom-14 left-1/2 -translate-x-1/2 text-[10px] text-slate-400 pointer-events-none">
-              Click node to inspect · Double-click to open · Click link for bandwidth
+              Hover for details · Click to inspect · Double-click to open · Click link for bandwidth
             </div>
           </>
         )}

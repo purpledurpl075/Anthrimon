@@ -27,3 +27,45 @@ export const fetchAlert = (id: string) =>
 
 export const fetchAlertRule = (id: string) =>
   api.get<AlertRule>(`/alert-rules/${id}`).then(r => r.data)
+
+export type AlertsWsStatus = 'connecting' | 'open' | 'closed'
+
+/**
+ * Subscribe to live alert changes via /alerts/ws. Calls `onMessage` whenever
+ * the server reports `{"event": "alerts_changed"}` — caller should refetch
+ * GET /alerts. Reconnects with exponential backoff (1s → 30s cap) if the
+ * connection drops. Returns an unsubscribe function.
+ */
+export function subscribeAlerts(
+  onMessage: () => void,
+  onStatusChange?: (status: AlertsWsStatus) => void,
+): () => void {
+  const token = localStorage.getItem('token') ?? ''
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  let ws: WebSocket | null = null
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let backoff = 1000
+  let stopped = false
+
+  function connect() {
+    if (stopped) return
+    onStatusChange?.('connecting')
+    ws = new WebSocket(`${proto}://${window.location.host}/api/v1/alerts/ws?token=${encodeURIComponent(token)}`)
+    ws.onopen = () => { backoff = 1000; onStatusChange?.('open') }
+    ws.onmessage = () => onMessage()
+    ws.onclose = () => {
+      onStatusChange?.('closed')
+      if (stopped) return
+      reconnectTimer = setTimeout(connect, backoff)
+      backoff = Math.min(backoff * 2, 30_000)
+    }
+    ws.onerror = () => ws?.close()
+  }
+  connect()
+
+  return () => {
+    stopped = true
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    ws?.close()
+  }
+}

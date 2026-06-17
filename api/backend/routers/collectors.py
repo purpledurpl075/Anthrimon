@@ -32,7 +32,7 @@ import httpx
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import Response, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import cast, select, text, update
 from sqlalchemy.dialects.postgresql import INET as PG_INET
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -307,8 +307,10 @@ def _collector_out(c: RemoteCollector, token: Optional[str] = None) -> dict:
         "capabilities":  c.capabilities,
         "last_seen":     c.last_seen.isoformat() if c.last_seen else None,
         "registered_at": c.registered_at.isoformat() if c.registered_at else None,
-        "is_active":     c.is_active,
-        "created_at":    c.created_at.isoformat(),
+        "is_active":          c.is_active,
+        "created_at":         c.created_at.isoformat(),
+        "state_interval_s":   c.state_interval_s,
+        "counter_interval_s": c.counter_interval_s,
     }
     if token:
         out["registration_token"] = token   # shown only once
@@ -864,10 +866,12 @@ async def collector_config(
         })
 
     return {
-        "collector_id": str(collector.id),
-        "timezone":     collector.timezone or "UTC",
-        "devices":      devices_out,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "collector_id":     str(collector.id),
+        "timezone":         collector.timezone or "UTC",
+        "state_interval_s": collector.state_interval_s or 15,
+        "counter_interval_s": collector.counter_interval_s or 60,
+        "devices":          devices_out,
+        "generated_at":     datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -889,11 +893,13 @@ async def get_collector(
 
 
 class CollectorUpdate(BaseModel):
-    timezone: Optional[str] = None
-    name:     Optional[str] = None
+    timezone:           Optional[str] = None
+    name:               Optional[str] = None
+    state_interval_s:   Optional[int] = Field(None, ge=5)
+    counter_interval_s: Optional[int] = Field(None, ge=5)
 
 
-@router.patch("/{collector_id}", summary="Update collector settings (timezone, name)")
+@router.patch("/{collector_id}", summary="Update collector settings (timezone, name, poll intervals)")
 async def patch_collector(
     collector_id: str,
     body:         CollectorUpdate,
@@ -917,6 +923,11 @@ async def patch_collector(
         c.timezone = body.timezone
     if body.name is not None:
         c.name = body.name
+    # interval fields use sentinel -1 to distinguish "set to null/default" from "not provided"
+    if "state_interval_s" in body.model_fields_set:
+        c.state_interval_s = body.state_interval_s
+    if "counter_interval_s" in body.model_fields_set:
+        c.counter_interval_s = body.counter_interval_s
     await db.commit()
     await db.refresh(c)
     return _collector_out(c)
@@ -2257,6 +2268,13 @@ async def ingest_flows(
     if resp.status_code not in (200, 204):
         logger.warning("flows_ingest_failed", collector=collector.name,
                        status=resp.status_code, detail=resp.text[:200])
+
+    try:
+        from ..alerting.engine import _engine
+        _engine.request_immediate_pass(reason="flow_received")
+    except Exception:
+        pass
+
     return {"written": len(rows)}
 
 
@@ -2309,6 +2327,13 @@ async def ingest_syslog(
     if resp.status_code not in (200, 204):
         logger.warning("syslog_ingest_failed", collector=collector.name,
                        status=resp.status_code, detail=resp.text[:200])
+
+    try:
+        from ..alerting.engine import _engine
+        _engine.request_immediate_pass(reason="syslog_received")
+    except Exception:
+        pass
+
     return {"written": len(rows)}
 
 
@@ -2360,47 +2385,52 @@ async def ingest_bgp_sessions(
     request: Request,
     db:      AsyncSession = Depends(get_db),
 ) -> dict:
-    """Accept a list of BGP session records (each with a device_id field) from a
-    remote collector and upsert them into bgp_sessions.
+    """Accept one device's current BGP session list (possibly empty) from a
+    remote collector and write it into bgp_sessions.
 
-    Each record must include at minimum: device_id, vrf, peer_ip, local_asn, state.
+    Body shape: {"device_id": "...", "sessions": [...]}. An empty "sessions"
+    list means the device currently has zero BGP sessions, and any
+    previously-reported sessions for it are marked stale (session_state='idle').
+
+    Each session record must include at minimum: peer_ip, local_asn, state.
     """
     collector = await _require_collector(request, db)
-    records   = await request.json()
-    if not records:
-        return {"written": 0}
+    body = await request.json()
+    did  = body.get("device_id")
 
-    import uuid as _uuid
-    from ..configmgmt.rest_state import _write_bgp
-
-    # Gather allowed device IDs for this collector.
     allowed = {
-        str(did) for (did,) in (await db.execute(
+        str(did_) for (did_,) in (await db.execute(
             select(Device.id).where(
                 Device.collector_id == collector.id,
                 Device.is_active == True,  # noqa: E712
             )
         )).all()
     }
+    if not did or did not in allowed:
+        return {"written": 0}
 
-    # Group records by device_id.
-    by_device: dict[str, list] = {}
-    for r in records:
-        did = r.get("device_id")
-        if did and did in allowed:
-            r_clean = {k: v for k, v in r.items() if k != "device_id"}
-            by_device.setdefault(did, []).append(r_clean)
+    import uuid as _uuid
+    from ..configmgmt.rest_state import _write_bgp
 
-    written = 0
-    for did, peers in by_device.items():
-        try:
-            await _write_bgp(_uuid.UUID(did), peers)
-            written += len(peers)
-        except Exception as exc:
-            logger.warning("bgp_ingest_failed", collector=collector.name,
-                           device_id=did, error=str(exc))
+    sessions = [
+        {k: v for k, v in r.items() if k != "device_id"}
+        for r in (body.get("sessions") or [])
+    ]
 
-    return {"written": written}
+    try:
+        await _write_bgp(_uuid.UUID(did), sessions)
+    except Exception as exc:
+        logger.warning("bgp_ingest_failed", collector=collector.name,
+                       device_id=did, error=str(exc))
+        return {"written": 0}
+
+    try:
+        from ..alerting.engine import _engine
+        _engine.request_immediate_pass(reason="bgp_state_changed")
+    except Exception:
+        pass
+
+    return {"written": len(sessions)}
 
 
 # ── OSPF neighbors ingest ─────────────────────────────────────────────────────
@@ -2449,46 +2479,53 @@ async def ingest_ospf_neighbors(
     request: Request,
     db:      AsyncSession = Depends(get_db),
 ) -> dict:
-    """Accept a list of OSPF neighbor records (each with a device_id field) from a
-    remote collector and upsert them into ospf_neighbors.
+    """Accept one device's current OSPF neighbor list (possibly empty) from a
+    remote collector and write it into ospf_neighbors.
 
-    Each record must include at minimum: device_id, vrf, router_id, neighbor_ip,
+    Body shape: {"device_id": "...", "neighbors": [...]}. An empty "neighbors"
+    list means the device currently has zero OSPF neighbors, and any
+    previously-reported neighbors for it are marked down.
+
+    Each neighbor record must include at minimum: router_id, neighbor_ip,
     interface_name, area, state.
     """
     collector = await _require_collector(request, db)
-    records   = await request.json()
-    if not records:
-        return {"written": 0}
-
-    import uuid as _uuid
-    from ..configmgmt.rest_state import _write_ospf
+    body = await request.json()
+    did  = body.get("device_id")
 
     allowed = {
-        str(did) for (did,) in (await db.execute(
+        str(did_) for (did_,) in (await db.execute(
             select(Device.id).where(
                 Device.collector_id == collector.id,
                 Device.is_active == True,  # noqa: E712
             )
         )).all()
     }
+    if not did or did not in allowed:
+        return {"written": 0}
 
-    by_device: dict[str, list] = {}
-    for r in records:
-        did = r.get("device_id")
-        if did and did in allowed:
-            r_clean = {k: v for k, v in r.items() if k != "device_id"}
-            by_device.setdefault(did, []).append(r_clean)
+    import uuid as _uuid
+    from ..configmgmt.rest_state import _write_ospf
 
-    written = 0
-    for did, nbrs in by_device.items():
-        try:
-            await _write_ospf(_uuid.UUID(did), nbrs)
-            written += len(nbrs)
-        except Exception as exc:
-            logger.warning("ospf_ingest_failed", collector=collector.name,
-                           device_id=did, error=str(exc))
+    neighbors = [
+        {k: v for k, v in r.items() if k != "device_id"}
+        for r in (body.get("neighbors") or [])
+    ]
 
-    return {"written": written}
+    try:
+        await _write_ospf(_uuid.UUID(did), neighbors)
+    except Exception as exc:
+        logger.warning("ospf_ingest_failed", collector=collector.name,
+                       device_id=did, error=str(exc))
+        return {"written": 0}
+
+    try:
+        from ..alerting.engine import _engine
+        _engine.request_immediate_pass(reason="ospf_state_changed")
+    except Exception:
+        pass
+
+    return {"written": len(neighbors)}
 
 
 # ── Route table ingest ────────────────────────────────────────────────────────
@@ -2499,47 +2536,54 @@ async def ingest_routes(
     request: Request,
     db:      AsyncSession = Depends(get_db),
 ) -> dict:
-    """Accept a list of route table records (each with a device_id field) from a
-    remote collector and upsert them into route_entries, removing any rows for
-    that device that were not part of this batch (mark-and-sweep).
+    """Accept one device's current route table (possibly empty) from a remote
+    collector and upsert it into route_entries, removing any rows for that
+    device not part of this batch (mark-and-sweep).
 
-    Each record must include at minimum: device_id, destination, protocol.
+    Body shape: {"device_id": "...", "routes": [...]}. An empty "routes" list
+    means the device's routing table is currently empty -- all previously
+    reported routes for it are purged.
+
+    Each route record must include at minimum: destination, protocol.
     Optional: next_hop, metric, interface_name.
     """
     collector = await _require_collector(request, db)
-    records   = await request.json()
-    if not records:
-        return {"written": 0}
-
-    import uuid as _uuid
-    from ..configmgmt.rest_state import _write_routes
+    body = await request.json()
+    did  = body.get("device_id")
 
     allowed = {
-        str(did) for (did,) in (await db.execute(
+        str(did_) for (did_,) in (await db.execute(
             select(Device.id).where(
                 Device.collector_id == collector.id,
                 Device.is_active == True,  # noqa: E712
             )
         )).all()
     }
+    if not did or did not in allowed:
+        return {"written": 0}
 
-    by_device: dict[str, list] = {}
-    for r in records:
-        did = r.get("device_id")
-        if did and did in allowed:
-            r_clean = {k: v for k, v in r.items() if k != "device_id"}
-            by_device.setdefault(did, []).append(r_clean)
+    import uuid as _uuid
+    from ..configmgmt.rest_state import _write_routes
 
-    written = 0
-    for did, routes in by_device.items():
-        try:
-            await _write_routes(_uuid.UUID(did), routes)
-            written += len(routes)
-        except Exception as exc:
-            logger.warning("routes_ingest_failed", collector=collector.name,
-                           device_id=did, error=str(exc))
+    routes = [
+        {k: v for k, v in r.items() if k != "device_id"}
+        for r in (body.get("routes") or [])
+    ]
 
-    return {"written": written}
+    try:
+        await _write_routes(_uuid.UUID(did), routes)
+    except Exception as exc:
+        logger.warning("routes_ingest_failed", collector=collector.name,
+                       device_id=did, error=str(exc))
+        return {"written": 0}
+
+    try:
+        from ..alerting.engine import _engine
+        _engine.request_immediate_pass(reason="routes_changed")
+    except Exception:
+        pass
+
+    return {"written": len(routes)}
 
 
 # ── IS-IS neighbors ingest ────────────────────────────────────────────────────
@@ -2550,55 +2594,62 @@ async def ingest_isis_neighbors(
     request: Request,
     db:      AsyncSession = Depends(get_db),
 ) -> dict:
-    """Accept a list of IS-IS adjacency records (each with a device_id field) from a
-    remote collector and upsert them into isis_neighbors.
+    """Accept one device's current IS-IS adjacency list (possibly empty) from a
+    remote collector and write it into isis_neighbors.
 
-    Each record must include at minimum: device_id, instance, sys_id, interface_name,
-    circuit_type, adj_state.  Optional: hostname, ipv4_address, ipv6_address,
-    uptime_seconds, last_state_change (ISO-8601 string).
+    Body shape: {"device_id": "...", "neighbors": [...]}. An empty "neighbors"
+    list means the device currently has zero adjacencies, and any
+    previously-reported adjacencies for it are marked down.
+
+    Each neighbor record must include at minimum: instance, sys_id,
+    interface_name, circuit_type, adj_state. Optional: hostname, ipv4_address,
+    ipv6_address, uptime_seconds, last_state_change (ISO-8601 string).
     """
     collector = await _require_collector(request, db)
-    records   = await request.json()
-    if not records:
-        return {"written": 0}
-
-    import uuid as _uuid
-    from datetime import datetime as _dt
-    from ..configmgmt.eapi_collector import _write_isis_neighbors
+    body = await request.json()
+    did  = body.get("device_id")
 
     allowed = {
-        str(did) for (did,) in (await db.execute(
+        str(did_) for (did_,) in (await db.execute(
             select(Device.id).where(
                 Device.collector_id == collector.id,
                 Device.is_active == True,  # noqa: E712
             )
         )).all()
     }
+    if not did or did not in allowed:
+        return {"written": 0}
 
-    by_device: dict[str, list] = {}
-    for r in records:
-        did = r.get("device_id")
-        if did and did in allowed:
-            # Coerce last_state_change string → datetime if present
-            row = {k: v for k, v in r.items() if k != "device_id"}
-            lsc = row.get("last_state_change")
-            if isinstance(lsc, str) and lsc:
-                try:
-                    row["last_state_change"] = _dt.fromisoformat(lsc.replace("Z", "+00:00"))
-                except ValueError:
-                    row["last_state_change"] = None
-            by_device.setdefault(did, []).append(row)
+    import uuid as _uuid
+    from datetime import datetime as _dt
+    from ..configmgmt.eapi_collector import _write_isis_neighbors
 
-    written = 0
-    for did, adjs in by_device.items():
-        try:
-            await _write_isis_neighbors(_uuid.UUID(did), adjs)
-            written += len(adjs)
-        except Exception as exc:
-            logger.warning("isis_ingest_failed", collector=collector.name,
-                           device_id=did, error=str(exc))
+    rows = []
+    for r in (body.get("neighbors") or []):
+        # Coerce last_state_change string → datetime if present
+        row = {k: v for k, v in r.items() if k != "device_id"}
+        lsc = row.get("last_state_change")
+        if isinstance(lsc, str) and lsc:
+            try:
+                row["last_state_change"] = _dt.fromisoformat(lsc.replace("Z", "+00:00"))
+            except ValueError:
+                row["last_state_change"] = None
+        rows.append(row)
 
-    return {"written": written}
+    try:
+        await _write_isis_neighbors(_uuid.UUID(did), rows)
+    except Exception as exc:
+        logger.warning("isis_ingest_failed", collector=collector.name,
+                       device_id=did, error=str(exc))
+        return {"written": 0}
+
+    try:
+        from ..alerting.engine import _engine
+        _engine.request_immediate_pass(reason="isis_state_changed")
+    except Exception:
+        pass
+
+    return {"written": len(rows)}
 
 
 @router.post("/stp-ports",
@@ -2691,6 +2742,220 @@ async def ingest_stp_ports(
 
     await db.commit()
     return {"written": written}
+
+
+@router.post("/vlans",
+             summary="Ingest VLANs + interface membership collected by the remote collector")
+async def ingest_vlans(
+    request: Request,
+    db:      AsyncSession = Depends(get_db),
+) -> dict:
+    """Accept a flat list of VLAN records from a remote collector. Each record is
+    either a VLAN definition ({device_id, vlan_id, name}) or a per-interface
+    membership ({device_id, vlan_id, if_name, tagged}). VLAN defs are upserted
+    into `vlans`; memberships replace the device's `interface_vlans`.
+    """
+    collector = await _require_collector(request, db)
+    records   = await request.json()
+    if not records:
+        return {"written": 0}
+
+    allowed = {
+        str(did) for (did,) in (await db.execute(
+            select(Device.id).where(
+                Device.collector_id == collector.id,
+                Device.is_active == True,  # noqa: E712
+            )
+        )).all()
+    }
+
+    defs_by_device: dict[str, list[dict]] = {}
+    mem_by_device:  dict[str, list[dict]] = {}
+    for r in records:
+        did = r.get("device_id")
+        if not did or did not in allowed:
+            continue
+        if r.get("if_name"):
+            mem_by_device.setdefault(did, []).append(r)
+        else:
+            defs_by_device.setdefault(did, []).append(r)
+
+    written = 0
+    # VLAN definitions
+    for did_str, defs in defs_by_device.items():
+        vids  = [d["vlan_id"] for d in defs]
+        names = [d.get("name") for d in defs]
+        await db.execute(
+            text("""
+                INSERT INTO vlans (device_id, vlan_id, name, updated_at)
+                SELECT CAST(:did AS uuid), v.vid, v.name, NOW()
+                FROM (
+                    SELECT unnest(CAST(:vids AS integer[])) AS vid,
+                           unnest(CAST(:names AS text[]))   AS name
+                ) v
+                ON CONFLICT (device_id, vlan_id) DO UPDATE SET
+                    name = EXCLUDED.name, updated_at = EXCLUDED.updated_at
+            """),
+            {"did": did_str, "vids": vids, "names": names},
+        )
+        written += len(defs)
+
+    # Interface memberships — replace per device (mark-and-sweep).
+    for did_str in mem_by_device:
+        await db.execute(
+            text("""
+                DELETE FROM interface_vlans WHERE interface_id IN (
+                    SELECT id FROM interfaces WHERE device_id = CAST(:did AS uuid))
+            """),
+            {"did": did_str},
+        )
+    for did_str, mems in mem_by_device.items():
+        names  = [m["if_name"] for m in mems]
+        vids   = [m["vlan_id"] for m in mems]
+        tagged = [bool(m.get("tagged")) for m in mems]
+        await db.execute(
+            text("""
+                INSERT INTO interface_vlans (interface_id, vlan_id, tagged)
+                SELECT i.id, v.vid, v.tagged
+                FROM (
+                    SELECT unnest(CAST(:names AS text[]))    AS if_name,
+                           unnest(CAST(:vids AS integer[]))  AS vid,
+                           unnest(CAST(:tagged AS boolean[])) AS tagged
+                ) v
+                JOIN interfaces i
+                  ON i.device_id = CAST(:did AS uuid) AND i.name = v.if_name
+                ON CONFLICT (interface_id, vlan_id) DO UPDATE SET tagged = EXCLUDED.tagged
+            """),
+            {"did": did_str, "names": names, "vids": vids, "tagged": tagged},
+        )
+        written += len(mems)
+
+    await db.commit()
+    return {"written": written}
+
+
+@router.post("/addresses",
+             summary="Ingest ARP + MAC tables collected by the remote collector")
+async def ingest_addresses(
+    request: Request,
+    db:      AsyncSession = Depends(get_db),
+) -> dict:
+    """Accept a flat list of address records from a remote collector. Records with
+    an `ip_address` are ARP/ND entries → arp_entries; records with only a
+    `mac_address` are FDB entries → mac_entries. Both are upserted and stale rows
+    (not refreshed this batch) are swept per device.
+    """
+    collector = await _require_collector(request, db)
+    records   = await request.json()
+    if not records:
+        return {"written": 0}
+
+    allowed = {
+        str(did) for (did,) in (await db.execute(
+            select(Device.id).where(
+                Device.collector_id == collector.id,
+                Device.is_active == True,  # noqa: E712
+            )
+        )).all()
+    }
+
+    arp_by_device: dict[str, list[dict]] = {}
+    mac_by_device: dict[str, list[dict]] = {}
+    for r in records:
+        did = r.get("device_id")
+        if not did or did not in allowed:
+            continue
+        if r.get("ip_address"):
+            arp_by_device.setdefault(did, []).append(r)
+        elif r.get("mac_address"):
+            mac_by_device.setdefault(did, []).append(r)
+
+    written = 0
+    for did_str, arps in arp_by_device.items():
+        ips   = [a["ip_address"] for a in arps]
+        macs  = [a["mac_address"] for a in arps]
+        ifns  = [a.get("interface_name") for a in arps]
+        await db.execute(
+            text("""
+                INSERT INTO arp_entries (device_id, ip_address, mac_address, interface_name, entry_type, updated_at)
+                SELECT CAST(:did AS uuid), v.ip::inet, v.mac::macaddr, v.ifn, 'dynamic', NOW()
+                FROM (
+                    SELECT unnest(CAST(:ips AS text[]))  AS ip,
+                           unnest(CAST(:macs AS text[])) AS mac,
+                           unnest(CAST(:ifns AS text[])) AS ifn
+                ) v
+                ON CONFLICT (device_id, ip_address) DO UPDATE SET
+                    mac_address = EXCLUDED.mac_address, interface_name = EXCLUDED.interface_name,
+                    entry_type = EXCLUDED.entry_type, updated_at = NOW()
+            """),
+            {"did": did_str, "ips": ips, "macs": macs, "ifns": ifns},
+        )
+        await db.execute(
+            text("DELETE FROM arp_entries WHERE device_id = CAST(:did AS uuid) AND updated_at < NOW() - INTERVAL '1 minute'"),
+            {"did": did_str},
+        )
+        written += len(arps)
+
+    for did_str, macs in mac_by_device.items():
+        addrs = [m["mac_address"] for m in macs]
+        ports = [m.get("port_name") or m.get("interface_name") for m in macs]
+        vids  = [m.get("vlan_id") for m in macs]
+        await db.execute(
+            text("""
+                INSERT INTO mac_entries (device_id, mac_address, port_name, vlan_id, entry_type, updated_at)
+                SELECT CAST(:did AS uuid), v.mac::macaddr, v.port, v.vid, 'dynamic', NOW()
+                FROM (
+                    SELECT unnest(CAST(:macs AS text[]))    AS mac,
+                           unnest(CAST(:ports AS text[]))   AS port,
+                           unnest(CAST(:vids AS integer[])) AS vid
+                ) v
+                ON CONFLICT (device_id, mac_address) DO UPDATE SET
+                    port_name = EXCLUDED.port_name, vlan_id = EXCLUDED.vlan_id,
+                    entry_type = EXCLUDED.entry_type, updated_at = NOW()
+            """),
+            {"did": did_str, "macs": addrs, "ports": ports, "vids": vids},
+        )
+        await db.execute(
+            text("DELETE FROM mac_entries WHERE device_id = CAST(:did AS uuid) AND updated_at < NOW() - INTERVAL '1 minute'"),
+            {"did": did_str},
+        )
+        written += len(macs)
+
+    await db.commit()
+    return {"written": written}
+
+
+@router.post("/device-inventory",
+             summary="Ingest device inventory (serial number) collected by the remote collector")
+async def ingest_device_inventory(
+    request: Request,
+    db:      AsyncSession = Depends(get_db),
+) -> dict:
+    """Accept a list of {device_id, serial_number} records and update devices."""
+    collector = await _require_collector(request, db)
+    records   = await request.json()
+    if not records:
+        return {"updated": 0}
+
+    updated = 0
+    for r in records:
+        did    = r.get("device_id")
+        serial = r.get("serial_number")
+        if not did or not serial:
+            continue
+        res = await db.execute(
+            text("""
+                UPDATE devices SET serial_number = :sn
+                WHERE id = CAST(:did AS uuid)
+                  AND collector_id = :cid
+                  AND (serial_number IS DISTINCT FROM :sn)
+            """),
+            {"did": did, "sn": str(serial), "cid": collector.id},
+        )
+        updated += res.rowcount or 0
+
+    await db.commit()
+    return {"updated": updated}
 
 
 @router.post("/engine-ids",
@@ -2827,6 +3092,12 @@ async def ingest_traps(
         if ipaddress.ip_address(wg_ip) in ipaddress.ip_network("10.100.0.0/24"):
             token = _control_token(collector.api_key_hash)
             asyncio.create_task(_trigger_repolls(wg_ip, token, repoll_ids))
+
+    try:
+        from ..alerting.engine import _engine
+        _engine.request_immediate_pass(reason="trap_received")
+    except Exception:
+        pass
 
 
 async def _trigger_repolls(wg_ip: str, token: str, device_ids: set[str]) -> None:

@@ -151,6 +151,76 @@ export const fetchISISSummary = () =>
 export const fetchISISAreas = () =>
   api.get<ISISArea[]>('/bgp/isis-areas').then(r => r.data)
 
+export interface RouteEntryDTO {
+  device_id:      string
+  device_name:    string
+  destination:    string
+  next_hop:       string | null
+  metric:         number | null
+  interface_name: string | null
+  updated_at:     string
+}
+
+export const fetchRoutes = (protocol: 'bgp' | 'ospf' | 'isis') =>
+  api.get<RouteEntryDTO[]>('/bgp/routes', { params: { protocol } }).then(r => r.data)
+
+export interface ISISCircuitLevel {
+  device_id:      string
+  device_name:    string
+  instance:       string
+  interface_name: string
+  level:          string
+  metric:         number | null
+  hello_interval: number | null
+  hold_timer:     number | null
+  priority:       number | null
+  dis_id:         string | null
+  updated_at:     string
+}
+
+export const fetchISISCircuitLevels = () =>
+  api.get<ISISCircuitLevel[]>('/bgp/isis-circuit-levels').then(r => r.data)
+
+export interface ISISLsp {
+  device_id:          string
+  device_name:        string
+  instance:           string
+  level:              string
+  lsp_id:             string
+  sequence_number:    number | null
+  checksum:           number | null
+  remaining_lifetime: number | null
+  pdu_length:         number | null
+  overload_bit:       boolean
+  attached_bit:       boolean
+  updated_at:         string
+}
+
+export const fetchISISLsps = () =>
+  api.get<ISISLsp[]>('/bgp/isis-lsps').then(r => r.data)
+
+export interface ISISTopologyNode {
+  id:      string
+  label:   string
+  area:    string | null
+  managed: boolean
+}
+
+export interface ISISTopologyEdge {
+  source: string
+  target: string
+  level:  string
+  state:  string
+}
+
+export interface ISISTopology {
+  nodes: ISISTopologyNode[]
+  edges: ISISTopologyEdge[]
+}
+
+export const fetchISISTopology = () =>
+  api.get<ISISTopology>('/bgp/isis-topology').then(r => r.data)
+
 // ── BGP prefix history (time-series from VictoriaMetrics) ─────────────────
 
 export interface BGPPeerSeries {

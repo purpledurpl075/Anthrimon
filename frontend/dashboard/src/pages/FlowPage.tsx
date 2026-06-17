@@ -1,6 +1,6 @@
 import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Link } from 'react-router-dom'
+import { Link, useSearchParams } from 'react-router-dom'
 import {
   fetchFlowSummary, fetchTopTalkers, fetchTopPorts, fetchProtocolBreakdown,
   fetchTopDevices, fetchFlowTimeseries, searchFlows, fetchIpDetail,
@@ -14,6 +14,7 @@ import {
 import { fetchDevices } from '../api/devices'
 import TimeSeriesChart from '../components/TimeSeriesChart'
 import { DEVICE_TYPE_COLOR, DeviceTypeIcon } from '../components/DeviceTypeIcon'
+import SavedViewsMenu from '../components/SavedViewsMenu'
 
 // ── Intel helpers ─────────────────────────────────────────────────────────────
 
@@ -1433,18 +1434,62 @@ function EmptyFlow() {
 
 // ── Page ──────────────────────────────────────────────────────────────────────
 
+type FlowTab = 'traffic' | 'direction' | 'networks' | 'applications' | 'connections' | 'geo' | 'threats'
+
 export default function FlowPage() {
-  const [deviceId,   setDeviceId]   = useState('')
-  const [windowMins, setWindowMins] = useState(60)
-  const [filters,    setFilters]    = useState<Filters>({})
-  const [detailIp,   setDetailIp]   = useState<string | null>(null)
-  const [flowTab,    setFlowTab]    = useState<'traffic' | 'direction' | 'networks' | 'applications' | 'connections' | 'geo' | 'threats'>('traffic')
+  const [searchParams, setSearchParams] = useSearchParams()
+  const deviceId   = searchParams.get('device') ?? ''
+  const windowMins = Number(searchParams.get('window') ?? '60')
+  const flowTab    = (searchParams.get('tab') as FlowTab | null) ?? 'traffic'
+  const [detailIp, setDetailIp] = useState<string | null>(null)
+
+  const filters: Filters = useMemo(() => {
+    const f: Filters = {}
+    const src = searchParams.get('src');   if (src) f.srcIp = src
+    const dst = searchParams.get('dst');   if (dst) f.dstIp = dst
+    const proto = searchParams.get('proto'); if (proto) f.protocol = Number(proto)
+    const port = searchParams.get('port');   if (port) f.dstPort = Number(port)
+    return f
+  }, [searchParams])
 
   const { data: devicesResp } = useQuery({
     queryKey: ['devices-list'],
     queryFn:  () => fetchDevices({ limit: 500 }),
   })
   const devices: any[] = (devicesResp as any)?.items ?? devicesResp ?? []
+
+  const setDeviceId = (id: string) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (id === '') next.delete('device'); else next.set('device', id)
+      return next
+    })
+  }
+  const setWindowMins = (m: number) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (m === 60) next.delete('window'); else next.set('window', String(m))
+      return next
+    })
+  }
+  const setFlowTab = (t: FlowTab) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (t === 'traffic') next.delete('tab'); else next.set('tab', t)
+      return next
+    })
+  }
+  const setFilters = (update: Filters | ((f: Filters) => Filters)) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      const updated = typeof update === 'function' ? update(filters) : update
+      if (updated.srcIp)            next.set('src', updated.srcIp);              else next.delete('src')
+      if (updated.dstIp)            next.set('dst', updated.dstIp);              else next.delete('dst')
+      if (updated.protocol != null) next.set('proto', String(updated.protocol)); else next.delete('proto')
+      if (updated.dstPort != null)  next.set('port', String(updated.dstPort));   else next.delete('port')
+      return next
+    })
+  }
 
   const setFilter = (role: 'src' | 'dst', ip: string) => {
     if (!ip) return
@@ -1481,6 +1526,8 @@ export default function FlowPage() {
               </button>
             ))}
           </div>
+
+          <SavedViewsMenu page="flow" query={searchParams.toString()} onApply={q => setSearchParams(new URLSearchParams(q))} />
         </div>
 
         {/* Tab bar */}

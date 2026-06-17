@@ -1,7 +1,8 @@
-import React, { useState, useEffect } from 'react'
+import React, { useState, useEffect, useRef } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
 import { useCurrentUser } from '../hooks/useCurrentUser'
+import { fetchLicense, downloadLicenseRequest, uploadLicense, deleteLicense } from '../api/license'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
 
@@ -357,7 +358,103 @@ function SettingsTab() {
 
 // ── PlatformPage ───────────────────────────────────────────────────────────────
 
-const TABS = ['Tenants', 'Settings'] as const
+// ── License tab ─────────────────────────────────────────────────────────────
+
+function LicenseTab() {
+  const qc = useQueryClient()
+  const { data: lic, isLoading } = useQuery({ queryKey: ['license'], queryFn: fetchLicense })
+  const fileRef = useRef<HTMLInputElement>(null)
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+
+  const upload = useMutation({
+    mutationFn: (f: File) => uploadLicense(f),
+    onSuccess: (d) => {
+      qc.invalidateQueries({ queryKey: ['license'] })
+      setMsg({ kind: 'ok', text: d.valid ? `License applied — modules: ${d.modules.join(', ') || 'none'}` : 'License processed' })
+    },
+    onError: (e: any) => setMsg({ kind: 'err', text: e?.message || 'Upload failed' }),
+  })
+  const remove = useMutation({
+    mutationFn: () => deleteLicense(),
+    onSuccess: () => { qc.invalidateQueries({ queryKey: ['license'] }); setMsg({ kind: 'ok', text: 'License removed — reverted to free tier' }) },
+    onError: (e: any) => setMsg({ kind: 'err', text: e?.message || 'Remove failed' }),
+  })
+
+  if (isLoading || !lic) return <div className="text-sm text-slate-500">Loading…</div>
+
+  const tierBadge = lic.valid
+    ? <span className="px-2 py-0.5 rounded text-xs font-semibold bg-emerald-100 text-emerald-700">Licensed</span>
+    : <span className="px-2 py-0.5 rounded text-xs font-semibold bg-slate-200 text-slate-600">Free tier</span>
+
+  return (
+    <div className="space-y-6 max-w-2xl">
+      <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-3">
+        <div className="flex items-center gap-3">
+          <h3 className="text-sm font-semibold text-slate-800">License status</h3>
+          {tierBadge}
+        </div>
+        {lic.valid ? (
+          <dl className="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+            <dt className="text-slate-500">Modules</dt><dd className="text-slate-800">{lic.modules.includes('*') ? 'All features (*)' : (lic.modules.join(', ') || '—')}</dd>
+            <dt className="text-slate-500">Expires</dt><dd className="text-slate-800">{lic.expires_at?.slice(0, 10) || '—'}</dd>
+            <dt className="text-slate-500">Max devices</dt><dd className="text-slate-800">{lic.max_devices || 'Unlimited'}</dd>
+            <dt className="text-slate-500">License ID</dt><dd className="text-slate-800 font-mono text-xs">{lic.lic_id}</dd>
+            <dt className="text-slate-500">Machine-locked</dt><dd className="text-slate-800">{lic.machine_bound ? (lic.machine_match ? 'Yes ✓' : 'Yes — MISMATCH') : 'No (floating)'}</dd>
+          </dl>
+        ) : (
+          <p className="text-sm text-slate-600">
+            Running on the free tier{lic.reason && lic.reason !== 'free_tier' ? ` — ${lic.reason}` : ''}.
+            All free features are available. Apply a license to unlock paid modules.
+          </p>
+        )}
+      </div>
+
+      <div className="bg-white border border-slate-200 rounded-lg p-5 space-y-4">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-800 mb-1">Get a license</h3>
+          <p className="text-xs text-slate-500">
+            Download this server's license request and send it to Anthrimon. You'll receive a
+            license file bound to this machine, which you upload below.
+          </p>
+          <div className="mt-2 text-xs font-mono text-slate-400 break-all">{lic.machine_fingerprint}</div>
+        </div>
+        <button
+          onClick={() => downloadLicenseRequest().catch(() => setMsg({ kind: 'err', text: 'Download failed' }))}
+          className="px-3 py-2 text-sm font-medium rounded-md bg-slate-100 text-slate-700 hover:bg-slate-200"
+        >
+          Download license request
+        </button>
+
+        <div className="border-t border-slate-100 pt-4">
+          <h3 className="text-sm font-semibold text-slate-800 mb-1">Apply a license</h3>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".key,.lic,application/json,text/plain"
+            onChange={(e) => { const f = e.target.files?.[0]; if (f) upload.mutate(f); e.currentTarget.value = '' }}
+            className="block text-sm text-slate-600 file:mr-3 file:px-3 file:py-2 file:rounded-md file:border-0 file:bg-blue-600 file:text-white file:text-sm file:font-medium hover:file:bg-blue-700"
+          />
+          {lic.valid && (
+            <button
+              onClick={() => { if (confirm('Remove the license and revert to the free tier?')) remove.mutate() }}
+              className="mt-3 px-3 py-2 text-sm font-medium rounded-md text-red-600 hover:bg-red-50"
+            >
+              Remove license
+            </button>
+          )}
+        </div>
+
+        {msg && (
+          <div className={`text-sm rounded-md px-3 py-2 ${msg.kind === 'ok' ? 'bg-emerald-50 text-emerald-700' : 'bg-red-50 text-red-700'}`}>
+            {msg.text}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const TABS = ['Tenants', 'Settings', 'License'] as const
 type Tab = typeof TABS[number]
 
 export default function PlatformPage() {
@@ -405,6 +502,7 @@ export default function PlatformPage() {
       <div>
         {tab === 'Tenants'  && <TenantsTab />}
         {tab === 'Settings' && <SettingsTab />}
+        {tab === 'License'  && <LicenseTab />}
       </div>
     </div>
   )

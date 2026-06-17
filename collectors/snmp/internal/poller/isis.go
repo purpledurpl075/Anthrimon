@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/gosnmp/gosnmp"
 	"github.com/google/uuid"
+	"github.com/gosnmp/gosnmp"
 	"github.com/purpledurpl075/anthri-mon/collectors/snmp/internal/client"
 	"github.com/purpledurpl075/anthri-mon/collectors/snmp/internal/model"
 	"github.com/purpledurpl075/anthri-mon/collectors/snmp/internal/oid"
@@ -45,9 +45,13 @@ func PollISISAdjacencies(s *client.Session, deviceID uuid.UUID, ifByIndex map[in
 		k := adjKey{circIdx, adjIdx}
 		ip := isisIPFromPDU(pdu)
 		if strings.Contains(ip, ":") {
-			e := ipMap[k]; e.ipv6 = ip; ipMap[k] = e
+			e := ipMap[k]
+			e.ipv6 = ip
+			ipMap[k] = e
 		} else if ip != "" {
-			e := ipMap[k]; e.ipv4 = ip; ipMap[k] = e
+			e := ipMap[k]
+			e.ipv4 = ip
+			ipMap[k] = e
 		}
 	}
 
@@ -116,6 +120,216 @@ func PollISISAdjacencies(s *client.Session, deviceID uuid.UUID, ifByIndex map[in
 	return results, nil
 }
 
+// PollISISAreas walks ISIS-MIB isisSysAreaAddrTable to discover the area
+// addresses configured for each IS-IS instance on a device.
+func PollISISAreas(s *client.Session, deviceID uuid.UUID) ([]*model.ISISArea, error) {
+	pdus, err := s.BulkWalkAll(oid.ISISSysAreaAddrTable)
+	if err != nil || len(pdus) == 0 {
+		return nil, err
+	}
+
+	seen := make(map[string]bool)
+	var results []*model.ISISArea
+	for _, pdu := range pdus {
+		col, inst, ok := splitISISSysAreaAddrIndex(pdu.Name, oid.ISISSysAreaAddrTable)
+		if !ok || col != 1 { // isisSysAreaAddr
+			continue
+		}
+		b, ok := pdu.Value.([]byte)
+		if !ok || len(b) == 0 {
+			continue
+		}
+		areaAddr := isisFormatAreaAddr(b)
+		if areaAddr == "" {
+			continue
+		}
+		key := inst + "|" + areaAddr
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		results = append(results, &model.ISISArea{
+			DeviceID: deviceID,
+			Instance: inst,
+			AreaAddr: areaAddr,
+		})
+	}
+	return results, nil
+}
+
+// PollISISCircuitLevels walks ISIS-MIB isisCircLevelTable to collect
+// per-circuit, per-level link parameters: metric, hello/hold timers, DIS
+// priority and the currently elected LAN-DIS. It reuses isisCircTable to
+// resolve circuit index -> interface name.
+func PollISISCircuitLevels(s *client.Session, deviceID uuid.UUID, ifByIndex map[int]string) ([]*model.ISISCircuitLevel, error) {
+	pdus, err := s.BulkWalkAll(oid.ISISCircLevelTable)
+	if err != nil || len(pdus) == 0 {
+		return nil, err
+	}
+
+	// Build circuit index → ifIndex map from isisCircTable.
+	circPDUs, _ := s.BulkWalkAll(oid.ISISCircTable)
+	circToIfIdx := make(map[int]int)
+	for _, pdu := range circPDUs {
+		col, circIdx, _ := splitISISCircIndex(pdu.Name, oid.ISISCircTable)
+		if col == 2 { // isisCircIfIndex
+			circToIfIdx[circIdx] = client.PDUInt(pdu)
+		}
+	}
+
+	type levelKey struct{ circ, level int }
+	type levelRow struct {
+		instance     string
+		metric       int
+		wideMetric   int
+		priority     int
+		desIS        []byte
+		helloMult    int
+		helloTimerMs int
+	}
+	rows := make(map[levelKey]*levelRow)
+	ensureRow := func(k levelKey, inst string) *levelRow {
+		if r, ok := rows[k]; ok {
+			return r
+		}
+		r := &levelRow{instance: inst}
+		rows[k] = r
+		return r
+	}
+
+	for _, pdu := range pdus {
+		col, circIdx, levelIdx, inst := splitISISCircLevelIndex(pdu.Name, oid.ISISCircLevelTable)
+		if col < 0 {
+			continue
+		}
+		k := levelKey{circIdx, levelIdx}
+		r := ensureRow(k, inst)
+		switch col {
+		case 2: // isisCircLevelMetric (narrow)
+			r.metric = client.PDUInt(pdu)
+		case 3: // isisCircLevelWideMetric
+			r.wideMetric = client.PDUInt(pdu)
+		case 4: // isisCircLevelISPriority
+			r.priority = client.PDUInt(pdu)
+		case 7: // isisCircLevelDesIS — LAN-DIS ID (7 bytes), all-zero = no DIS
+			if b, ok := pdu.Value.([]byte); ok {
+				r.desIS = b
+			}
+		case 8: // isisCircLevelHelloMultiplier
+			r.helloMult = client.PDUInt(pdu)
+		case 9: // isisCircLevelHelloTimer (milliseconds)
+			r.helloTimerMs = client.PDUInt(pdu)
+		}
+	}
+
+	results := make([]*model.ISISCircuitLevel, 0, len(rows))
+	for k, r := range rows {
+		ifName := ifByIndex[circToIfIdx[k.circ]]
+		if ifName == "" {
+			continue
+		}
+
+		metric := r.wideMetric
+		if metric == 0 {
+			metric = r.metric
+		}
+
+		helloSecs := r.helloTimerMs / 1000
+		holdSecs := 0
+		if helloSecs > 0 && r.helloMult > 0 {
+			holdSecs = helloSecs * r.helloMult
+		}
+
+		results = append(results, &model.ISISCircuitLevel{
+			DeviceID:      deviceID,
+			Instance:      r.instance,
+			InterfaceName: ifName,
+			Level:         isisCircLevelName(k.level),
+			Metric:        metric,
+			HelloInterval: helloSecs,
+			HoldTimer:     holdSecs,
+			Priority:      r.priority,
+			DISID:         isisFormatDIS(r.desIS),
+		})
+	}
+	return results, nil
+}
+
+// PollISISLSPDatabase walks ISIS-MIB isisLSPSummaryTable to retrieve the
+// link-state database: one row per LSP currently held by the device.
+func PollISISLSPDatabase(s *client.Session, deviceID uuid.UUID) ([]*model.ISISLSP, error) {
+	pdus, err := s.BulkWalkAll(oid.ISISLSPTable)
+	if err != nil || len(pdus) == 0 {
+		return nil, err
+	}
+
+	type lspKey struct {
+		level int
+		lspID string
+	}
+	type lspRow struct {
+		instance   string
+		seq        int64
+		zeroLife   bool
+		checksum   int
+		lifetime   int
+		pduLength  int
+		attributes int
+	}
+	rows := make(map[lspKey]*lspRow)
+	ensureRow := func(k lspKey, inst string) *lspRow {
+		if r, ok := rows[k]; ok {
+			return r
+		}
+		r := &lspRow{instance: inst}
+		rows[k] = r
+		return r
+	}
+
+	for _, pdu := range pdus {
+		col, level, lspID, inst, ok := splitISISLSPIndex(pdu.Name, oid.ISISLSPTable)
+		if !ok {
+			continue
+		}
+		k := lspKey{level, lspID}
+		r := ensureRow(k, inst)
+		switch col {
+		case 3: // isisLSPSeq
+			r.seq = int64(client.PDUUint64(pdu))
+		case 4: // isisLSPZeroLife — TruthValue: 1=true, 2=false
+			r.zeroLife = client.PDUInt(pdu) == 1
+		case 5: // isisLSPChecksum
+			r.checksum = client.PDUInt(pdu)
+		case 6: // isisLSPLifetimeRemain
+			r.lifetime = client.PDUInt(pdu)
+		case 7: // isisLSPPDULength
+			r.pduLength = client.PDUInt(pdu)
+		case 8: // isisLSPAttributes
+			r.attributes = client.PDUInt(pdu)
+		}
+	}
+
+	results := make([]*model.ISISLSP, 0, len(rows))
+	for k, r := range rows {
+		if r.zeroLife {
+			continue // being purged; treat as absent from the database
+		}
+		results = append(results, &model.ISISLSP{
+			DeviceID:          deviceID,
+			Instance:          r.instance,
+			Level:             isisCircLevelName(k.level),
+			LSPID:             k.lspID,
+			SequenceNumber:    r.seq,
+			Checksum:          r.checksum,
+			RemainingLifetime: r.lifetime,
+			PDULength:         r.pduLength,
+			OverloadBit:       r.attributes&0x04 != 0,
+			AttachedBit:       r.attributes&0x78 != 0,
+		})
+	}
+	return results, nil
+}
+
 // ── Index parsers ─────────────────────────────────────────────────────────────
 //
 // ISIS-MIB indices encode isisSysInstance as a length-prefixed OctetString.
@@ -170,6 +384,64 @@ func splitISISAdjIPIndex(pduName, tableOID string) (col, circIdx, adjIdx, ipIdx 
 	adjIdx, _ = strconv.Atoi(parts[2+skip+1])
 	ipIdx, _ = strconv.Atoi(parts[2+skip+2])
 	return col, circIdx, adjIdx, ipIdx, inst
+}
+
+// splitISISSysAreaAddrIndex extracts (col, instance) from isisSysAreaAddrTable.
+// OID tail: col.instLen[.instChars*].areaAddrBytes* -- the area address is the
+// table's IMPLIED second index component, but for column 1 (isisSysAreaAddr)
+// the same bytes are also the PDU value, so callers read it from there.
+func splitISISSysAreaAddrIndex(pduName, tableOID string) (col int, instance string, ok bool) {
+	parts, sok := isisStripBase(pduName, tableOID)
+	if !sok || len(parts) < 2 {
+		return -1, "", false
+	}
+	col, _ = strconv.Atoi(parts[0])
+	inst, skip := isisParseInstance(parts[1:])
+	if skip < 0 {
+		return -1, "", false
+	}
+	return col, inst, true
+}
+
+// splitISISCircLevelIndex extracts (col, circIndex, levelIndex, instance) from isisCircLevelTable.
+// OID tail: col.instLen[.instChars*].circIdx.levelIdx
+func splitISISCircLevelIndex(pduName, tableOID string) (col, circIdx, levelIdx int, instance string) {
+	parts, ok := isisStripBase(pduName, tableOID)
+	if !ok || len(parts) < 4 {
+		return -1, 0, 0, ""
+	}
+	col, _ = strconv.Atoi(parts[0])
+	inst, skip := isisParseInstance(parts[1:])
+	if skip < 0 || len(parts) < 2+skip+2 {
+		return -1, 0, 0, ""
+	}
+	circIdx, _ = strconv.Atoi(parts[2+skip])
+	levelIdx, _ = strconv.Atoi(parts[2+skip+1])
+	return col, circIdx, levelIdx, inst
+}
+
+// splitISISLSPIndex extracts (col, level, lspID, instance) from isisLSPSummaryTable.
+// OID tail: col.instLen[.instChars*].lspLevel.b1.b2.b3.b4.b5.b6.b7.b8 (8-byte LSP ID, fixed-size)
+func splitISISLSPIndex(pduName, tableOID string) (col, level int, lspID string, instance string, ok bool) {
+	parts, sok := isisStripBase(pduName, tableOID)
+	if !sok || len(parts) < 10 {
+		return -1, 0, "", "", false
+	}
+	col, _ = strconv.Atoi(parts[0])
+	inst, skip := isisParseInstance(parts[1:])
+	if skip < 0 || len(parts) < 2+skip+9 {
+		return -1, 0, "", "", false
+	}
+	level, _ = strconv.Atoi(parts[2+skip])
+	b := make([]byte, 8)
+	for i := 0; i < 8; i++ {
+		v, e := strconv.Atoi(parts[2+skip+1+i])
+		if e != nil {
+			return -1, 0, "", "", false
+		}
+		b[i] = byte(v)
+	}
+	return col, level, isisFormatLSPID(b), inst, true
 }
 
 // isisStripBase strips the table OID prefix and returns the remaining parts.
@@ -229,6 +501,60 @@ func isisFormatSysID(pdu gosnmp.SnmpPDU) string {
 		return ""
 	}
 	return fmt.Sprintf("%02x%02x.%02x%02x.%02x%02x", b[0], b[1], b[2], b[3], b[4], b[5])
+}
+
+// isisFormatAreaAddr renders an ISO area address as dotted hex groups, e.g.
+// bytes [0x49,0x00,0x01] -> "49.0001" (AFI byte, then 2-byte groups).
+func isisFormatAreaAddr(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	parts := []string{fmt.Sprintf("%02x", b[0])}
+	rest := b[1:]
+	for i := 0; i < len(rest); i += 2 {
+		if i+2 <= len(rest) {
+			parts = append(parts, fmt.Sprintf("%02x%02x", rest[i], rest[i+1]))
+		} else {
+			parts = append(parts, fmt.Sprintf("%02x", rest[i]))
+		}
+	}
+	return strings.Join(parts, ".")
+}
+
+// isisFormatDIS renders the 7-byte LAN-DIS ID (isisCircLevelDesIS) as
+// "xxxx.xxxx.xxxx.NN", or "" if no DIS has been elected (all-zero/empty).
+func isisFormatDIS(b []byte) string {
+	if len(b) != 7 {
+		return ""
+	}
+	for _, v := range b {
+		if v != 0 {
+			return fmt.Sprintf("%02x%02x.%02x%02x.%02x%02x.%02x", b[0], b[1], b[2], b[3], b[4], b[5], b[6])
+		}
+	}
+	return ""
+}
+
+// isisFormatLSPID renders an 8-byte LSP ID as "xxxx.xxxx.xxxx.NN-NN":
+// 6-byte system ID, 1-byte pseudonode ID, 1-byte LSP fragment number.
+func isisFormatLSPID(b []byte) string {
+	if len(b) != 8 {
+		return ""
+	}
+	return fmt.Sprintf("%02x%02x.%02x%02x.%02x%02x.%02x-%02x", b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7])
+}
+
+// isisCircLevelName converts an isisCircLevelIndex/isisLSPLevel value (1 or 2)
+// to its level name.
+func isisCircLevelName(level int) string {
+	switch level {
+	case 1:
+		return "level-1"
+	case 2:
+		return "level-2"
+	default:
+		return "unknown"
+	}
 }
 
 func isisLevelName(usage int) string {

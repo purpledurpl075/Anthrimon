@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Numeric, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, Text, func
 from sqlalchemy.dialects.postgresql import INET, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -72,6 +72,10 @@ class RemoteCollector(Base):
     # IANA timezone for devices at this collector's site — used to interpret
     # RFC 3164 syslog timestamps, which carry no timezone info.
     timezone: Mapped[str] = mapped_column(Text, nullable=False, server_default="UTC")
+
+    # Per-collector poll cadence overrides (NULL = platform defaults: 15s state, 60s counter).
+    state_interval_s:   Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    counter_interval_s: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
 
     # ── Lifecycle ─────────────────────────────────────────────────────────────
     is_active:  Mapped[bool]     = mapped_column(Boolean, nullable=False, default=True)

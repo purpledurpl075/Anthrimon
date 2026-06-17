@@ -36,7 +36,8 @@ from .routers import (admin_router, platform_router, platform_health_router, ale
                       channels_router, bgp_router, clients_router, collectors_router, config_router,
                       credentials_router, devices_router, discovery_router, flow_router,
                       syslog_router, interfaces_router, maintenance_router, overview_router,
-                      policies_router, probes_router, path_trace_router, search_router, topology_router, traps_router, users_router)
+                      policies_router, probes_router, path_trace_router, saved_views_router, search_router, topology_router, traps_router, users_router,
+                      licensing_router, dashboards_router, metrics_router)
 from .routers.topology import start_topology_refresh_loop
 
 configure_logging()
@@ -119,11 +120,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     engine_task      = await start_alert_engine()
     topology_task    = await start_topology_refresh_loop(interval_seconds=300)
     config_task      = start_config_collector(interval_s=3600)
-    ssh_state_task   = start_rest_state_collector(interval_s=300)
+    ssh_state_task   = start_rest_state_collector(interval_s=60)
     monitor_task     = start_collector_monitor()
     baseline_task    = start_baseline_task(interval_s=3600)
     probe_task       = start_api_probe_loop(interval_s=300)
-    eapi_isis_task   = start_eapi_isis_collector(interval_s=300)
+    eapi_isis_task   = start_eapi_isis_collector(interval_s=60)
     yield
     eapi_isis_task.cancel()
     probe_task.cancel()
@@ -165,6 +166,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await probe_task
     except asyncio.CancelledError:
         pass
+    from .alerting.evaluators import aclose_http_client
+    await aclose_http_client()
     await engine.dispose()
     logger.info("anthrimon_api_stopped")
 
@@ -267,3 +270,13 @@ app.include_router(audit_router,       prefix=PREFIX)
 app.include_router(platform_health_router, prefix=PREFIX)
 app.include_router(probes_router,      prefix=PREFIX)
 app.include_router(path_trace_router,  prefix=PREFIX)
+app.include_router(saved_views_router, prefix=PREFIX)
+app.include_router(licensing_router,   prefix=PREFIX)
+app.include_router(dashboards_router,  prefix=PREFIX)
+app.include_router(metrics_router,     prefix=PREFIX)
+
+# Load the license once and mount any licensed feature modules.
+from .licensing import load_license          # noqa: E402
+from .modules.loader import mount_licensed    # noqa: E402
+load_license()
+mount_licensed(app, prefix=PREFIX)

@@ -37,7 +37,10 @@ router = APIRouter(prefix="/config", tags=["config"])
 async def _assert_device(device_id: str, principal: Principal, db: AsyncSession, min_role: str = "readonly") -> Device:
     await assert_device_access(principal, uuid.UUID(device_id), min_role, db)
     dev = (await db.execute(
-        select(Device).where(Device.id == device_id)
+        select(Device).where(
+            Device.id == device_id,
+            Device.tenant_id == principal.active_tenant_id,
+        )
     )).scalar_one_or_none()
     if dev is None:
         raise HTTPException(status_code=404, detail="Device not found")
@@ -943,14 +946,15 @@ async def _rollback_via_hub(host, vendor, cred_data, target, body, vrf, source_i
     Returns (output, config_served)."""
     from ..configmgmt import rollback as _rb
 
-    fetcher = _rb.serve_rollback(
-        config_text=target.config_text or "",
+    fetcher = _rb.serve_rollback_for_vendor(
+        vendor, config_text=target.config_text or "",
         expected_source_ip=host,
         timeout=120.0,
     )
     try:
         recipe = _rb.build_recipe(vendor, fetcher.url_for_device(), save=body.save,
-                                  vrf=vrf, source_if=source_if)
+                                  vrf=vrf, source_if=source_if,
+                                  sftp_password=fetcher.sftp_password)
         loop = asyncio.get_running_loop()
         output = await loop.run_in_executor(
             None, _rb.run_recipe, host, 22, vendor, cred_data, recipe,
@@ -973,7 +977,8 @@ async def _rollback_via_collector(db, dev, host, vendor, cred_data, target, body
     if col is None or not col.wg_ip or not col.api_key_hash:
         raise RuntimeError("device's collector is offline or has no WireGuard IP")
 
-    recipe = _rb.build_recipe(vendor, "{{URL}}", save=body.save, vrf=vrf, source_if=source_if)
+    recipe = _rb.build_recipe(vendor, "{{URL}}", save=body.save, vrf=vrf, source_if=source_if,
+                              sftp_password="{{SFTP_PASSWORD}}")
     payload = {
         "operation":          "rollback",
         "device_ip":          host,
@@ -984,6 +989,7 @@ async def _rollback_via_collector(db, dev, host, vendor, cred_data, target, body
         "enable_secret":      cred_data.get("enable_secret", "") or "",
         "enter_enable":       vendor in _proxy.ENABLE_VENDORS,
         "serve_config":       target.config_text or "",
+        "serve_transport":    "sftp" if vendor in _rb._SFTP_VENDORS else "http",
         "expected_source_ip": host,
         "steps":              _proxy.steps_from_recipe(recipe),
         "final_read_command": "show running-config" if recipe.show_running_after else "",

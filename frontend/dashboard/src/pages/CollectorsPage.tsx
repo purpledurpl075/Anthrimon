@@ -243,6 +243,25 @@ function CollectorDrawer({ collectorId, canEdit, onClose, onToken }: {
     onSuccess:  () => qc.invalidateQueries({ queryKey: ['collector-details', collectorId] }),
   })
 
+  // ── Poll intervals ───────────────────────────────────────────────────────────
+  const [stateInterval, setStateInterval]     = useState<string>('')
+  const [counterInterval, setCounterInterval] = useState<string>('')
+
+  useEffect(() => {
+    if (details) {
+      setStateInterval(details.state_interval_s != null ? String(details.state_interval_s) : '')
+      setCounterInterval(details.counter_interval_s != null ? String(details.counter_interval_s) : '')
+    }
+  }, [details])
+
+  const intervalMut = useMutation({
+    mutationFn: () => patchCollector(collectorId, {
+      state_interval_s:   stateInterval   !== '' ? Number(stateInterval)   : null,
+      counter_interval_s: counterInterval !== '' ? Number(counterInterval) : null,
+    }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['collector-details', collectorId] }),
+  })
+
   return (
     <div className="fixed inset-0 z-40 flex">
       {/* Backdrop */}
@@ -399,6 +418,49 @@ function CollectorDrawer({ collectorId, canEdit, onClose, onToken }: {
                   </div>
                   {tzMut.isSuccess && (
                     <p className="text-[11px] text-green-600 mt-1">Timezone saved.</p>
+                  )}
+                </section>
+              )}
+
+              {/* Poll intervals */}
+              {canEdit && (
+                <section>
+                  <h3 className="text-[11px] font-semibold text-slate-400 uppercase tracking-wide mb-2">Poll intervals</h3>
+                  <p className="text-[11px] text-slate-400 mb-2">
+                    State interval controls BGP/OSPF/IS-IS polling cadence. Counter interval controls routes, VLANs, STP and ARP/MAC. Leave blank to use platform defaults (15s / 60s). Changes take effect after the collector restarts.
+                  </p>
+                  <div className="grid grid-cols-2 gap-2 mb-2">
+                    <div>
+                      <label className="text-[11px] text-slate-500 block mb-1">State interval (s)</label>
+                      <input
+                        type="number"
+                        min={5}
+                        placeholder="15"
+                        value={stateInterval}
+                        onChange={e => setStateInterval(e.target.value)}
+                        className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-slate-500 block mb-1">Counter interval (s)</label>
+                      <input
+                        type="number"
+                        min={5}
+                        placeholder="60"
+                        value={counterInterval}
+                        onChange={e => setCounterInterval(e.target.value)}
+                        className="w-full border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs text-slate-700 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => intervalMut.mutate()}
+                    disabled={intervalMut.isPending}
+                    className="shrink-0 px-3 py-1.5 text-xs font-medium bg-slate-800 text-white rounded-lg hover:bg-slate-700 disabled:opacity-40 transition-colors">
+                    {intervalMut.isPending ? 'Saving…' : 'Save'}
+                  </button>
+                  {intervalMut.isSuccess && (
+                    <p className="text-[11px] text-green-600 mt-1">Intervals saved.</p>
                   )}
                 </section>
               )}

@@ -4281,7 +4281,7 @@ function TrapTab({ deviceId }: { deviceId: string }) {
                   </td>
                   <td className="px-3 py-1.5 text-slate-400">{t.snmp_version}</td>
                   <td className="px-3 py-1.5 font-mono text-[10px] text-slate-400 truncate max-w-[180px]" title={t.oid}>
-                    {t.oid}
+                    {t.oid_name ?? t.oid}
                   </td>
                 </tr>
               ))}

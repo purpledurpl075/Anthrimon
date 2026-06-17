@@ -134,6 +134,39 @@ class ISISArea(Base):
     updated_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
 
 
+class ISISCircuitLevel(Base):
+    __tablename__ = "isis_circuit_levels"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"), nullable=False)
+    instance: Mapped[str] = mapped_column(Text, nullable=False, default="default")
+    interface_name: Mapped[str] = mapped_column(Text, nullable=False)
+    level: Mapped[str] = mapped_column(Text, nullable=False)
+    metric: Mapped[Optional[int]] = mapped_column(Integer)
+    hello_interval: Mapped[Optional[int]] = mapped_column(Integer)
+    hold_timer: Mapped[Optional[int]] = mapped_column(Integer)
+    priority: Mapped[Optional[int]] = mapped_column(Integer)
+    dis_id: Mapped[Optional[str]] = mapped_column(Text)
+    updated_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
+
+
+class ISISLsp(Base):
+    __tablename__ = "isis_lsps"
+
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    device_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("devices.id", ondelete="CASCADE"), nullable=False)
+    instance: Mapped[str] = mapped_column(Text, nullable=False, default="default")
+    level: Mapped[str] = mapped_column(Text, nullable=False)
+    lsp_id: Mapped[str] = mapped_column(Text, nullable=False)
+    sequence_number: Mapped[Optional[int]] = mapped_column(BigInteger)
+    checksum: Mapped[Optional[int]] = mapped_column(Integer)
+    remaining_lifetime: Mapped[Optional[int]] = mapped_column(Integer)
+    pdu_length: Mapped[Optional[int]] = mapped_column(Integer)
+    overload_bit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    attached_bit: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    updated_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
+
+
 class ARPEntry(Base):
     __tablename__ = "arp_entries"
 
