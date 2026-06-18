@@ -21,7 +21,7 @@ from ..intel import enrich_ips, get_intel, is_private
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/flow", tags=["flow"])
 
-_CH_URL = "http://localhost:8123"
+from ..services.urls import ch_url
 
 PROTO_NAMES: dict[int, str] = {
     1: "ICMP", 2: "IGMP", 6: "TCP", 17: "UDP", 41: "IPv6",
@@ -37,7 +37,7 @@ async def _ch(query: str) -> list[dict]:
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                _CH_URL,
+                ch_url(),
                 content=query + " FORMAT JSON",
                 headers={"Content-Type": "text/plain"},
             )

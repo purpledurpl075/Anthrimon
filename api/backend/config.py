@@ -55,6 +55,10 @@ class Settings(BaseSettings):
     # The default tenant UUID inserted by migration 001_init.sql.
     default_tenant_id: str = "00000000-0000-0000-0000-000000000001"
 
+    # ── Time-series backends ──────────────────────────────────────────────────
+    victoriametrics_url: str = "http://localhost:8428"
+    clickhouse_url: str = "http://localhost:8123"
+
     # ── Licensing ─────────────────────────────────────────────────────────────
     # Offline RS256 license file. Absent = free tier. Lives under the
     # service-owned state dir so Platform Admin uploads persist in place without

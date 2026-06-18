@@ -18,7 +18,7 @@ from ..models.device import Device
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/syslog", tags=["syslog"])
 
-_CH_URL = "http://localhost:8123"
+from ..services.urls import ch_url
 
 SEVERITY_NAMES = {
     0: "emergency", 1: "alert", 2: "critical", 3: "error",
@@ -49,7 +49,7 @@ async def _ch(query: str) -> list[dict]:
     try:
         async with httpx.AsyncClient(timeout=15) as client:
             resp = await client.post(
-                _CH_URL,
+                ch_url(),
                 content=flat,
                 headers={"Content-Type": "text/plain"},
             )

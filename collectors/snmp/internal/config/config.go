@@ -61,7 +61,7 @@ type LogConfig struct {
 // defaults returns a Config pre-populated with safe production defaults.
 func defaults() Config {
 	return Config{
-		Database:   DatabaseConfig{MaxConns: 5, MinConns: 1},
+		Database:   DatabaseConfig{MaxConns: 25, MinConns: 2},
 		SNMP:       SNMPConfig{TimeoutSeconds: 10, Retries: 3, MaxOids: 60, MaxRepetitions: 25},
 		Polling:    PollingConfig{DefaultIntervalS: 60, StateIntervalS: 15, HealthIntervalS: 60, HealthMultiplier: 5, DeviceRefreshS: 300, MaxConcurrentDevices: 500},
 		Metrics:    MetricsConfig{VictoriaMetricsURL: "http://localhost:8428", FlushInterval: 10 * time.Second, BatchSize: 500},

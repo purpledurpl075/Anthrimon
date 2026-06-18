@@ -115,21 +115,16 @@ async def _write_isis_neighbors(device_id: uuid.UUID, rows: list[dict]) -> None:
     now = datetime.now(timezone.utc)
 
     async with AsyncSessionLocal() as db:
-        # Mark existing rows for this device as down first so neighbors that
-        # disappeared from "show isis neighbors" -- including ALL of them, if
-        # the device is now fully isolated -- are treated as down (the alert
-        # evaluator ignores 'unknown', so that state would otherwise mask a
-        # real adjacency-down event). A successful poll that returns zero
-        # rows means the device genuinely has no adjacencies right now (a
-        # failed poll never reaches this function -- see callers). The
-        # upsert loop below restores any adjacency still present to its real
-        # state.
-        await db.execute(text("""
-            UPDATE isis_neighbors
-               SET adjacency_state = 'down', last_state_change = :now, updated_at = :now
-             WHERE device_id = :did AND adjacency_state != 'down'
-        """), {"did": device_id, "now": now})
+        # Snapshot current state so orphan-marking knows which adjacencies
+        # were previously up.
+        prev_rows = (await db.execute(text("""
+            SELECT instance, sys_id, interface_name, adjacency_state::text
+              FROM isis_neighbors WHERE device_id = :did
+        """), {"did": str(device_id)})).all()
+        prev = {(r[0], r[1], r[2]): r[3] for r in prev_rows}
 
+        # Upsert active adjacencies FIRST so they are at their real state
+        # before orphan-marking runs — eliminates the race window.
         for r in rows:
             await db.execute(text("""
                 INSERT INTO isis_neighbors
@@ -164,6 +159,23 @@ async def _write_isis_neighbors(device_id: uuid.UUID, rows: list[dict]) -> None:
                 "last_change":   r["last_state_change"],
                 "now":           now,
             })
+
+        # Mark adjacencies absent from this poll as down. Runs after the
+        # upsert so active adjacencies are already at their correct state.
+        seen_keys = {(r["instance"], r["sys_id"], r["interface_name"] or "") for r in rows}
+        for (instance, sys_id, iface), state in prev.items():
+            if (instance, sys_id, iface) not in seen_keys and state != "down":
+                await db.execute(text("""
+                    UPDATE isis_neighbors
+                       SET adjacency_state = 'down',
+                           last_state_change = :now, updated_at = :now
+                     WHERE device_id = :did
+                       AND instance = :instance
+                       AND sys_id = :sys_id
+                       AND interface_name = :iface
+                       AND adjacency_state != 'down'
+                """), {"did": str(device_id), "instance": instance,
+                       "sys_id": sys_id, "iface": iface, "now": now})
 
         await db.commit()
 

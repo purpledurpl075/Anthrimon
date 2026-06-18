@@ -22,7 +22,7 @@ from ..schemas.interface import InterfaceRead, InterfaceUpdate
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/interfaces", tags=["interfaces"])
 
-_VM_URL = "http://localhost:8428"
+from ..services.urls import vm_url
 
 
 @router.get("/{interface_id}", response_model=InterfaceRead, summary="Get a single interface")
@@ -100,7 +100,7 @@ async def get_interface_utilisation(
     async def fetch_series(client: httpx.AsyncClient, key: str, query: str) -> tuple[str, list]:
         try:
             resp = await client.get(
-                f"{_VM_URL}/api/v1/query_range",
+                f"{vm_url()}/api/v1/query_range",
                 params={"query": query, "start": start, "end": now, "step": step},
             )
             resp.raise_for_status()
@@ -298,7 +298,7 @@ async def interface_live_stream(
                     ]) + "\n"
                     try:
                         await vm_client.post(
-                            f"{_VM_URL}/api/v1/import/prometheus",
+                            f"{vm_url()}/api/v1/import/prometheus",
                             content=vm_lines,
                             headers={"Content-Type": "text/plain"},
                         )
@@ -427,7 +427,7 @@ async def _stream_proxy(
                         ]) + "\n"
                         try:
                             await vm_client.post(
-                                f"{_VM_URL}/api/v1/import/prometheus",
+                                f"{vm_url()}/api/v1/import/prometheus",
                                 content=vm_lines,
                                 headers={"Content-Type": "text/plain"},
                             )

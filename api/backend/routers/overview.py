@@ -19,7 +19,7 @@ from ..models.device import Device
 from ..models.interface import Interface
 from ..database import AsyncSessionLocal
 
-_VM_URL = "http://localhost:8428"
+from ..services.urls import vm_url
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["overview"])
@@ -322,7 +322,7 @@ async def top_bandwidth(
             f' + rate(anthrimon_if_out_octets_total{{device_id=~"{device_ids_re}"}}[{topk_win}]) * 8)'
         )
         try:
-            topk_resp = await client.get(f"{_VM_URL}/api/v1/query", params={"query": topk_q})
+            topk_resp = await client.get(f"{vm_url()}/api/v1/query", params={"query": topk_q})
             topk_results = topk_resp.json().get("data", {}).get("result", [])
         except Exception:
             logger.exception("top_bandwidth_topk_failed")
@@ -348,7 +348,7 @@ async def top_bandwidth(
             q = f'rate({metric}{{device_id="{did}",if_index="{idx}"}}[{topk_win}]) * 8'
             try:
                 resp = await client.get(
-                    f"{_VM_URL}/api/v1/query_range",
+                    f"{vm_url()}/api/v1/query_range",
                     params={"query": q, "start": start, "end": now, "step": step},
                 )
                 results = resp.json().get("data", {}).get("result", [])
@@ -425,7 +425,7 @@ async def top_resources(
         try:
             async with httpx.AsyncClient(timeout=5) as client:
                 resp = await client.get(
-                    f"{_VM_URL}/api/v1/query",
+                    f"{vm_url()}/api/v1/query",
                     params={"query": f'topk({limit * 2}, {metric}{{device_id=~"{device_re}"}})'},
                 )
             return resp.json().get("data", {}).get("result", [])

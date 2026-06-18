@@ -3,8 +3,8 @@ log:
 
 database:
   dsn: "postgres://anthrimon:psswd123%24%25%5E@127.0.0.1/anthrimon?sslmode=disable"
-  max_conns: 5
-  min_conns: 1
+  max_conns: 25
+  min_conns: 2
 
 snmp:
   timeout_seconds: 10

@@ -579,22 +579,46 @@ func (w *PostgresWriter) upsertOSPFNeighbours(ctx context.Context, deviceID uuid
 // ── IS-IS ─────────────────────────────────────────────────────────────────────
 
 func (w *PostgresWriter) upsertISISAdjacencies(ctx context.Context, deviceID uuid.UUID, adjs []*model.ISISAdjacency) error {
-	// Mark existing rows down first; upserts below restore active ones. A row
-	// left in 'down' after the batch means the adjacency disappeared from the
-	// device's table -- the alert evaluator ignores 'unknown', so that state
-	// would otherwise mask a real adjacency-down event.
-	if _, err := w.pool.Exec(ctx,
-		`UPDATE isis_neighbors SET adjacency_state = 'down', last_state_change = NOW(), updated_at = NOW()
-		 WHERE device_id = $1 AND adjacency_state != 'down'`,
-		deviceID,
-	); err != nil {
-		w.log.Error().Err(err).Msg("isis stale-row mark failed")
+	// Snapshot current state so the upsert's last_state_change CASE compares
+	// against the true pre-poll state.
+	type isisKey struct{ instance, sysID, iface string }
+	type isisPrev struct {
+		state           string
+		lastStateChange *time.Time
 	}
+	prev := map[isisKey]isisPrev{}
+	prevRows, err := w.pool.Query(ctx,
+		`SELECT instance, sys_id, interface_name, adjacency_state::text, last_state_change FROM isis_neighbors WHERE device_id = $1`,
+		deviceID,
+	)
+	if err == nil {
+		for prevRows.Next() {
+			var inst, sysID, iface, state string
+			var lastStateChange *time.Time
+			if scanErr := prevRows.Scan(&inst, &sysID, &iface, &state, &lastStateChange); scanErr == nil {
+				prev[isisKey{inst, sysID, iface}] = isisPrev{state: state, lastStateChange: lastStateChange}
+			}
+		}
+		prevRows.Close()
+	}
+
+	// Upsert active adjacencies FIRST so they are at their real state before
+	// the orphan-mark runs — eliminates the race window that existed when we
+	// marked all rows down then restored them.
+	type seenKey struct{ instance, sysID, iface string }
+	seen := make([]seenKey, 0, len(adjs))
 	batch := &pgx.Batch{}
 	for _, a := range adjs {
 		instance := a.Instance
 		if instance == "" {
 			instance = "default"
+		}
+		seen = append(seen, seenKey{instance, a.SysID, a.InterfaceName})
+		var prevState *string
+		var prevLSC *time.Time
+		if p, ok := prev[isisKey{instance, a.SysID, a.InterfaceName}]; ok {
+			prevState = &p.state
+			prevLSC = p.lastStateChange
 		}
 		batch.Queue(`
 			INSERT INTO isis_neighbors (
@@ -613,23 +637,53 @@ func (w *PostgresWriter) upsertISISAdjacencies(ctx context.Context, deviceID uui
 				ipv6_address    = EXCLUDED.ipv6_address,
 				uptime_seconds  = EXCLUDED.uptime_seconds,
 				last_state_change = CASE
-					WHEN isis_neighbors.adjacency_state != EXCLUDED.adjacency_state THEN NOW()
-					ELSE isis_neighbors.last_state_change
+					WHEN $10::isis_adj_state IS DISTINCT FROM EXCLUDED.adjacency_state THEN NOW()
+					ELSE COALESCE($11::timestamptz, NOW())
 				END,
 				updated_at      = NOW()
 		`,
 			deviceID,
-			instance, a.SysID, &a.InterfaceName, // always non-nil so unique constraint fires
+			instance, a.SysID, &a.InterfaceName,
 			nullStr(a.CircuitType), a.AdjState, nullStr(a.IPv4Address), nullStr(a.IPv6Address),
 			nullInt64(a.UptimeSeconds),
+			prevState,
+			prevLSC,
 		)
 	}
-	br := w.pool.SendBatch(ctx, batch)
-	defer br.Close()
-	for i := 0; i < batch.Len(); i++ {
-		if _, err := br.Exec(); err != nil {
-			w.log.Error().Err(err).Msg("isis adjacency batch exec error")
+	if batch.Len() > 0 {
+		br := w.pool.SendBatch(ctx, batch)
+		defer br.Close()
+		for i := 0; i < batch.Len(); i++ {
+			if _, err := br.Exec(); err != nil {
+				w.log.Error().Err(err).Msg("isis adjacency batch exec error")
+			}
 		}
+	}
+
+	// Mark adjacencies NOT in this poll as down (adjacency disappeared from
+	// device's IS-IS table). Runs after upsert so active ones are already correct.
+	seenInstances := make([]string, 0, len(seen))
+	seenSysIDs := make([]string, 0, len(seen))
+	seenIfaces := make([]string, 0, len(seen))
+	for _, s := range seen {
+		seenInstances = append(seenInstances, s.instance)
+		seenSysIDs = append(seenSysIDs, s.sysID)
+		seenIfaces = append(seenIfaces, s.iface)
+	}
+	if _, err := w.pool.Exec(ctx, `
+		UPDATE isis_neighbors SET adjacency_state = 'down', last_state_change = NOW(), updated_at = NOW()
+		WHERE device_id = $1
+		  AND adjacency_state != 'down'
+		  AND NOT EXISTS (
+		      SELECT 1
+		      FROM unnest($2::text[], $3::text[], $4::text[]) AS t(inst, sys_id, iface)
+		      WHERE isis_neighbors.instance       = t.inst
+		        AND isis_neighbors.sys_id         = t.sys_id
+		        AND isis_neighbors.interface_name = t.iface
+		  )`,
+		deviceID, seenInstances, seenSysIDs, seenIfaces,
+	); err != nil {
+		w.log.Error().Err(err).Msg("isis orphan-mark failed")
 	}
 	return nil
 }

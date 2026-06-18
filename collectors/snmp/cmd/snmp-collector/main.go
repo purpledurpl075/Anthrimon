@@ -32,7 +32,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-const version = "0.1.10"
+const version = "0.1.11"
 
 func main() {
 	cfgPath := flag.String("config", "", "path to config file (default: /etc/anthrimon/snmp-collector.yaml)")

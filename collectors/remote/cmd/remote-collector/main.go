@@ -36,7 +36,7 @@ import (
 	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/tunnel"
 )
 
-const version = "0.3.40"
+const version = "0.3.41"
 
 // capabilities lists every feature this binary supports.  Sent on bootstrap
 // and on every heartbeat so the hub always reflects the running binary.

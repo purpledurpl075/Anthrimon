@@ -765,7 +765,7 @@ async def get_device_health(
     }
 
 
-_VM_URL = "http://localhost:8428"
+from ..services.urls import vm_url
 
 
 @router.get("/{device_id}/health/history", summary="Health metric history from VictoriaMetrics")
@@ -784,7 +784,7 @@ async def get_device_health_history(
     async def vm_range(query: str) -> list:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.get(f"{_VM_URL}/api/v1/query_range",
+                r = await client.get(f"{vm_url()}/api/v1/query_range",
                     params={"query": query, "start": start, "end": now, "step": step})
                 r.raise_for_status()
                 results = r.json().get("data", {}).get("result", [])
@@ -818,7 +818,7 @@ async def get_device_health_history(
     async def vm_multi(query: str) -> list[dict]:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.get(f"{_VM_URL}/api/v1/query_range",
+                r = await client.get(f"{vm_url()}/api/v1/query_range",
                     params={"query": query, "start": start, "end": now, "step": step})
                 r.raise_for_status()
                 return r.json().get("data", {}).get("result", [])
@@ -831,7 +831,7 @@ async def get_device_health_history(
     async def vm_instant_iface(metric: str) -> dict[str, float]:
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                r = await client.get(f"{_VM_URL}/api/v1/query",
+                r = await client.get(f"{vm_url()}/api/v1/query",
                     params={"query": f'{metric}{{device_id="{did}"}}'})
                 r.raise_for_status()
                 return {
@@ -846,7 +846,7 @@ async def get_device_health_history(
         """Last-known value keyed by a single label."""
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                r = await client.get(f"{_VM_URL}/api/v1/query",
+                r = await client.get(f"{vm_url()}/api/v1/query",
                     params={"query": f'{metric}{{device_id="{did}"}}'})
                 r.raise_for_status()
                 return {
@@ -861,7 +861,7 @@ async def get_device_health_history(
         """Last-known value for each series as a list of {labels: {…}, value: float}."""
         try:
             async with httpx.AsyncClient(timeout=5) as client:
-                r = await client.get(f"{_VM_URL}/api/v1/query",
+                r = await client.get(f"{vm_url()}/api/v1/query",
                     params={"query": f'{metric}{{device_id="{did}"}}'})
                 r.raise_for_status()
                 return [
@@ -1093,7 +1093,7 @@ async def get_device_latency(
     async def vm_range(query: str) -> list:
         try:
             async with httpx.AsyncClient(timeout=10) as client:
-                r = await client.get(f"{_VM_URL}/api/v1/query_range",
+                r = await client.get(f"{vm_url()}/api/v1/query_range",
                     params={"query": query, "start": start, "end": now, "step": step})
                 r.raise_for_status()
                 results = r.json().get("data", {}).get("result", [])

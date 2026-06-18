@@ -811,12 +811,12 @@ async def get_unassigned_devices(
 
 # ── Data management ────────────────────────────────────────────────────────────
 
-_CH_URL = "http://localhost:8123"
+from ..services.urls import ch_url
 
 
 async def _ch_admin(query: str) -> list[dict]:
     async with httpx.AsyncClient(timeout=10) as client:
-        resp = await client.post(_CH_URL, content=" ".join(query.split()) + " FORMAT JSON",
+        resp = await client.post(ch_url(), content=" ".join(query.split()) + " FORMAT JSON",
                                  headers={"Content-Type": "text/plain"})
     resp.raise_for_status()
     return resp.json().get("data", [])

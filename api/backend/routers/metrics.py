@@ -21,7 +21,7 @@ from ..schemas.metrics import MetricDefOut
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/metrics", tags=["metrics"])
 
-_VM_URL = "http://localhost:8428"
+from ..services.urls import vm_url
 
 
 def _escape_label(s: str) -> str:
@@ -31,7 +31,7 @@ def _escape_label(s: str) -> str:
 async def _vm_instant(query: str) -> tuple[Optional[float], Optional[int]]:
     try:
         async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
+            r = await client.get(f"{vm_url()}/api/v1/query", params={"query": query})
             r.raise_for_status()
             result = r.json().get("data", {}).get("result", [])
             if result and result[0].get("value"):
@@ -46,7 +46,7 @@ async def _vm_range(query: str, start: int, end: int, step: int) -> list[list[fl
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get(
-                f"{_VM_URL}/api/v1/query_range",
+                f"{vm_url()}/api/v1/query_range",
                 params={"query": query, "start": start, "end": end, "step": step},
             )
             r.raise_for_status()

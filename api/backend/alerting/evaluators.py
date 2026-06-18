@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import threading
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone, timedelta
 from typing import Optional
@@ -11,7 +12,7 @@ import httpx
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-_VM_URL = "http://localhost:8428"
+from ..services.urls import ch_url, vm_url
 
 # ── Shared pooled HTTP client ───────────────────────────────────────────────
 # The alert engine evaluates every metric rule against every device on a ~15s
@@ -49,15 +50,15 @@ async def aclose_http_client() -> None:
         await _http_client_singleton.aclose()
     _http_client_singleton = None
 
-_snmp_engine = None  # lazy singleton — SnmpEngine is thread-safe and expensive to construct
+_snmp_tls = threading.local()
 
 
 def _get_snmp_engine():
-    global _snmp_engine
-    if _snmp_engine is None:
-        from pysnmp.hlapi.v3arch.asyncio import SnmpEngine
-        _snmp_engine = SnmpEngine()
-    return _snmp_engine
+    """Return a per-thread SnmpEngine; pysnmp's sync engine is not thread-safe."""
+    if not hasattr(_snmp_tls, "engine"):
+        from pysnmp.hlapi import SnmpEngine
+        _snmp_tls.engine = SnmpEngine()
+    return _snmp_tls.engine
 
 
 @dataclass
@@ -303,7 +304,7 @@ async def eval_interface_errors(db: AsyncSession, device: dict, threshold: float
     )
     try:
         async with _shared_http() as client:
-            resp = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
+            resp = await client.get(f"{vm_url()}/api/v1/query", params={"query": query})
             resp.raise_for_status()
             results = resp.json().get("data", {}).get("result", [])
     except Exception:
@@ -383,7 +384,7 @@ async def eval_interface_util(db: AsyncSession, device: dict, threshold: float) 
     )
     try:
         async with _shared_http() as client:
-            resp = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
+            resp = await client.get(f"{vm_url()}/api/v1/query", params={"query": query})
             resp.raise_for_status()
             results = resp.json().get("data", {}).get("result", [])
     except Exception:
@@ -418,10 +419,52 @@ async def eval_interface_util(db: AsyncSession, device: dict, threshold: float) 
     return breaches
 
 
+_AUTH_PROTO = {
+    "md5": "usmHMACMD5AuthProtocol",
+    "sha": "usmHMACSHAAuthProtocol",
+    "sha256": "usmHMAC192SHA256AuthProtocol",
+    "sha512": "usmHMAC384SHA512AuthProtocol",
+}
+_PRIV_PROTO = {
+    "des": "usmDESPrivProtocol",
+    "aes": "usmAesCfb128Protocol",
+    "aes192": "usmAesCfb192Protocol",
+    "aes256": "usmAesCfb256Protocol",
+}
+
+
+def _snmp_get_sync(host: str, cred_type: str, cred_data: dict, oid: str) -> Optional[float]:
+    """Synchronous SNMP GET — runs in a thread pool to keep the event loop free."""
+    import pysnmp.hlapi as hlapi
+    engine = _get_snmp_engine()
+    target = hlapi.UdpTransportTarget((host, 161), timeout=5, retries=0)
+    if cred_type == "snmp_v2c":
+        auth = hlapi.CommunityData(cred_data.get("community", "public"), mpModel=1)
+    else:
+        auth_proto = getattr(hlapi, _AUTH_PROTO.get(cred_data.get("auth_protocol", "sha256").lower(), "usmHMAC192SHA256AuthProtocol"))
+        priv_proto = getattr(hlapi, _PRIV_PROTO.get(cred_data.get("priv_protocol", "aes").lower(), "usmAesCfb128Protocol"))
+        auth = hlapi.UsmUserData(
+            cred_data["username"],
+            authKey=cred_data.get("auth_key", ""),
+            privKey=cred_data.get("priv_key", ""),
+            authProtocol=auth_proto,
+            privProtocol=priv_proto,
+        )
+    for err_ind, err_status, _, vbs in hlapi.getCmd(
+        engine, auth, target, hlapi.ContextData(), hlapi.ObjectType(hlapi.ObjectIdentity(oid))
+    ):
+        if err_ind or err_status or not vbs:
+            return None
+        try:
+            return float(str(vbs[0][1]))
+        except ValueError:
+            return None
+    return None
+
+
 async def eval_custom_oid(db: AsyncSession, device: dict, oid: str,
                            condition: str, threshold: float) -> Optional[Breach]:
     """Query an arbitrary SNMP OID and compare its value to the threshold."""
-    # Fetch the device's primary SNMP credential
     cred_row = (await db.execute(
         text("""
             SELECT c.type::text, c.data::text
@@ -440,54 +483,15 @@ async def eval_custom_oid(db: AsyncSession, device: dict, oid: str,
     import json as _json
     cred_data = _json.loads(cred_row["data"])
     cred_type = cred_row["type"]
+    host = device.get("mgmt_ip") or str(device["id"])
 
     try:
-        if cred_type == "snmp_v2c":
-            from pysnmp.hlapi.v3arch.asyncio import (
-                CommunityData, ContextData, ObjectIdentity, ObjectType,
-                UdpTransportTarget, get_cmd,
-            )
-            engine = _get_snmp_engine()
-            transport = await UdpTransportTarget.create(
-                (device["mgmt_ip"] if "mgmt_ip" in device else device["id"], 161),
-                timeout=5, retries=0,
-            )
-            it = get_cmd(engine, CommunityData(cred_data.get("community", "public"), mpModel=1),
-                         transport, ContextData(), ObjectType(ObjectIdentity(oid)))
-        else:
-            from pysnmp.hlapi.v3arch.asyncio import (
-                ContextData, ObjectIdentity, ObjectType,
-                UdpTransportTarget, UsmUserData, get_cmd,
-            )
-            import pysnmp.hlapi.v3arch.asyncio as hlapi
-            _AUTH = {"md5": "usmHMACMD5AuthProtocol", "sha": "usmHMACSHAAuthProtocol",
-                     "sha256": "usmHMAC192SHA256AuthProtocol", "sha512": "usmHMAC384SHA512AuthProtocol"}
-            _PRIV = {"des": "usmDESPrivProtocol", "aes": "usmAesCfb128Protocol",
-                     "aes192": "usmAesCfb192Protocol", "aes256": "usmAesCfb256Protocol"}
-            auth_proto = getattr(hlapi, _AUTH.get(cred_data.get("auth_protocol","sha256").lower(), "usmHMAC192SHA256AuthProtocol"))
-            priv_proto = getattr(hlapi, _PRIV.get(cred_data.get("priv_protocol","aes").lower(), "usmAesCfb128Protocol"))
-            engine = _get_snmp_engine()
-            transport = await UdpTransportTarget.create(
-                (device.get("mgmt_ip", device["id"]), 161), timeout=5, retries=0,
-            )
-            it = get_cmd(engine,
-                         UsmUserData(cred_data["username"],
-                                     authKey=cred_data.get("auth_key",""),
-                                     privKey=cred_data.get("priv_key",""),
-                                     authProtocol=auth_proto, privProtocol=priv_proto),
-                         transport, ContextData(), ObjectType(ObjectIdentity(oid)))
-
-        err_ind, err_status, _, vbs = await it
-        if err_ind or err_status or not vbs:
-            return None
-        raw = str(vbs[0][1])
-        try:
-            val = float(raw)
-        except ValueError:
+        val = await asyncio.to_thread(_snmp_get_sync, host, cred_type, cred_data, oid)
+        if val is None:
             return None
         if _check(val, condition, threshold):
             return Breach(device["id"], device["hostname"], value=val,
-                          extra={"oid": oid, "raw": raw})
+                          extra={"oid": oid, "raw": str(val)})
     except Exception:
         pass
     return None
@@ -524,7 +528,8 @@ async def eval_ospf_state(db: AsyncSession, device: dict) -> Optional[Breach]:
     """
     rows = (await db.execute(
         text("""
-            SELECT neighbor_router_id::text, neighbor_ip::text, state
+            SELECT host(neighbor_router_id) AS neighbor_router_id,
+                   host(neighbor_ip) AS neighbor_ip, state
             FROM ospf_neighbors
             WHERE device_id = :did
               AND state NOT IN ('full', 'unknown')
@@ -550,7 +555,8 @@ async def eval_ospf_state(db: AsyncSession, device: dict) -> Optional[Breach]:
     ]
     return Breach(
         device["id"], device["hostname"],
-        extra={"neighbors": bad, "count": len(bad), "ospf_state": bad[0]["state"]},
+        extra={"neighbors": bad, "count": len(bad),
+               "neighbor": bad[0]["neighbor"], "ospf_state": bad[0]["state"]},
     )
 
 
@@ -615,7 +621,7 @@ async def eval_flow_bandwidth(
     try:
         async with _shared_http() as client:
             resp = await client.post(
-                "http://localhost:8123",
+                ch_url(),
                 params=ch_params,
                 content=query + " FORMAT JSON",
                 headers={"Content-Type": "text/plain"},
@@ -698,7 +704,7 @@ async def eval_syslog_match(
         async with _shared_http() as client:
             # Count
             cnt_resp = await client.post(
-                "http://localhost:8123",
+                ch_url(),
                 params=ch_params,
                 content=f"SELECT count() AS n FROM syslog_messages WHERE {where} FORMAT JSON",
                 headers={"Content-Type": "text/plain"},
@@ -711,7 +717,7 @@ async def eval_syslog_match(
 
             # Grab the most recent matching message for the alert title/context
             msg_resp = await client.post(
-                "http://localhost:8123",
+                ch_url(),
                 params=ch_params,
                 content=(
                     f"SELECT program, message FROM syslog_messages "
@@ -740,7 +746,7 @@ async def fetch_syslog_context(device_id: str, count: int = 5) -> list[dict]:
     try:
         async with _shared_http() as client:
             resp = await client.post(
-                "http://localhost:8123",
+                ch_url(),
                 params={"param_did": device_id, "param_lim": str(int(count))},
                 content=(
                     "SELECT toUnixTimestamp(ts)*1000 AS ts_ms, severity, program, message "
@@ -769,7 +775,7 @@ async def eval_bgp_session_down(db: AsyncSession, device: dict) -> list[Breach]:
     """Alert when any BGP session with admin_status=start is not established."""
     rows = (await db.execute(
         text(
-            "SELECT peer_ip::text, peer_asn, local_asn, session_state "
+            "SELECT host(peer_ip) AS peer_ip, peer_asn, local_asn, session_state "
             "FROM bgp_sessions "
             "WHERE device_id = :did "
             "  AND admin_status = 'start' "
@@ -796,7 +802,7 @@ async def eval_bgp_session_flapping(
     """Alert when a BGP session has flapped >= threshold times in the last window_minutes."""
     rows = (await db.execute(
         text("""
-            SELECT s.peer_ip::text, s.peer_asn, s.local_asn, s.session_state,
+            SELECT host(s.peer_ip) AS peer_ip, s.peer_asn, s.local_asn, s.session_state,
                    COUNT(e.id) AS flap_count
             FROM bgp_sessions s
             JOIN bgp_session_events e ON e.session_id = s.id
@@ -840,7 +846,7 @@ async def eval_bgp_prefix_drop(
     async def vm_instant(query: str) -> list[dict]:
         try:
             async with _shared_http() as client:
-                r = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
+                r = await client.get(f"{vm_url()}/api/v1/query", params={"query": query})
             return r.json().get("data", {}).get("result", [])
         except Exception:
             return []
@@ -924,7 +930,7 @@ async def eval_device_latency(
     async def vm_instant(query: str) -> float | None:
         try:
             async with _shared_http() as client:
-                r = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
+                r = await client.get(f"{vm_url()}/api/v1/query", params={"query": query})
             results = r.json().get("data", {}).get("result", [])
             if results:
                 return float(results[0]["value"][1])
@@ -1021,7 +1027,7 @@ async def eval_interface_discards(db: AsyncSession, device: dict, threshold: flo
     )
     try:
         async with _shared_http() as client:
-            resp = await client.get(f"{_VM_URL}/api/v1/query", params={"query": query})
+            resp = await client.get(f"{vm_url()}/api/v1/query", params={"query": query})
             resp.raise_for_status()
             results = resp.json().get("data", {}).get("result", [])
     except Exception:

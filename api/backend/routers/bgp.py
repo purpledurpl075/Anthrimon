@@ -18,7 +18,7 @@ from ..models.bgp import BGPSession, BGPSessionEvent
 from ..models.device import Device
 from ..models.interface import OSPFNeighbor, ISISNeighbor, ISISArea, ISISCircuitLevel, ISISLsp, RouteEntry
 
-VM_BASE = "http://localhost:8428"
+from ..services.urls import vm_url
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/bgp", tags=["bgp"])
@@ -255,7 +255,7 @@ async def bgp_prefix_history(
     async def vm_range(query: str) -> list[dict]:
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
-                r = await client.get(f"{VM_BASE}/api/v1/query_range", params={
+                r = await client.get(f"{vm_url()}/api/v1/query_range", params={
                     "query": query,
                     "start": start,
                     "end":   end,

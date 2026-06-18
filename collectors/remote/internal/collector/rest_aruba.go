@@ -135,12 +135,21 @@ func (c *ArubaRESTCollector) enabledDevices() []hub.Device {
 
 // collectState polls BGP sessions and OSPF neighbors for every REST-enabled
 // ArubaOS-CX device. These are time-sensitive state fields that drive alert latency.
+// Devices are polled concurrently so a slow device doesn't delay state detection
+// for the rest of the fleet.
 func (c *ArubaRESTCollector) collectState(ctx context.Context) {
-	for _, dev := range c.enabledDevices() {
-		if err := c.collectStateDevice(ctx, dev); err != nil {
-			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("aruba rest state collection failed")
-		}
+	devices := c.enabledDevices()
+	var wg sync.WaitGroup
+	for _, dev := range devices {
+		wg.Add(1)
+		go func(d hub.Device) {
+			defer wg.Done()
+			if err := c.collectStateDevice(ctx, d); err != nil {
+				c.logger.Warn().Err(err).Str("device", d.Hostname).Msg("aruba rest state collection failed")
+			}
+		}(dev)
 	}
+	wg.Wait()
 }
 
 func (c *ArubaRESTCollector) collectStateDevice(ctx context.Context, dev hub.Device) error {
@@ -186,12 +195,20 @@ func (c *ArubaRESTCollector) collectStateDevice(ctx context.Context, dev hub.Dev
 
 // collectCounters polls routes, VLANs, STP, addresses, and inventory for every
 // REST-enabled ArubaOS-CX device. These are heavier walks that are less time-sensitive.
+// Devices are polled concurrently so a slow device doesn't delay the full sweep.
 func (c *ArubaRESTCollector) collectCounters(ctx context.Context) {
-	for _, dev := range c.enabledDevices() {
-		if err := c.collectCountersDevice(ctx, dev); err != nil {
-			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("aruba rest counter collection failed")
-		}
+	devices := c.enabledDevices()
+	var wg sync.WaitGroup
+	for _, dev := range devices {
+		wg.Add(1)
+		go func(d hub.Device) {
+			defer wg.Done()
+			if err := c.collectCountersDevice(ctx, d); err != nil {
+				c.logger.Warn().Err(err).Str("device", d.Hostname).Msg("aruba rest counter collection failed")
+			}
+		}(dev)
 	}
+	wg.Wait()
 }
 
 func (c *ArubaRESTCollector) collectCountersDevice(ctx context.Context, dev hub.Device) error {

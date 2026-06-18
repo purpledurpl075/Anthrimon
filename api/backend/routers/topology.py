@@ -36,6 +36,7 @@ from ..dependencies import (
 from ..models.device import Device
 from ..models.interface import Interface, LLDPNeighbor, CDPNeighbor
 from ..database import AsyncSessionLocal
+from ..services.urls import vm_url
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/topology", tags=["topology"])
@@ -479,7 +480,7 @@ async def get_link_utilisation_batch(
         query = f'rate({metric}{{device_id=~"{device_re}"}}[2m]) * 8'
         try:
             async with httpx.AsyncClient(timeout=5.0) as client:
-                resp = await client.get("http://localhost:8428/api/v1/query",
+                resp = await client.get(f"{vm_url()}/api/v1/query",
                                         params={"query": query})
             series_list = resp.json().get("data", {}).get("result", [])
         except Exception:

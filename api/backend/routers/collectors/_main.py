@@ -37,23 +37,22 @@ from sqlalchemy import cast, select, text, update
 from sqlalchemy.dialects.postgresql import INET as PG_INET
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..database import AsyncSessionLocal
+from ...database import AsyncSessionLocal
 
-from ..dependencies import get_current_user, get_db, require_tenant_user
-from ..models.api_method import DeviceApiMethod
-from ..models.credential import Credential, DeviceCredential
-from ..models.device import Device
-from ..models.health import DeviceHealthLatest
-from ..models.site import RemoteCollector, WgIpPool
-from ..models.tenant import User
-from ..snmp_probe import detect_vendor, VENDOR_DEVICE_TYPE as _VENDOR_DEVICE_TYPE
-from ..alerting.settings import load_platform_defaults
+from ...dependencies import get_current_user, get_db, require_tenant_user
+from ...models.api_method import DeviceApiMethod
+from ...models.credential import Credential, DeviceCredential
+from ...models.device import Device
+from ...models.health import DeviceHealthLatest
+from ...models.site import RemoteCollector, WgIpPool
+from ...models.tenant import User
+from ...snmp_probe import detect_vendor, VENDOR_DEVICE_TYPE as _VENDOR_DEVICE_TYPE
+from ...alerting.settings import load_platform_defaults
+from ...services.urls import ch_url, vm_url
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/collectors", tags=["collectors"])
 
-_CH_URL          = "http://localhost:8123"
-_VM_URL          = "http://localhost:8428"
 _WG_IF           = "wg0"
 _WG_SUBNET       = ipaddress.ip_network("10.100.0.0/24")
 _COLLECTOR_DIST  = Path("/var/lib/anthrimon/downloads")
@@ -61,7 +60,7 @@ _VALID_ARCHES    = {"amd64", "arm64"}
 
 # Go toolchain + source root (resolved relative to this file at import time)
 _GO_BIN     = Path("/usr/local/go/bin/go")
-_REPO_ROOT  = Path(__file__).resolve().parents[3]   # .../api/backend/routers/ → repo root
+_REPO_ROOT  = Path(__file__).resolve().parents[4]   # .../api/backend/routers/collectors/ → repo root
 _REMOTE_SRC = _REPO_ROOT / "collectors" / "remote"
 
 # Architectures to build: (arch_label, extra_env_overrides)
@@ -554,7 +553,7 @@ async def list_trap_v3_users(
     current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
-    from ..models.credential import Credential
+    from ...models.credential import Credential
     rows = (await db.execute(
         select(Credential).where(
             Credential.tenant_id == current_user.tenant_id,
@@ -585,8 +584,8 @@ async def add_trap_v3_user(
     Pass device_id to auto-discover the engine ID via SSH, or engine_id to
     set it manually.  Both are optional; omitting both stores without an engine ID.
     """
-    from ..models.credential import Credential
-    from ..models.device import Device
+    from ...models.credential import Credential
+    from ...models.device import Device
 
     # ── Resolve engine ID ──────────────────────────────────────────────────
     engine_id: str | None = body.engine_id
@@ -600,8 +599,8 @@ async def add_trap_v3_user(
         )).scalar_one_or_none()
 
         if device is not None:
-            from ..models.credential import Credential as _Cred
-            from ..models.device_credential import DeviceCredential
+            from ...models.credential import Credential as _Cred
+            from ...models.device_credential import DeviceCredential
             ssh_row = (await db.execute(
                 select(_Cred).join(
                     DeviceCredential, DeviceCredential.credential_id == _Cred.id
@@ -612,7 +611,7 @@ async def add_trap_v3_user(
             )).scalar_one_or_none()
 
             if ssh_row is not None:
-                from ..configmgmt.collector import _vendor_key
+                from ...configmgmt.collector import _vendor_key
                 vendor_key = _vendor_key(device)
                 engine_id = await _discover_engine_id(
                     str(device.ip_address), vendor_key, ssh_row.data
@@ -679,9 +678,9 @@ async def discover_trap_v3_engine_id(
     Useful when a device is replaced (engine ID changes) or when SSH credentials
     weren't available when the trap user was first created.
     """
-    from ..models.credential import Credential
-    from ..models.device import Device
-    from ..models.device_credential import DeviceCredential
+    from ...models.credential import Credential
+    from ...models.device import Device
+    from ...models.device_credential import DeviceCredential
 
     cred = (await db.execute(
         select(Credential).where(
@@ -714,7 +713,7 @@ async def discover_trap_v3_engine_id(
     if not ssh_row:
         raise HTTPException(status_code=422, detail="Device has no SSH credential")
 
-    from ..configmgmt.collector import _vendor_key
+    from ...configmgmt.collector import _vendor_key
     vendor_key = _vendor_key(device)
     engine_id = await _discover_engine_id(str(device.ip_address), vendor_key, ssh_row.data)
     if not engine_id:
@@ -739,7 +738,7 @@ async def delete_trap_v3_user(
     current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> None:
-    from ..models.credential import Credential
+    from ...models.credential import Credential
     row = (await db.execute(
         select(Credential).where(
             Credential.tenant_id == current_user.tenant_id,
@@ -790,7 +789,7 @@ async def collector_config(
     request: Request,
     db:      AsyncSession = Depends(get_db),
 ) -> dict:
-    from .. import crypto as _crypto
+    from ... import crypto as _crypto
 
     collector = await _require_collector(request, db)
 
@@ -938,7 +937,7 @@ async def _ch_query(query: str) -> list[dict]:
     flat = " ".join(query.split()) + " FORMAT JSON"
     try:
         async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(_CH_URL, content=flat,
+            resp = await client.post(ch_url(), content=flat,
                                      headers={"Content-Type": "text/plain"})
         resp.raise_for_status()
         return resp.json().get("data", [])
@@ -1307,7 +1306,7 @@ async def collector_probe(
     """
     c = await _get_collector_for_tenant(collector_id, current_user.tenant_id, db)
 
-    from ..models.credential import Credential
+    from ...models.credential import Credential
     cred_rows = (await db.execute(
         select(Credential).where(
             Credential.id.in_(body.credential_ids),
@@ -1364,7 +1363,7 @@ async def collector_sweep(
 
     c = await _get_collector_for_tenant(collector_id, current_user.tenant_id, db)
 
-    from ..models.credential import Credential
+    from ...models.credential import Credential
     cred_rows = (await db.execute(
         select(Credential).where(
             Credential.id.in_(body.credential_ids),
@@ -1868,7 +1867,7 @@ async def ingest_metrics(
     # Forward to VictoriaMetrics
     async with httpx.AsyncClient(timeout=10) as client:
         resp = await client.post(
-            f"{_VM_URL}/api/v1/import/prometheus",
+            f"{vm_url()}/api/v1/import/prometheus",
             content=body,
             headers={"Content-Type": "text/plain"},
         )
@@ -2136,7 +2135,7 @@ async def ingest_metrics(
     # EVAL_INTERVAL on top of the SNMP poll interval.
     if recovered_ids:
         try:
-            from ..alerting.engine import _engine
+            from ...alerting.engine import _engine
             _engine.request_immediate_pass(reason=f"device_recovered:{len(recovered_ids)}")
         except Exception as exc:
             logger.debug("alert_engine_wake_failed", error=str(exc))
@@ -2261,7 +2260,7 @@ async def ingest_flows(
 
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
-            f"{_CH_URL}/?query={_FLOWS_INSERT.replace(' ', '+')}",
+            f"{ch_url()}/?query={_FLOWS_INSERT.replace(' ', '+')}",
             content="\n".join(rows),
             headers={"Content-Type": "text/plain"},
         )
@@ -2270,7 +2269,7 @@ async def ingest_flows(
                        status=resp.status_code, detail=resp.text[:200])
 
     try:
-        from ..alerting.engine import _engine
+        from ...alerting.engine import _engine
         _engine.request_immediate_pass(reason="flow_received")
     except Exception:
         pass
@@ -2318,7 +2317,7 @@ async def ingest_syslog(
 
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
-            f"{_CH_URL}/?query=INSERT+INTO+syslog_messages+"
+            f"{ch_url()}/?query=INSERT+INTO+syslog_messages+"
             "(device_id,device_ip,facility,severity,ts,hostname,program,pid,message,raw)"
             "+FORMAT+TabSeparated",
             content="\n".join(rows),
@@ -2329,7 +2328,7 @@ async def ingest_syslog(
                        status=resp.status_code, detail=resp.text[:200])
 
     try:
-        from ..alerting.engine import _engine
+        from ...alerting.engine import _engine
         _engine.request_immediate_pass(reason="syslog_received")
     except Exception:
         pass
@@ -2369,7 +2368,7 @@ async def ingest_config_backup(
         raise HTTPException(status_code=404,
                             detail="Device not found or not assigned to this collector")
 
-    from ..configmgmt.collector import store_config_backup
+    from ...configmgmt.collector import store_config_backup
     changed = await store_config_backup(body.device_id, body.config_text, body.method, db)
 
     logger.info("config_backup_ingested", collector=collector.name,
@@ -2410,7 +2409,7 @@ async def ingest_bgp_sessions(
         return {"written": 0}
 
     import uuid as _uuid
-    from ..configmgmt.rest_state import _write_bgp
+    from ...services.state_writer import write_bgp_sessions
 
     sessions = [
         {k: v for k, v in r.items() if k != "device_id"}
@@ -2418,14 +2417,14 @@ async def ingest_bgp_sessions(
     ]
 
     try:
-        await _write_bgp(_uuid.UUID(did), sessions)
+        await write_bgp_sessions(_uuid.UUID(did), sessions)
     except Exception as exc:
         logger.warning("bgp_ingest_failed", collector=collector.name,
                        device_id=did, error=str(exc))
         return {"written": 0}
 
     try:
-        from ..alerting.engine import _engine
+        from ...alerting.engine import _engine
         _engine.request_immediate_pass(reason="bgp_state_changed")
     except Exception:
         pass
@@ -2461,7 +2460,7 @@ async def ingest_collector_logs(
 
     async with httpx.AsyncClient(timeout=15) as client:
         resp = await client.post(
-            f"{_CH_URL}/?query=INSERT+INTO+collector_logs+"
+            f"{ch_url()}/?query=INSERT+INTO+collector_logs+"
             "(collector_id,ts,level,message,fields)"
             "+FORMAT+TabSeparated",
             content="\n".join(rows),
@@ -2505,7 +2504,7 @@ async def ingest_ospf_neighbors(
         return {"written": 0}
 
     import uuid as _uuid
-    from ..configmgmt.rest_state import _write_ospf
+    from ...services.state_writer import write_ospf_neighbors
 
     neighbors = [
         {k: v for k, v in r.items() if k != "device_id"}
@@ -2513,14 +2512,14 @@ async def ingest_ospf_neighbors(
     ]
 
     try:
-        await _write_ospf(_uuid.UUID(did), neighbors)
+        await write_ospf_neighbors(_uuid.UUID(did), neighbors)
     except Exception as exc:
         logger.warning("ospf_ingest_failed", collector=collector.name,
                        device_id=did, error=str(exc))
         return {"written": 0}
 
     try:
-        from ..alerting.engine import _engine
+        from ...alerting.engine import _engine
         _engine.request_immediate_pass(reason="ospf_state_changed")
     except Exception:
         pass
@@ -2563,7 +2562,7 @@ async def ingest_routes(
         return {"written": 0}
 
     import uuid as _uuid
-    from ..configmgmt.rest_state import _write_routes
+    from ...services.state_writer import write_routes
 
     routes = [
         {k: v for k, v in r.items() if k != "device_id"}
@@ -2571,14 +2570,14 @@ async def ingest_routes(
     ]
 
     try:
-        await _write_routes(_uuid.UUID(did), routes)
+        await write_routes(_uuid.UUID(did), routes)
     except Exception as exc:
         logger.warning("routes_ingest_failed", collector=collector.name,
                        device_id=did, error=str(exc))
         return {"written": 0}
 
     try:
-        from ..alerting.engine import _engine
+        from ...alerting.engine import _engine
         _engine.request_immediate_pass(reason="routes_changed")
     except Exception:
         pass
@@ -2622,7 +2621,7 @@ async def ingest_isis_neighbors(
 
     import uuid as _uuid
     from datetime import datetime as _dt
-    from ..configmgmt.eapi_collector import _write_isis_neighbors
+    from ...services.state_writer import write_isis_neighbors
 
     rows = []
     for r in (body.get("neighbors") or []):
@@ -2637,14 +2636,14 @@ async def ingest_isis_neighbors(
         rows.append(row)
 
     try:
-        await _write_isis_neighbors(_uuid.UUID(did), rows)
+        await write_isis_neighbors(_uuid.UUID(did), rows)
     except Exception as exc:
         logger.warning("isis_ingest_failed", collector=collector.name,
                        device_id=did, error=str(exc))
         return {"written": 0}
 
     try:
-        from ..alerting.engine import _engine
+        from ...alerting.engine import _engine
         _engine.request_immediate_pass(reason="isis_state_changed")
     except Exception:
         pass
@@ -3094,7 +3093,7 @@ async def ingest_traps(
             asyncio.create_task(_trigger_repolls(wg_ip, token, repoll_ids))
 
     try:
-        from ..alerting.engine import _engine
+        from ...alerting.engine import _engine
         _engine.request_immediate_pass(reason="trap_received")
     except Exception:
         pass
@@ -3167,7 +3166,7 @@ def _parse_engine_id(output: str) -> str | None:
 
 async def _discover_engine_id(host: str, vendor_key: str, cred_data: dict) -> str | None:
     """SSH to a device and extract its SNMP engine ID. Returns hex string without 0x prefix."""
-    from ..configmgmt.collector import _ssh_exec, _vendor_key as _vk  # noqa: F401
+    from ...configmgmt.collector import _ssh_exec, _vendor_key as _vk  # noqa: F401
 
     command = _ENGINE_ID_CMDS.get(vendor_key, "show snmp engineID")
     if not command:
@@ -3231,8 +3230,8 @@ async def _collect_v3_users_for_collector(collector_id: str | None, tenant_id: s
     For remote collectors: restrict to credentials linked to devices assigned
     to that specific collector.
     """
-    from ..models.credential import Credential, DeviceCredential
-    from ..models.device import Device
+    from ...models.credential import Credential, DeviceCredential
+    from ...models.device import Device
     from sqlalchemy.orm import outerjoin
 
     if collector_id is None:
@@ -3293,7 +3292,7 @@ async def _push_trap_config(collector_id: str | None, tenant_id: str) -> None:
     Errors are logged and swallowed so a credential save is never blocked.
     """
     import subprocess as _sp
-    from ..database import AsyncSessionLocal
+    from ...database import AsyncSessionLocal
 
     async with AsyncSessionLocal() as db:
         users = await _collect_v3_users_for_collector(collector_id, tenant_id, db)

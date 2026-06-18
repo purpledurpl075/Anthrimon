@@ -32,6 +32,7 @@ from sqlalchemy import select, text
 from ..database import AsyncSessionLocal
 from ..models.credential import Credential, DeviceCredential
 from ..models.device import Device
+from ..services.urls import vm_url
 
 logger = structlog.get_logger(__name__)
 
@@ -247,22 +248,11 @@ async def _write_bgp(device_id: uuid.UUID, peers: list[dict]) -> None:
         )).all()
         prev = {r[1].split("/")[0]: {"id": r[0], "state": r[2], "last_state_change": r[3]} for r in prev_rows}
 
-        # Mark existing sessions idle first so peers that disappeared from
-        # this poll -- including ALL of them, if the device currently has
-        # zero BGP sessions -- are treated as down. bgp_session_state has no
-        # 'down' value, and eval_bgp_session_down only treats
-        # established/unknown as healthy, so 'idle' is the correct
-        # stale-marker. admin_status is left untouched. The upsert loop below
-        # restores any session still present to its real state.
-        await db.execute(text("""
-            UPDATE bgp_sessions
-               SET session_state = 'idle'::bgp_session_state,
-                   last_state_change = NOW(), updated_at = NOW()
-             WHERE device_id = :did AND session_state != 'idle'
-        """), {"did": str(device_id)})
-
+        # Upsert active peers FIRST so they are at their real state before
+        # any orphan-marking runs — eliminates the race window where the alert
+        # engine could see all sessions as 'idle' between the two writes.
         for p in peers:
-            prev_entry = prev.get(p["peer_ip"], {})
+            prev_entry = prev.get(p["peer_ip"].split("/")[0], {})
             prev_state = prev_entry.get("state")
             prev_lsc = prev_entry.get("last_state_change")
             await db.execute(text("""
@@ -310,6 +300,20 @@ async def _write_bgp(device_id: uuid.UUID, peers: list[dict]) -> None:
                 "prev_state":         prev_state,
                 "prev_lsc":           prev_lsc,
             })
+
+        # Mark peers absent from this poll as idle. Runs after the upsert so
+        # active peers are already at their correct state.
+        seen_ips = {p["peer_ip"].split("/")[0] for p in peers}
+        for peer_ip, data in prev.items():
+            if peer_ip not in seen_ips and data["state"] != "idle":
+                await db.execute(text("""
+                    UPDATE bgp_sessions
+                       SET session_state = 'idle'::bgp_session_state,
+                           last_state_change = NOW(), updated_at = NOW()
+                     WHERE device_id = CAST(:did AS uuid)
+                       AND host(peer_ip) = :peer_ip
+                       AND session_state != 'idle'
+                """), {"did": str(device_id), "peer_ip": peer_ip})
 
         # Log transitions
         for p in peers:
@@ -367,7 +371,7 @@ async def _push_bgp_to_vm(device_id: uuid.UUID, peers: list[dict]) -> None:
     try:
         async with httpx.AsyncClient(timeout=5) as hc:
             resp = await hc.post(
-                "http://localhost:8428/api/v1/import/prometheus",
+                f"{vm_url()}/api/v1/import/prometheus",
                 content=body.encode(),
                 headers={"Content-Type": "text/plain"},
             )
@@ -380,37 +384,14 @@ async def _push_bgp_to_vm(device_id: uuid.UUID, peers: list[dict]) -> None:
 
 async def _write_ospf(device_id: uuid.UUID, neighbors: list[dict]) -> None:
     async with AsyncSessionLocal() as db:
-        # Snapshot current state BEFORE marking down below, so the upsert's
-        # last_state_change CASE compares against the true pre-poll state --
-        # otherwise every neighbor still present would look like it just
-        # transitioned this cycle (and have its last_state_change/uptime
-        # reset), since by the time the upsert runs, the row's live state
-        # column has already been overwritten to 'down' by the mark-down
-        # UPDATE. The mark-down UPDATE also bumps last_state_change to NOW()
-        # for every row it touches (correct for neighbors that truly went
-        # down), so the CASE's "no real transition" branch must restore THIS
-        # snapshotted last_state_change rather than the live column, which
-        # mark-down has already clobbered to NOW() by the time the upsert
-        # runs.
         prev_rows = (await db.execute(text("""
             SELECT vrf, neighbor_router_id::text, interface_name, state::text, last_state_change
               FROM ospf_neighbors WHERE device_id = :did
         """), {"did": str(device_id)})).all()
         prev = {(r[0], r[1].split("/")[0], r[2]): {"state": r[3], "last_state_change": r[4]} for r in prev_rows}
 
-        # Mark existing rows for this device down first so neighbors that
-        # disappeared from this poll -- including ALL of them, if the device
-        # currently has zero OSPF neighbors -- are treated as down. The
-        # alert evaluator ignores 'unknown', so leaving stale rows in their
-        # last-known state would mask a real neighbor-down event. The upsert
-        # loop below restores any neighbor still present to its real state.
-        await db.execute(text("""
-            UPDATE ospf_neighbors
-               SET state = 'down'::ospf_neighbor_state,
-                   last_state_change = NOW(), updated_at = NOW()
-             WHERE device_id = :did AND state != 'down'
-        """), {"did": str(device_id)})
-
+        # Upsert active neighbors FIRST so they are at their real state before
+        # orphan-marking runs — eliminates the race window.
         for n in neighbors:
             vrf   = n.get("vrf", "default")
             iface = n.get("interface_name", "")
@@ -447,6 +428,24 @@ async def _write_ospf(device_id: uuid.UUID, neighbors: list[dict]) -> None:
                 "prev_state":  prev_state,
                 "prev_lsc":    prev_lsc,
             })
+
+        # Mark neighbors absent from this poll as down. Runs after the upsert
+        # so active neighbors are already at their correct state.
+        seen_keys = {(n.get("vrf", "default"), n["router_id"].split("/")[0], n.get("interface_name", ""))
+                     for n in neighbors}
+        for (vrf, router_id, iface), data in prev.items():
+            if (vrf, router_id, iface) not in seen_keys and data["state"] != "down":
+                await db.execute(text("""
+                    UPDATE ospf_neighbors
+                       SET state = 'down'::ospf_neighbor_state,
+                           last_state_change = NOW(), updated_at = NOW()
+                     WHERE device_id = CAST(:did AS uuid)
+                       AND vrf = :vrf
+                       AND host(neighbor_router_id) = :router_id
+                       AND interface_name = :iface
+                       AND state != 'down'
+                """), {"did": str(device_id), "vrf": vrf, "router_id": router_id, "iface": iface})
+
         await db.commit()
 
 

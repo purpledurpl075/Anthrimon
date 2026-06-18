@@ -21,11 +21,9 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..database import AsyncSessionLocal
+from ..services.urls import ch_url, vm_url
 
 logger = structlog.get_logger(__name__)
-
-_VM_URL  = "http://localhost:8428"
-_CH_URL  = "http://localhost:8123"
 _WINDOW  = "14d"        # rolling baseline window
 _STEP    = "5m"         # subquery step (resolution)
 _WINDOW_DAYS = 14
@@ -38,7 +36,7 @@ async def _vm_query(query: str) -> list[dict]:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.get(
-                f"{_VM_URL}/api/v1/query",
+                f"{vm_url()}/api/v1/query",
                 params={"query": query},
             )
             resp.raise_for_status()
@@ -66,7 +64,7 @@ async def _ch_query(sql: str) -> list[dict]:
     try:
         async with httpx.AsyncClient(timeout=30) as client:
             resp = await client.post(
-                _CH_URL,
+                ch_url(),
                 content=flat,
                 headers={"Content-Type": "text/plain"},
             )
