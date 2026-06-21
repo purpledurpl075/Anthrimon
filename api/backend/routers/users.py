@@ -198,6 +198,8 @@ async def update_user(
         if not body.is_active and user.role in ("admin", "superadmin"):
             await _last_admin_check(current_user.tenant_id, user_id, db)
         user.is_active = body.is_active
+        if not body.is_active:
+            user.token_generation += 1
 
     if body.email is not None:
         user.email = body.email

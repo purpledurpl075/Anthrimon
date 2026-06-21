@@ -1,7 +1,7 @@
 import api from './client'
 import type { Device, DeviceListItem, HealthData, Interface, PaginatedResponse } from './types'
 
-export const fetchDevices = (params?: { limit?: number; offset?: number }) =>
+export const fetchDevices = (params?: { limit?: number; offset?: number; status?: string; vendor?: string }) =>
   api.get<PaginatedResponse<DeviceListItem>>('/devices', { params }).then((r) => r.data)
 
 export const fetchDevice = (id: string) =>
@@ -104,8 +104,31 @@ export const patchDevice = (id: string, data: Record<string, unknown>) =>
 export const setAlertExclusions = (id: string, metrics: string[], interface_ids: string[]) =>
   api.put(`/devices/${id}/alert-exclusions`, { metrics, interface_ids }).then(r => r.data)
 
+export interface LoginResponse {
+  access_token: string
+  token_type: string
+  expires_in: number
+  totp_required?: boolean
+  totp_session?: string
+}
+
 export const login = (username: string, password: string) =>
-  api.post<{ access_token: string }>('/auth/login', { username, password }).then((r) => r.data)
+  api.post<LoginResponse>('/auth/login', { username, password }).then((r) => r.data)
+
+export const totpChallenge = (totp_session: string, code?: string, backup_code?: string) =>
+  api.post<LoginResponse>('/auth/totp/challenge', { totp_session, code, backup_code }).then(r => r.data)
+
+export const totpSetup = () =>
+  api.post<{ secret: string; provisioning_uri: string }>('/auth/totp/setup').then(r => r.data)
+
+export const totpConfirm = (code: string) =>
+  api.post<{ backup_codes: string[] }>('/auth/totp/confirm', { code }).then(r => r.data)
+
+export const totpDisable = (code: string) =>
+  api.post('/auth/totp/disable', { code })
+
+export const totpBackupCodes = (code: string) =>
+  api.post<{ backup_codes: string[] }>('/auth/totp/backup-codes', { code }).then(r => r.data)
 
 export interface DeviceCredentialEntry {
   credential_id: string
@@ -365,11 +388,27 @@ export interface CreateDevicePayload {
   mgmt_ip: string
   snmp_port: number
   credential_id?: string
+  credential_ids?: string[]
   collector_id?: string
 }
 
 export const createDevice = (data: CreateDevicePayload) =>
   api.post<{ id: string }>('/devices', data).then(r => r.data)
+
+export async function exportDevicesCsv() {
+  const token = localStorage.getItem('token')
+  const res = await fetch('/api/v1/devices/export.csv', { headers: token ? { Authorization: `Bearer ${token}` } : {} })
+  if (!res.ok) throw new Error('Export failed')
+  const blob = await res.blob()
+  const disposition = res.headers.get('content-disposition') ?? ''
+  const match = disposition.match(/filename="?([^"]+)"?/)
+  const filename = match?.[1] ?? 'devices.csv'
+  const link = document.createElement('a')
+  link.href = URL.createObjectURL(blob)
+  link.download = filename
+  link.click()
+  URL.revokeObjectURL(link.href)
+}
 
 export const overrideBaseline = (
   deviceId: string,

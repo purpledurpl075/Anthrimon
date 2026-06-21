@@ -169,7 +169,8 @@ async def get_commands(
                 try:
                     cred_data["password"] = crypto.decrypt(cred_data["password"])
                 except Exception:
-                    pass
+                    logger.warning("credential_decryption_failed", credential_id=str(cred_row.id))
+                    cred_data.pop("password", None)
             host = dev.mgmt_ip_str
             vendor = str(dev.vendor or "")
             vrf = await _detect_mgmt_vrf(vendor, device_id, host, cred_data)

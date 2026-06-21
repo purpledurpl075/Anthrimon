@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchMaintenanceWindows, createMaintenanceWindow, deleteMaintenanceWindow, type MaintenanceWindow } from '../api/maintenance'
 import { fetchDevices } from '../api/devices'
 import { useRole, hasRole } from '../hooks/useCurrentUser'
+import { SkeletonTable } from '../components/Skeleton'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -234,7 +235,7 @@ export default function MaintenancePage() {
         </div>
 
         {isLoading ? (
-          <div className="text-slate-400 text-sm">Loading…</div>
+          <SkeletonTable rows={4} cols={4} />
         ) : filtered.length === 0 ? (
           <div className="bg-white rounded-2xl border border-slate-200 p-10 text-center">
             <p className="text-slate-400 text-sm">No {filter === 'all' ? '' : filter} maintenance windows.</p>

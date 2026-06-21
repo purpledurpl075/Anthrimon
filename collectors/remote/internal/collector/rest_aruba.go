@@ -22,7 +22,6 @@ package collector
 
 import (
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -37,6 +36,7 @@ import (
 	"github.com/rs/zerolog"
 
 	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/hub"
+	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/httpstofu"
 )
 
 const arubaAPIVersion = "v10.16"
@@ -117,6 +117,11 @@ func (c *ArubaRESTCollector) Run(ctx context.Context) {
 			c.collectState(ctx)
 		case <-counterTicker.C:
 			c.collectCounters(ctx)
+			// Pause after the counter session closes so hpe-restd has time to
+			// fully release its ovsdb state before the next state-tier login.
+			// 3 s was insufficient on loaded devices; 10 s gives the daemon
+			// enough headroom to avoid returning empty BGP/OSPF results.
+			time.Sleep(10 * time.Second)
 		}
 	}
 }
@@ -166,28 +171,28 @@ func (c *ArubaRESTCollector) collectStateDevice(ctx context.Context, dev hub.Dev
 	}
 	defer ac.Logout(ctx)
 
-	// BGP — posted even when empty so the hub can mark stale sessions.
+	// BGP — posted even when empty so the hub can mark stale sessions idle.
 	bgpSessions, bgpErr := ac.collectBGP(ctx, dev.ID)
 	if bgpErr != nil {
 		c.logger.Warn().Err(bgpErr).Str("device", dev.Hostname).Msg("bgp collection failed")
+		bgpSessions = nil // post empty so hub marks previous sessions idle
+	}
+	if err := c.hubClient.PostBGPSessions(ctx, dev.ID, bgpSessions); err != nil {
+		c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("bgp post to hub failed")
 	} else {
-		if err := c.hubClient.PostBGPSessions(ctx, dev.ID, bgpSessions); err != nil {
-			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("bgp post to hub failed")
-		} else {
-			c.logger.Info().Str("device", dev.Hostname).Int("sessions", len(bgpSessions)).Msg("bgp sessions posted")
-		}
+		c.logger.Info().Str("device", dev.Hostname).Int("sessions", len(bgpSessions)).Msg("bgp sessions posted")
 	}
 
 	// OSPF — posted even when empty so the hub can mark neighbors down.
 	ospfNbrs, ospfErr := ac.collectOSPF(ctx, dev.ID)
 	if ospfErr != nil {
 		c.logger.Warn().Err(ospfErr).Str("device", dev.Hostname).Msg("ospf collection failed")
+		ospfNbrs = nil // post empty so hub marks previous neighbors down
+	}
+	if err := c.hubClient.PostOSPFNeighbors(ctx, dev.ID, ospfNbrs); err != nil {
+		c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("ospf post to hub failed")
 	} else {
-		if err := c.hubClient.PostOSPFNeighbors(ctx, dev.ID, ospfNbrs); err != nil {
-			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("ospf post to hub failed")
-		} else {
-			c.logger.Info().Str("device", dev.Hostname).Int("neighbors", len(ospfNbrs)).Msg("ospf neighbors posted")
-		}
+		c.logger.Info().Str("device", dev.Hostname).Int("neighbors", len(ospfNbrs)).Msg("ospf neighbors posted")
 	}
 
 	return nil
@@ -620,7 +625,8 @@ type ArubaClient struct {
 
 // NewArubaClient creates a REST client for the ArubaOS-CX device at host,
 // authenticating with the given username/password (the same credentials used
-// for SSH).
+// for SSH). TLS uses TOFU certificate pinning: the device's certificate
+// fingerprint is learned on first contact and pinned for subsequent connections.
 func NewArubaClient(host, username, password string) *ArubaClient {
 	return &ArubaClient{
 		host:     host,
@@ -629,9 +635,7 @@ func NewArubaClient(host, username, password string) *ArubaClient {
 		http: &http.Client{
 			Timeout: 15 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{
-					InsecureSkipVerify: true, //nolint:gosec — enterprise self-signed certs
-				},
+				TLSClientConfig: httpstofu.PinningConfig(host + ":443"),
 			},
 		},
 	}

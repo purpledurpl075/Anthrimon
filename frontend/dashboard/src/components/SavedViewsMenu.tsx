@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { fetchSavedViews, createSavedView, deleteSavedView } from '../api/savedViews'
+import { fetchSavedViews, createSavedView, updateSavedView, deleteSavedView } from '../api/savedViews'
 import { useCurrentUser, useRole, hasRole } from '../hooks/useCurrentUser'
 
 interface Props {
@@ -35,6 +35,11 @@ export default function SavedViewsMenu({ page, query, onApply }: Props) {
     onError: (err: any) => {
       setError(err?.response?.data?.detail ?? 'Failed to save view')
     },
+  })
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, data }: { id: string; data: { query: string } }) => updateSavedView(id, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['saved-views', page] }),
   })
 
   const deleteMutation = useMutation({
@@ -83,9 +88,18 @@ export default function SavedViewsMenu({ page, query, onApply }: Props) {
                     {v.name}
                     {v.is_shared && <span className="ml-1.5 text-[10px] text-blue-500">shared</span>}
                   </button>
-                  <button onClick={() => deleteMutation.mutate(v.id)}
-                    className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-red-600 leading-none transition-opacity"
-                    title="Delete view">×</button>
+                  <span className="opacity-0 group-hover:opacity-100 flex gap-1 transition-opacity">
+                    {v.query !== query && (
+                      <button onClick={() => updateMutation.mutate({ id: v.id, data: { query } })}
+                        className="text-slate-400 hover:text-blue-600 leading-none text-[10px]"
+                        title="Update to current filters" aria-label={`Update view "${v.name}" to current filters`}>
+                        <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0 3.181 3.183a8.25 8.25 0 0 0 13.803-3.7M4.031 9.865a8.25 8.25 0 0 1 13.803-3.7l3.181 3.182"/></svg>
+                      </button>
+                    )}
+                    <button onClick={() => deleteMutation.mutate(v.id)}
+                      className="text-slate-400 hover:text-red-600 leading-none"
+                      title="Delete view" aria-label={`Delete view "${v.name}"`}>×</button>
+                  </span>
                 </div>
               ))}
             </>

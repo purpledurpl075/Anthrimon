@@ -979,10 +979,12 @@ function TopologyPageInner() {
   useEffect(() => {
     if (!typeMenuOpen && !siteMenuOpen) return
     function handle(e: MouseEvent) {
-      if (typeMenuOpen && typeMenuRef.current && !typeMenuRef.current.contains(e.target as Node)) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (typeMenuOpen && typeMenuRef.current && !typeMenuRef.current.contains(e.target as any)) {
         setTypeMenuOpen(false)
       }
-      if (siteMenuOpen && siteMenuRef.current && !siteMenuRef.current.contains(e.target as Node)) {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      if (siteMenuOpen && siteMenuRef.current && !siteMenuRef.current.contains(e.target as any)) {
         setSiteMenuOpen(false)
       }
     }

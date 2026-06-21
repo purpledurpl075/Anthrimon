@@ -151,8 +151,13 @@ func (s *Server) handleTCPConn(ctx context.Context, conn net.Conn) {
 	remoteIP := remoteToIPv4(conn.RemoteAddr())
 
 	scanner := bufio.NewScanner(conn)
-	// Allow lines up to 64 KB.
-	scanner.Buffer(make([]byte, 65536), 65536)
+	maxLine := s.cfg.Listener.BufferSize
+	if maxLine <= 0 {
+		maxLine = 8192
+	} else if maxLine > 65536 {
+		maxLine = 65536
+	}
+	scanner.Buffer(make([]byte, maxLine), maxLine)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()

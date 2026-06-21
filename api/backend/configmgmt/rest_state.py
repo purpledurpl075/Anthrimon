@@ -229,6 +229,13 @@ async def _collect_ospf(client: ArubaRestClient, device_id: uuid.UUID) -> list[d
 # ── DB writers ────────────────────────────────────────────────────────────────
 
 async def _write_bgp(device_id: uuid.UUID, peers: list[dict]) -> None:
+    # An empty peers list almost always means the polling API returned no data
+    # (e.g. AOS-CX hpe-restd ovsdb race after a counter session closes).
+    # Skip the write entirely; don't mark established sessions as idle based on
+    # a transient empty response — the staleness filter (updated_at > NOW()-5min)
+    # already handles genuinely stale rows after the device stops reporting.
+    if not peers:
+        return
     async with AsyncSessionLocal() as db:
         # Snapshot current state BEFORE marking stale below, so the
         # transition log AND the upsert's last_state_change CASE both
@@ -383,6 +390,10 @@ async def _push_bgp_to_vm(device_id: uuid.UUID, peers: list[dict]) -> None:
 
 
 async def _write_ospf(device_id: uuid.UUID, neighbors: list[dict]) -> None:
+    # Same empty-guard as _write_bgp: skip transient empty responses rather
+    # than marking all OSPF neighbors as down.
+    if not neighbors:
+        return
     async with AsyncSessionLocal() as db:
         prev_rows = (await db.execute(text("""
             SELECT vrf, neighbor_router_id::text, interface_name, state::text, last_state_change
@@ -905,14 +916,22 @@ async def collect_device_rest_state(device_id: uuid.UUID) -> None:
     dev = type("D", (), {"hostname": hostname})()  # minimal shim for log fields
 
     try:
-        async with ArubaRestClient(host, username, password) as client:
-            bgp_peers, ospf_nbrs, vlan_res, stp_ports, addr_res, serial = await asyncio.gather(
-                _collect_bgp(client, device_id),
-                _collect_ospf(client, device_id),
-                _collect_vlans(client),
-                _collect_stp(client),
-                _collect_addresses(client),
-                _collect_inventory(client),
+        # Routing state gets its own dedicated session, queried sequentially,
+        # so that AOS-CX's hpe-restd/ovsdb never sees concurrent requests
+        # during BGP/OSPF collection (concurrent REST requests cause transient
+        # stale state that triggers false-positive alerts).
+        async with ArubaRestClient(host, username, password) as routing_client:
+            bgp_peers = await _collect_bgp(routing_client, device_id)
+            ospf_nbrs = await _collect_ospf(routing_client, device_id)
+
+        # Bulk/inventory data uses a separate session after routing is done.
+        # Concurrent requests here are fine — none of this feeds the alert engine.
+        async with ArubaRestClient(host, username, password) as bulk_client:
+            vlan_res, stp_ports, addr_res, serial = await asyncio.gather(
+                _collect_vlans(bulk_client),
+                _collect_stp(bulk_client),
+                _collect_addresses(bulk_client),
+                _collect_inventory(bulk_client),
                 return_exceptions=True,
             )
 
@@ -961,12 +980,10 @@ async def collect_device_rest_state(device_id: uuid.UUID) -> None:
             logger.warning("rest_collection_http_error",
                            device=dev.hostname, status=code)
     except (httpx.ConnectError, httpx.ConnectTimeout, httpx.TimeoutException) as exc:
-        # Unreachable — disable and require manual re-enable
-        await _disable_rest(device_id,
-                            f"REST API unreachable: {exc}")
+        # Transient — device may be rebooting. Log and retry next cycle; do NOT
+        # disable REST collection permanently (that would leave stale rows forever).
         logger.warning("rest_collection_unreachable",
-                       device=dev.hostname, error=str(exc),
-                       action="rest_collection_enabled set to False — re-enable manually")
+                       device=dev.hostname, error=str(exc))
     except Exception as exc:
         logger.warning("rest_collection_failed",
                        device=dev.hostname, error=str(exc))

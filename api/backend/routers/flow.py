@@ -51,9 +51,12 @@ async def _ch(query: str) -> list[dict]:
 # ── Tenant device helpers ─────────────────────────────────────────────────────
 
 def _device_filter(device_ids: list[str], alias: str = "") -> str:
-    """Build a ClickHouse WHERE clause fragment for device ID filtering."""
+    """Build a ClickHouse WHERE clause fragment for device ID filtering.
+    Each ID is parsed through uuid.UUID() before interpolation, so malformed
+    strings raise ValueError before they can reach the query string."""
+    import uuid as _uuid
     col = f"{alias}.collector_device_id" if alias else "collector_device_id"
-    ids = ", ".join(f"toUUID('{d}')" for d in device_ids)
+    ids = ", ".join(f"toUUID('{_uuid.UUID(d)}')" for d in device_ids)
     return f"{col} IN ({ids})"
 
 

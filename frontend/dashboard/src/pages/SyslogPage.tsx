@@ -8,6 +8,7 @@ import {
 import { fetchDevices } from '../api/devices'
 import { DEVICE_TYPE_COLOR, DeviceTypeIcon } from '../components/DeviceTypeIcon'
 import TrapsTab from './TrapsTab'
+import { SkeletonTable, SkeletonInline } from '../components/Skeleton'
 import { fmtNum, fmtTs, TIME_WINDOWS } from './logHelpers'
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -132,7 +133,7 @@ function SummaryCards({ minutes, deviceId }: { minutes: number; deviceId: string
           <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-xl" style={{ backgroundColor: c.accent }} />
           <p className="text-xs text-slate-400 mb-1">{c.label}</p>
           <p className="text-xl font-bold text-slate-800 tabular-nums">
-            {isLoading ? <span className="text-slate-300">…</span> : c.value}
+            {isLoading ? <SkeletonInline /> : c.value}
           </p>
         </div>
       ))}
@@ -319,7 +320,7 @@ function MessageTable({ minutes, deviceId, severityMax, program, query }: {
       </div>
 
       {isLoading ? (
-        <div className="px-5 py-8 text-center text-xs text-slate-400">Loading…</div>
+        <SkeletonTable rows={8} cols={5} />
       ) : messages.length === 0 ? (
         <div className="px-5 py-10 text-center">
           <p className="text-sm text-slate-400">No messages match the current filters</p>
@@ -455,19 +456,19 @@ function SyslogTab({ devices }: { devices: any[] }) {
             {severityMax !== null && (
               <span className="flex items-center gap-1 px-2 py-0.5 bg-red-50 border border-red-200 rounded-full text-xs text-red-700">
                 sev ≤ {SEV_ORDER[severityMax]}
-                <button onClick={() => setSeverityMax(null)} className="text-red-400 hover:text-red-700 ml-0.5">×</button>
+                <button onClick={() => setSeverityMax(null)} aria-label="Clear severity filter" className="text-red-400 hover:text-red-700 ml-0.5">×</button>
               </span>
             )}
             {program && (
               <span className="flex items-center gap-1 px-2 py-0.5 bg-blue-50 border border-blue-200 rounded-full text-xs text-blue-700 font-mono">
                 {program}
-                <button onClick={() => setProgram('')} className="text-blue-400 hover:text-blue-700 ml-0.5">×</button>
+                <button onClick={() => setProgram('')} aria-label="Clear program filter" className="text-blue-400 hover:text-blue-700 ml-0.5">×</button>
               </span>
             )}
             {query && (
               <span className="flex items-center gap-1 px-2 py-0.5 bg-purple-50 border border-purple-200 rounded-full text-xs text-purple-700">
                 "{query}"
-                <button onClick={() => { setQuery(''); setQueryInput('') }} className="text-purple-400 hover:text-purple-700 ml-0.5">×</button>
+                <button onClick={() => { setQuery(''); setQueryInput('') }} aria-label="Clear search query" className="text-purple-400 hover:text-purple-700 ml-0.5">×</button>
               </span>
             )}
             <button onClick={clearFilters} className="text-[10px] text-slate-400 hover:text-slate-600 underline">Clear all</button>

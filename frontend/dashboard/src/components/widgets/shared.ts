@@ -1,16 +1,8 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchWidgetData } from '../../api/overview'
+export { formatAge } from '../../utils/time'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
-
-export function formatAge(iso: string | null) {
-  if (!iso) return '—'
-  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (secs < 120)   return `${secs}s ago`
-  if (secs < 3600)  return `${Math.floor(secs / 60)}m ago`
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
-  return `${Math.floor(secs / 86400)}d ago`
-}
 
 export function fmtBps(bps: number): string {
   if (bps >= 1e9)  return `${(bps / 1e9).toFixed(2)} Gbps`

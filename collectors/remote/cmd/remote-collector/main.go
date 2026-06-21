@@ -36,7 +36,7 @@ import (
 	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/tunnel"
 )
 
-const version = "0.3.41"
+const version = "0.3.45"
 
 // capabilities lists every feature this binary supports.  Sent on bootstrap
 // and on every heartbeat so the hub always reflects the running binary.
@@ -316,13 +316,15 @@ func installTrapHandler(ctx context.Context, hubClient *hub.Client, logger zerol
 		return
 	}
 
-	if expectedSHA != "" {
-		actual := fmt.Sprintf("%x", sha256.Sum256(data))
-		if actual != expectedSHA {
-			log.Error().Str("expected", expectedSHA).Str("actual", actual).
-				Msg("trap-handler SHA-256 mismatch — skipping install")
-			return
-		}
+	if expectedSHA == "" {
+		log.Error().Msg("hub did not provide SHA-256 for trap-handler — refusing install")
+		return
+	}
+	actual := fmt.Sprintf("%x", sha256.Sum256(data))
+	if actual != expectedSHA {
+		log.Error().Str("expected", expectedSHA).Str("actual", actual).
+			Msg("trap-handler SHA-256 mismatch — skipping install")
+		return
 	}
 
 	tmpPath := trapHandlerPath + ".new"
@@ -367,18 +369,20 @@ func selfUpdate(
 		return
 	}
 
-	// Verify SHA-256 when the hub provides it.
-	if expectedSHA != "" {
-		actual := fmt.Sprintf("%x", sha256.Sum256(data))
-		if actual != expectedSHA {
-			log.Error().
-				Str("expected", expectedSHA).
-				Str("actual", actual).
-				Msg("SHA-256 mismatch — aborting update")
-			return
-		}
-		log.Info().Str("sha256", actual).Msg("SHA-256 verified")
+	// SHA-256 is required. A hub that doesn't provide it cannot push updates.
+	if expectedSHA == "" {
+		log.Error().Msg("hub did not provide SHA-256 for binary — refusing update (integrity check required)")
+		return
 	}
+	actual := fmt.Sprintf("%x", sha256.Sum256(data))
+	if actual != expectedSHA {
+		log.Error().
+			Str("expected", expectedSHA).
+			Str("actual", actual).
+			Msg("SHA-256 mismatch — aborting update")
+		return
+	}
+	log.Info().Str("sha256", actual).Msg("SHA-256 verified")
 
 	// Also update the trap-handler binary.
 	installTrapHandler(dlCtx, hubClient, logger)

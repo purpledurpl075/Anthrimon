@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../api/client'
+import { SkeletonPage, SkeletonTable } from '../components/Skeleton'
 import { hasRole } from '../hooks/useCurrentUser'
 
 // ── Types ──────────────────────────────────────────────────────────────────────
@@ -497,7 +498,7 @@ export default function UsersPage() {
   // ── Access guard ──────────────────────────────────────────────────────────────
 
   if (meLoading) {
-    return <div className="flex items-center justify-center h-full text-sm text-slate-400">Loading…</div>
+    return <SkeletonPage />
   }
 
   if (!me || (!hasRole(me.role, 'admin') && !isPlatAdmin)) {
@@ -559,7 +560,7 @@ export default function UsersPage() {
 
       {/* Table */}
       {usersLoading ? (
-        <div className="text-sm text-slate-400">Loading…</div>
+        <SkeletonTable rows={6} cols={5} />
       ) : users.length === 0 ? (
         <div className="text-center py-16 text-sm text-slate-400 bg-white rounded-2xl border border-slate-200">
           No users found

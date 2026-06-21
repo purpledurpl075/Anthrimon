@@ -72,9 +72,17 @@ func HostKeyCallback() ssh.HostKeyCallback {
 	}
 	p := path()
 	if err := ensureFile(p); err != nil {
-		// Could not create the store — fail closed is too risky (would block all
-		// device access); fall back to the prior behavior and let the operator fix perms.
-		return ssh.InsecureIgnoreHostKey() //nolint:gosec — store unavailable, see ensureFile error
+		// Store unavailable — fail loudly rather than silently downgrading to
+		// InsecureIgnoreHostKey. A silent fallback would allow MITM while
+		// appearing to work normally. Operators must fix the permissions or
+		// explicitly set ANTHRIMON_SSH_PINNING=off to disable pinning.
+		storeErr := err
+		return func(hostname string, _ net.Addr, _ ssh.PublicKey) error {
+			return fmt.Errorf(
+				"sshtofu: host-key store unavailable (fix perms on %s or set ANTHRIMON_SSH_PINNING=off to disable): %w",
+				p, storeErr,
+			)
+		}
 	}
 	return func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 		mu.Lock()

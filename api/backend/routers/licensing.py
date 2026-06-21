@@ -63,6 +63,9 @@ async def upload_license(
     file: UploadFile = File(...),
     principal: Principal = Depends(require_platform("platform_admin")),
 ) -> dict:
+    content_length = request.headers.get("content-length")
+    if content_length and int(content_length) > _MAX_LICENSE_BYTES:
+        raise HTTPException(status_code=413, detail="License file too large")
     raw = await file.read()
     if not raw or len(raw) > _MAX_LICENSE_BYTES:
         raise HTTPException(status_code=400, detail="empty or oversized license file")

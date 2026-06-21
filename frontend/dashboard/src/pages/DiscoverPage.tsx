@@ -9,6 +9,7 @@ import { fetchCollectors } from '../api/collectors'
 import api from '../api/client'
 import VendorBadge from '../components/VendorBadge'
 import { useRole, hasRole } from '../hooks/useCurrentUser'
+import { formatAge } from '../utils/time'
 
 function ProgressBar({ value, max }: { value: number; max: number }) {
   const pct = max > 0 ? Math.round((value / max) * 100) : 0
@@ -40,13 +41,6 @@ const STATUS_STYLE: Record<string, string> = {
   done:      'bg-green-100 text-green-700',
   cancelled: 'bg-amber-100 text-amber-700',
   error:     'bg-red-100 text-red-700',
-}
-
-function formatAge(iso: string): string {
-  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (secs < 60)   return `${secs}s ago`
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
-  return `${Math.floor(secs / 3600)}h ago`
 }
 
 function CredentialPicker({

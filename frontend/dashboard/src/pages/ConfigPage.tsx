@@ -13,6 +13,7 @@ import {
 import { fetchDevices } from '../api/devices'
 import { useRole, hasRole } from '../hooks/useCurrentUser'
 import { DEVICE_TYPE_COLOR, DeviceTypeIcon } from '../components/DeviceTypeIcon'
+import { formatAge } from '../utils/time'
 
 // ── Vendor-aware snippets ─────────────────────────────────────────────────────
 
@@ -192,13 +193,6 @@ const STATUS_STYLE: Record<string, string> = {
   pass:  'bg-green-100 text-green-700',
   fail:  'bg-red-100 text-red-700',
   error: 'bg-slate-100 text-slate-500',
-}
-
-function formatAge(iso: string) {
-  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (secs < 3600)  return `${Math.floor(secs / 60)}m ago`
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
-  return `${Math.floor(secs / 86400)}d ago`
 }
 
 function scoreStyle(score: number) {
@@ -1312,7 +1306,7 @@ function MultiDeployTab() {
               <input value={v.value} onChange={e => setVariables(vs => vs.map((x,j) => j===i ? {...x,value:e.target.value} : x))}
                 placeholder="value" className={`${inputCls} flex-1`} />
               <button onClick={() => setVariables(vs => vs.filter((_,j) => j!==i))}
-                className="text-slate-300 hover:text-red-400 transition-colors text-xs">✕</button>
+                aria-label="Remove variable" className="text-slate-300 hover:text-red-400 transition-colors text-xs">✕</button>
             </div>
           ))}
         </div>

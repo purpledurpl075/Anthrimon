@@ -1,6 +1,8 @@
 import { useState, useMemo } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { fetchAudit, downloadAuditCsv, type AuditFilters } from '../api/audit'
+import ErrorState from '../components/ErrorState'
+import { SkeletonTable } from '../components/Skeleton'
 
 const ACTION_OPTIONS = [
   '', 'create', 'update', 'delete', 'login', 'logout', 'login_failed',
@@ -52,7 +54,7 @@ export default function AuditPage() {
     limit, offset,
   }), [action, resourceType, since, until, search, offset])
 
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey: ['audit', filters],
     queryFn:  () => fetchAudit(filters),
   })
@@ -127,10 +129,10 @@ export default function AuditPage() {
       {/* Table */}
       <div className="bg-white border border-slate-200 rounded-xl overflow-hidden">
         {isLoading && (
-          <div className="px-6 py-8 text-center text-sm text-slate-400">Loading…</div>
+          <div className="px-4"><SkeletonTable rows={8} cols={5} /></div>
         )}
         {error && (
-          <div className="px-6 py-8 text-center text-sm text-red-500">Failed to load audit log.</div>
+          <ErrorState message="Failed to load audit log." onRetry={() => refetch()} inline />
         )}
         {data && data.items.length === 0 && (
           <div className="px-6 py-8 text-center text-sm text-slate-400">No audit entries match the current filters.</div>

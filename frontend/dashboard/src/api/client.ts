@@ -1,6 +1,10 @@
 const BASE = '/api/v1'
 
+let _redirecting = false
+
 async function request<T>(method: string, path: string, body?: unknown): Promise<{ data: T }> {
+  if (_redirecting) return Promise.reject(new Error('Session expired'))
+
   const token = localStorage.getItem('token')
   const headers: Record<string, string> = { 'Content-Type': 'application/json' }
   if (token) headers['Authorization'] = `Bearer ${token}`
@@ -12,8 +16,11 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   })
 
   if (res.status === 401) {
-    localStorage.removeItem('token')
-    window.location.href = '/login'
+    if (!_redirecting) {
+      _redirecting = true
+      localStorage.removeItem('token')
+      window.location.href = '/login'
+    }
     return Promise.reject(new Error('Unauthorized'))
   }
 

@@ -1,27 +1,23 @@
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useQuery, useQueryClient, useMutation } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { fetchDevices, createDevice, fetchSites, bulkDeviceAction } from '../api/devices'
+import { fetchDevices, createDevice, fetchSites, bulkDeviceAction, exportDevicesCsv } from '../api/devices'
 import type { BulkAction, BulkDeviceRequest } from '../api/devices'
+import ErrorState from '../components/ErrorState'
 import { fetchCredentials } from '../api/credentials'
 import { fetchCollectors } from '../api/collectors'
 import { fetchMaintenanceWindows } from '../api/maintenance'
+import { fetchOverview } from '../api/overview'
 import { DeviceTypeIcon, DEVICE_TYPE_COLOR, DEVICE_TYPE_LABEL } from '../components/DeviceTypeIcon'
 import VendorBadge from '../components/VendorBadge'
 import SavedViewsMenu from '../components/SavedViewsMenu'
+import { SkeletonPage } from '../components/Skeleton'
+import Pagination from '../components/Pagination'
 import { useRole, hasRole } from '../hooks/useCurrentUser'
 import type { DeviceListItem } from '../api/types'
+import { formatAge } from '../utils/time'
 
 // ── Helpers ────────────────────────────────────────────────────────────────
-
-function formatAge(iso: string | null) {
-  if (!iso) return '—'
-  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (secs < 120)   return `${secs}s ago`
-  if (secs < 3600)  return `${Math.floor(secs / 60)}m ago`
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
-  return `${Math.floor(secs / 86400)}d ago`
-}
 
 const STATUS_COLOR: Record<string, string> = {
   up:          '#16a34a',
@@ -165,24 +161,33 @@ interface AddDeviceModalProps {
 function AddDeviceModal({ onClose }: AddDeviceModalProps) {
   const queryClient = useQueryClient()
 
-  const [mgmtIp,       setMgmtIp]       = useState('')
-  const [snmpPort,     setSnmpPort]     = useState(161)
-  const [credentialId, setCredentialId] = useState('')
-  const [collectorId,  setCollectorId]  = useState('')
+  const [mgmtIp,        setMgmtIp]        = useState('')
+  const [snmpPort,      setSnmpPort]      = useState(161)
+  const [selectedCreds, setSelectedCreds] = useState<string[]>([])
+  const [collectorId,   setCollectorId]   = useState('')
 
   const [errors,     setErrors]     = useState<Record<string, string>>({})
   const [apiError,   setApiError]   = useState('')
   const [submitting, setSubmitting] = useState(false)
 
   const { data: credentials = [] } = useQuery({
-    queryKey: ['credentials'],
-    queryFn:  () => fetchCredentials(),
+    queryKey: ['credentials', 'all'],
+    queryFn:  () => fetchCredentials(true),
   })
 
   const { data: collectors = [] } = useQuery({
     queryKey: ['collectors'],
     queryFn:  () => fetchCollectors(),
   })
+
+  const snmpCreds = credentials.filter(c => c.type === 'snmp_v2c' || c.type === 'snmp_v3')
+  const otherCreds = credentials.filter(c => c.type !== 'snmp_v2c' && c.type !== 'snmp_v3')
+
+  const toggleCred = (id: string) => {
+    setSelectedCreds(prev =>
+      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id]
+    )
+  }
 
   function validate() {
     const errs: Record<string, string> = {}
@@ -204,10 +209,10 @@ function AddDeviceModal({ onClose }: AddDeviceModalProps) {
     setSubmitting(true)
     try {
       await createDevice({
-        mgmt_ip:       mgmtIp.trim(),
-        snmp_port:     snmpPort,
-        credential_id: credentialId  || undefined,
-        collector_id:  collectorId   || undefined,
+        mgmt_ip:        mgmtIp.trim(),
+        snmp_port:      snmpPort,
+        credential_ids: selectedCreds.length > 0 ? selectedCreds : undefined,
+        collector_id:   collectorId || undefined,
       })
       await queryClient.invalidateQueries({ queryKey: ['devices'] })
       onClose()
@@ -226,7 +231,7 @@ function AddDeviceModal({ onClose }: AddDeviceModalProps) {
       <div className="relative z-10 bg-white rounded-2xl border border-slate-200 shadow-xl w-full max-w-md mx-4 p-6">
         <div className="flex items-center justify-between mb-5">
           <h2 className="text-base font-semibold text-slate-800">Add device</h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors">
+          <button onClick={onClose} className="text-slate-400 hover:text-slate-600 transition-colors" aria-label="Close">
             <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path d="M6 18 18 6M6 6l12 12" />
             </svg>
@@ -259,17 +264,50 @@ function AddDeviceModal({ onClose }: AddDeviceModalProps) {
           </div>
 
           <div>
-            <label className="block text-xs font-medium text-slate-600 mb-1">Credential</label>
-            <select
-              value={credentialId}
-              onChange={e => setCredentialId(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-slate-200 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
-            >
-              <option value="">No credential</option>
-              {credentials.map(c => (
-                <option key={c.id} value={c.id}>{c.name} ({c.type})</option>
-              ))}
-            </select>
+            <label className="block text-xs font-medium text-slate-600 mb-1">
+              Credentials
+              {selectedCreds.length > 0 && <span className="ml-1.5 text-blue-600">({selectedCreds.length} selected)</span>}
+            </label>
+            <p className="text-[10px] text-slate-400 mb-2">Select one or more — SNMP credentials are tried in order during the probe.</p>
+            <div className="border border-slate-200 rounded-lg max-h-40 overflow-y-auto">
+              {snmpCreds.length > 0 && (
+                <>
+                  <div className="px-3 pt-2 pb-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wide bg-slate-50">SNMP</div>
+                  {snmpCreds.map(c => (
+                    <label key={c.id} className="flex items-center gap-2.5 px-3 py-1.5 hover:bg-slate-50 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selectedCreds.includes(c.id)}
+                        onChange={() => toggleCred(c.id)}
+                        className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-xs text-slate-700 flex-1 truncate">{c.name}</span>
+                      <span className="text-[10px] text-slate-400">{c.type}</span>
+                    </label>
+                  ))}
+                </>
+              )}
+              {otherCreds.length > 0 && (
+                <>
+                  <div className="px-3 pt-2 pb-1 text-[10px] font-semibold text-slate-400 uppercase tracking-wide bg-slate-50 border-t border-slate-100">SSH / API / Other</div>
+                  {otherCreds.map(c => (
+                    <label key={c.id} className="flex items-center gap-2.5 px-3 py-1.5 hover:bg-slate-50 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={selectedCreds.includes(c.id)}
+                        onChange={() => toggleCred(c.id)}
+                        className="rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                      />
+                      <span className="text-xs text-slate-700 flex-1 truncate">{c.name}</span>
+                      <span className="text-[10px] text-slate-400">{c.type}</span>
+                    </label>
+                  ))}
+                </>
+              )}
+              {credentials.length === 0 && (
+                <div className="px-3 py-3 text-xs text-slate-400 text-center">No credentials configured</div>
+              )}
+            </div>
           </div>
 
           <div>
@@ -544,6 +582,8 @@ export default function DeviceList() {
   const [searchParams, setSearchParams] = useSearchParams()
   const search       = searchParams.get('q') ?? ''
   const statusFilter = (searchParams.get('status') as StatusFilter | null) ?? 'all'
+  const pageOffset   = parseInt(searchParams.get('offset') ?? '0', 10) || 0
+  const PAGE_SIZE    = 100
   const [showAddModal,  setShowAddModal]  = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [bulkAction, setBulkAction] = useState<BulkAction | null>(null)
@@ -565,13 +605,18 @@ export default function DeviceList() {
     setSearchParams(prev => {
       const next = new URLSearchParams(prev)
       if (s === 'all') next.delete('status'); else next.set('status', s)
+      next.delete('offset')
       return next
     })
   }
 
-  const { data, isLoading, error } = useQuery({
-    queryKey: ['devices'],
-    queryFn:  () => fetchDevices({ limit: 500 }),
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ['devices', statusFilter === 'all' ? undefined : statusFilter, pageOffset],
+    queryFn:  () => fetchDevices({
+      limit: PAGE_SIZE,
+      offset: pageOffset,
+      ...(statusFilter !== 'all' ? { status: statusFilter } : {}),
+    }),
     refetchInterval: 30_000,
   })
 
@@ -587,19 +632,37 @@ export default function DeviceList() {
     )
   )
 
+  const { data: overview } = useQuery({
+    queryKey: ['overview-counts'],
+    queryFn: fetchOverview,
+    refetchInterval: 30_000,
+  })
+
   const devices = data?.items ?? []
 
   const counts = useMemo(() => ({
-    all:         devices.length,
-    up:          devices.filter(d => d.status === 'up').length,
-    down:        devices.filter(d => d.status === 'down').length,
-    unreachable: devices.filter(d => d.status === 'unreachable').length,
-    unknown:     devices.filter(d => d.status === 'unknown').length,
-  }), [devices])
+    all:         overview?.devices.total ?? data?.total ?? 0,
+    up:          overview?.devices.up ?? 0,
+    down:        overview?.devices.down ?? 0,
+    unreachable: overview?.devices.unreachable ?? 0,
+    unknown:     overview?.devices.unknown ?? 0,
+  }), [overview, data?.total])
+
+  const setPage = (newOffset: number) => {
+    setSelected(new Set())
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (newOffset === 0) next.delete('offset'); else next.set('offset', String(newOffset))
+      return next
+    })
+  }
+
+  useEffect(() => {
+    if (data && pageOffset > 0 && pageOffset >= data.total) setPage(0)
+  }, [data?.total])
 
   const filtered = useMemo(() => {
     return devices.filter(d => {
-      if (statusFilter !== 'all' && d.status !== statusFilter) return false
       if (search) {
         const q = search.toLowerCase()
         return (
@@ -610,7 +673,7 @@ export default function DeviceList() {
       }
       return true
     })
-  }, [devices, statusFilter, search])
+  }, [devices, search])
 
   const toggle = (id: string) => setSelected(s => {
     const next = new Set(s)
@@ -622,15 +685,9 @@ export default function DeviceList() {
   )
   const clearSelection = () => setSelected(new Set())
 
-  if (isLoading) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <div className="text-slate-400 text-sm">Loading devices…</div>
-      </div>
-    )
-  }
+  if (isLoading) return <SkeletonPage />
   if (error) {
-    return <div className="p-8 text-red-600 text-sm">Failed to load devices.</div>
+    return <ErrorState message="Failed to load devices." onRetry={() => refetch()} />
   }
 
   return (
@@ -646,6 +703,16 @@ export default function DeviceList() {
         </div>
         <div className="flex items-center gap-2">
         <SavedViewsMenu page="devices" query={searchParams.toString()} onApply={q => setSearchParams(new URLSearchParams(q))} />
+        <button
+          onClick={() => exportDevicesCsv()}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border text-slate-500 border-slate-200 hover:border-slate-400 transition-colors"
+          title="Export devices as CSV"
+        >
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0-3-3m3 3 3-3M3 17V7a2 2 0 0 1 2-2h6l2 2h4a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+          </svg>
+          Export
+        </button>
         <button
           onClick={() => setShowAddModal(true)}
           className="flex items-center gap-1.5 px-3 py-1.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors"
@@ -761,6 +828,8 @@ export default function DeviceList() {
             ))}
           </div>
         )}
+
+        {data && <Pagination total={data.total} limit={PAGE_SIZE} offset={pageOffset} onChange={setPage} />}
 
       </div>
     </div>

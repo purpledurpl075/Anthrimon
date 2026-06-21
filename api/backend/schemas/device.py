@@ -43,7 +43,8 @@ class DeviceCreate(BaseModel):
     polling_interval_s: int = Field(default=15, ge=10, le=86400)
     site_id: Optional[uuid.UUID] = None
     collector_id: Optional[uuid.UUID] = None
-    credential_id: Optional[uuid.UUID] = None  # if set, linked atomically on create
+    credential_id: Optional[uuid.UUID] = None
+    credential_ids: Optional[list[uuid.UUID]] = None
     tags: list[str] = []
     notes: Optional[str] = None
 

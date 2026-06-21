@@ -77,13 +77,14 @@ async def get_client(
         .order_by(ARPEntry.updated_at.desc())
     )).scalars().all()
 
-    # Fetch all MAC entries for tenant devices, filter by MAC in Python.
-    _all_mac = (await db.execute(
+    mac_rows = (await db.execute(
         select(MACEntry)
-        .where(cast(MACEntry.device_id, String).in_(allowed_ids))
+        .where(
+            cast(MACEntry.device_id, String).in_(allowed_ids),
+            cast(MACEntry.mac_address, String) == mac,
+        )
         .order_by(MACEntry.updated_at.desc())
     )).scalars().all()
-    mac_rows = [m for m in _all_mac if m.mac_address.lower() == mac]
 
     if not arp_rows and not mac_rows:
         raise HTTPException(status_code=404, detail="Client not found")

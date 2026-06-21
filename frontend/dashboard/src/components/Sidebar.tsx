@@ -224,6 +224,7 @@ function SidebarSearch({ collapsed }: { collapsed: boolean }) {
         <button
           onClick={() => { setOpen(true); setTimeout(() => inputRef.current?.focus(), 50) }}
           title="Search (⌘K)"
+          aria-label="Search (⌘K)"
           className="flex items-center justify-center w-full py-2.5 mx-0 text-slate-500 hover:text-slate-300 hover:bg-white/5 rounded-lg transition-colors"
         >
           {I.search}
@@ -246,6 +247,7 @@ function SidebarSearch({ collapsed }: { collapsed: boolean }) {
               />
               <button
                 onMouseDown={e => { e.preventDefault(); setOpen(false); setQ(''); setDebQ('') }}
+                aria-label="Close search"
                 className="text-slate-500 hover:text-slate-300 shrink-0 text-xs"
               >✕</button>
             </div>
@@ -280,6 +282,7 @@ function SidebarSearch({ collapsed }: { collapsed: boolean }) {
         {open && q && (
           <button
             onMouseDown={e => { e.preventDefault(); setQ(''); setDebQ(''); inputRef.current?.focus() }}
+            aria-label="Clear search"
             className="text-slate-500 hover:text-slate-300 shrink-0 text-xs"
           >✕</button>
         )}
@@ -341,12 +344,13 @@ function TenantSwitcher({ me }: { me: MeData }) {
     try {
       const resp = await api.post<{ access_token: string }>('/auth/switch-tenant', { tenant_id: tenantId })
       localStorage.setItem('token', resp.data.access_token)
-      // Force full reload so all queries re-fetch with the new token context
       window.location.href = '/'
     } catch {
       setSwitching(false)
     }
   }
+
+  if (!canSwitch) return null
 
   const filtered = tenants.filter(t =>
     !search || t.name.toLowerCase().includes(search.toLowerCase())
@@ -357,10 +361,8 @@ function TenantSwitcher({ me }: { me: MeData }) {
   return (
     <div ref={ref} className="relative px-2.5 pt-2 pb-1">
       <button
-        onClick={() => canSwitch ? setOpen(o => !o) : undefined}
-        className={`w-full flex items-center gap-1.5 group rounded-md px-0.5 py-0.5 transition-colors ${
-          canSwitch ? 'hover:bg-white/5 cursor-pointer' : 'cursor-default'
-        }`}
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-1.5 group rounded-md px-0.5 py-0.5 transition-colors hover:bg-white/5 cursor-pointer"
       >
         <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-[0.08em] truncate flex-1 text-left group-hover:text-slate-400 transition-colors">
           {activeTenant.name}
@@ -593,6 +595,7 @@ function DashboardsNavItem() {
           <button
             onClick={() => setOpen(o => !o)}
             title={open ? 'Hide quick access' : 'Show quick access'}
+            aria-label={open ? 'Hide dashboard quick access' : 'Show dashboard quick access'}
             className="p-1 -mr-1 rounded-md text-slate-500 hover:text-slate-200 hover:bg-white/5 transition-colors shrink-0"
           >
             <span className={`inline-block transition-transform duration-200 ${open ? '' : '-rotate-90'}`}>
@@ -647,33 +650,101 @@ const THEME_ICONS: Record<Theme, React.ReactNode> = {
 const THEME_ORDER: Theme[] = ['light', 'dark', 'system']
 const THEME_LABEL: Record<Theme, string> = { light: 'Light', dark: 'Dark', system: 'System' }
 
-function ThemeToggle({ collapsed }: { collapsed: boolean }) {
+
+// ── Account popover ───────────────────────────────────────────────────────
+function AccountPopover({ me, collapsed }: { me: MeData | undefined; collapsed: boolean }) {
+  const I = useIcons()
+  const navigate = useNavigate()
+  const location = useLocation()
   const { theme, setTheme } = useTheme()
-  const next = THEME_ORDER[(THEME_ORDER.indexOf(theme) + 1) % THEME_ORDER.length]
+  const [open, setOpen] = useState(false)
+  const ref = useRef<HTMLDivElement>(null)
+
+  const nextTheme = THEME_ORDER[(THEME_ORDER.indexOf(theme) + 1) % THEME_ORDER.length]
+
+  useEffect(() => {
+    if (!open) return
+    function handle(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
+    }
+    document.addEventListener('mousedown', handle)
+    return () => document.removeEventListener('mousedown', handle)
+  }, [open])
+
+  const isAccountActive = location.pathname === '/account'
 
   return (
-    <button
-      onClick={() => setTheme(next)}
-      title={collapsed ? `Theme: ${THEME_LABEL[theme]}` : undefined}
-      className={`flex items-center w-full rounded-lg text-sm text-slate-500 hover:text-slate-300 hover:bg-white/5 transition-all ${
-        collapsed ? 'justify-center px-0 py-2.5 mx-1' : 'gap-2.5 px-2.5 py-2'
-      }`}
-    >
-      {THEME_ICONS[theme]}
-      {!collapsed && (
-        <span className="flex-1 text-left">
-          {THEME_LABEL[theme]}
+    <div ref={ref} className="relative">
+      <button
+        onClick={() => setOpen(o => !o)}
+        title={collapsed ? (me?.username ?? 'Account') : undefined}
+        className={`flex items-center w-full rounded-lg text-sm transition-all ${
+          collapsed ? 'justify-center px-0 py-2.5 mx-1' : 'gap-2.5 px-2.5 py-2'
+        } ${
+          isAccountActive || open ? 'bg-blue-950/60 text-white' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
+        }`}
+      >
+        <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${
+          isAccountActive || open ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300'
+        }`}>
+          {(me?.username ?? 'U').slice(0, 2).toUpperCase()}
         </span>
+        {!collapsed && (
+          <div className="flex-1 min-w-0 text-left">
+            <div className="truncate text-xs font-medium leading-none mb-0.5">{me?.username ?? 'Account'}</div>
+            {me?.role && <div className="text-[10px] text-slate-500 capitalize leading-none">{me.role}</div>}
+          </div>
+        )}
+      </button>
+
+      {open && (
+        <div className={`absolute z-50 bg-slate-800 border border-slate-700 rounded-xl shadow-2xl overflow-hidden ${
+          collapsed ? 'left-14 bottom-0 w-48' : 'left-0 right-0 bottom-full mb-1'
+        }`}>
+          {/* User info header */}
+          <div className="px-3 py-2.5 border-b border-slate-700/60">
+            <p className="text-xs font-medium text-slate-200 truncate">{me?.username ?? 'Account'}</p>
+            {me?.role && <p className="text-[10px] text-slate-500 capitalize">{me.role}</p>}
+          </div>
+
+          <div className="py-1">
+            {/* Account link */}
+            <button
+              onClick={() => { setOpen(false); navigate('/account') }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-slate-300 hover:bg-white/5 transition-colors text-left"
+            >
+              {I.settings}
+              <span>Account Settings</span>
+            </button>
+
+            {/* Theme toggle */}
+            <button
+              onClick={() => setTheme(nextTheme)}
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-slate-300 hover:bg-white/5 transition-colors text-left"
+            >
+              {THEME_ICONS[theme]}
+              <span>Theme: {THEME_LABEL[theme]}</span>
+            </button>
+          </div>
+
+          {/* Sign out */}
+          <div className="border-t border-slate-700/60 py-1">
+            <button
+              onClick={() => { localStorage.removeItem('token'); navigate('/login') }}
+              className="w-full flex items-center gap-2.5 px-3 py-2 text-xs text-slate-400 hover:text-red-400 hover:bg-white/5 transition-colors text-left"
+            >
+              {I.logout}
+              <span>Sign out</span>
+            </button>
+          </div>
+        </div>
       )}
-    </button>
+    </div>
   )
 }
 
 // ── Sidebar ────────────────────────────────────────────────────────────────
 export default function Sidebar() {
-  const navigate  = useNavigate()
-  const location  = useLocation()
-
   const [collapsed, setCollapsed] = useState(() =>
     localStorage.getItem('sidebar-collapsed') === 'true'
   )
@@ -696,6 +767,8 @@ export default function Sidebar() {
     retry: false,
   })
 
+  const isAdmin = hasRole(me?.role ?? 'readonly', 'admin') || me?.is_platform_admin
+
   return (
     <CollapsedCtx.Provider value={collapsed}>
       <aside
@@ -713,7 +786,7 @@ export default function Sidebar() {
           {collapsed && (
             <div className="flex flex-col items-center gap-2">
               <img src="/logo-icon.svg" alt="Anthrimon" className="w-8 h-8 rounded-lg" />
-              <button onClick={toggle} title="Expand sidebar"
+              <button onClick={toggle} title="Expand sidebar" aria-label="Expand sidebar"
                 className="p-1 rounded-lg text-slate-600 hover:text-slate-400 hover:bg-white/5 transition-colors">
                 {I.chevronRight}
               </button>
@@ -721,7 +794,7 @@ export default function Sidebar() {
           )}
 
           {!collapsed && (
-            <button onClick={toggle} title="Collapse sidebar"
+            <button onClick={toggle} title="Collapse sidebar" aria-label="Collapse sidebar"
               className="p-1 rounded-lg text-slate-600 hover:text-slate-400 hover:bg-white/5 transition-colors shrink-0">
               {I.chevronLeft}
             </button>
@@ -734,7 +807,7 @@ export default function Sidebar() {
           {/* Global search */}
           <SidebarSearch collapsed={collapsed} />
 
-          {/* Tenant switcher */}
+          {/* Tenant switcher — self-hides for single-tenant users */}
           {!collapsed && me && (
             <TenantSwitcher me={me} />
           )}
@@ -760,107 +833,66 @@ export default function Sidebar() {
           {/* Dashboards — home item with quick-access dropdown */}
           <DashboardsNavItem />
 
-          {/* Network — infrastructure + pathing */}
+          {/* Network — inventory & topology */}
           <Section label="Network" icon={I.topology}>
             <Item to="/devices"    label="Devices"    icon={I.monitor} />
             <Item to="/topology"   label="Topology"   icon={I.topology} />
             <Item to="/addresses"  label="Addresses"  icon={I.list} />
-            <Item to="/path-trace" label="Path Trace" icon={I.topology} />
-            <Item to="/discover"   label="Discover"   icon={I.search} />
           </Section>
 
-          {/* Monitoring — live operational telemetry */}
-          <Section label="Monitoring" icon={I.observability}>
-            <Item to="/alerts"  label="Alerts"  icon={I.bell}   badge={openAlerts} />
-            <Item to="/flow"    label="Flow"    icon={I.flow} />
-            <Item to="/syslog"  label="Logging" icon={I.syslog} />
+          {/* Operations — live telemetry, alerting, and diagnostics */}
+          <Section label="Operations" icon={I.observability}>
+            <Item to="/alerts"       label="Alerts"       icon={I.bell}      badge={openAlerts} />
+            <Item to="/alert-rules"  label="Alert Rules"  icon={I.rules} />
+            <Item to="/maintenance"  label="Maintenance"  icon={I.calendar} />
+            <Item to="/flow"         label="Flow"         icon={I.flow} />
+            <Item to="/syslog"       label="Logging"      icon={I.syslog} />
+            <Item to="/path-trace"   label="Path Trace"   icon={I.pathTrace} />
             {licensedFeaturesIn('Monitoring', isLicensed).map(f => (
               <Item key={f.key} to={f.to} label={f.label} icon={I.observability} />
             ))}
           </Section>
 
-          {/* Analysis — deeper investigation */}
+          {/* Analysis — investigation & compliance */}
           <Section label="Analysis" icon={I.analysis}>
-            <Item to="/routing" label="Routing" icon={I.bgp} />
-            <Item to="/config"  label="Config"  icon={I.config} />
+            <Item to="/routing"   label="Routing"    icon={I.bgp} />
+            <Item to="/config"    label="Config"     icon={I.config} />
+            <Item to="/policies"  label="Policies"   icon={I.policies} />
+            <Item to="/changes"  label="Changes"    icon={I.changes} />
             {licensedFeaturesIn('Analysis', isLicensed).map(f => (
               <Item key={f.key} to={f.to} label={f.label} icon={I.analysis} />
             ))}
           </Section>
 
-          {/* Automation — alert rules / policy authoring / maintenance */}
-          <Section label="Automation" icon={I.alerting}>
-            <Item to="/alert-rules"  label="Alert Rules"  icon={I.rules} />
-            <Item to="/policies"     label="Policies"     icon={I.policies} />
-            <Item to="/maintenance"  label="Maintenance"  icon={I.calendar} />
-          </Section>
-
-          {/* Admin — credentials, collectors, users, operations */}
+          {/* Admin — setup, governance, system */}
           <Section label="Admin" icon={I.settings} defaultOpen={false}>
             <Item to="/credentials" label="Credentials" icon={I.key} />
             <Item to="/collectors"  label="Collectors"  icon={I.collectors} />
-            <Item to="/probes"      label="Probes"      icon={I.search} />
-            {(hasRole(me?.role ?? 'readonly', 'admin') || me?.is_platform_admin) && (
+            <Item to="/probes"      label="Probes"      icon={I.probes} />
+            <Item to="/discover"    label="Discover"    icon={I.discover} />
+            {isAdmin && (
               <Item to="/users" label="Users" icon={I.users} />
             )}
             {hasRole(me?.role ?? 'readonly', 'admin') && (
-              <Item to="/audit" label="Audit Log" icon={I.list} />
+              <Item to="/audit" label="Audit Log" icon={I.auditLog} />
             )}
             {hasRole(me?.role ?? 'readonly', 'admin') && (
-              <Item to="/platform-health" label="Platform Health" icon={I.settings} />
+              <Item to="/platform-health" label="Platform Health" icon={I.health} />
             )}
             {hasRole(me?.role ?? 'readonly', 'admin') && (
               <Item to="/admin" label="Administration" icon={I.settings} />
             )}
-          </Section>
-
-          {/* Help */}
-          <Section label="Help" icon={I.wiki} defaultOpen={false}>
-            <Item to="/wiki" label="Wiki" icon={I.wiki} />
-          </Section>
-
-          {/* Platform — only for platform admins */}
-          {me?.is_platform_admin && (
-            <Section label="Platform" icon={I.platform} defaultOpen={false}>
+            {me?.is_platform_admin && (
               <Item to="/platform" label="Platform Admin" icon={I.platform} />
-            </Section>
-          )}
+            )}
+          </Section>
 
         </nav>
 
-        {/* Account / footer */}
-        <div className={`border-t border-slate-800 py-3 space-y-0.5 ${collapsed ? 'px-0' : 'px-3'}`}>
-          <ThemeToggle collapsed={collapsed} />
-          <NavLink to="/account"
-            title={collapsed ? (me?.username ?? 'Account') : undefined}
-            className={`flex items-center rounded-lg text-sm transition-all ${
-              collapsed ? 'justify-center px-0 py-2.5 mx-1' : 'gap-2.5 px-2.5 py-2'
-            } ${
-              location.pathname === '/account' ? 'bg-blue-950/60 text-white' : 'text-slate-400 hover:text-slate-200 hover:bg-white/5'
-            }`}
-          >
-            <span className={`w-6 h-6 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0 ${
-              location.pathname === '/account' ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300'
-            }`}>
-              {(me?.username ?? 'U').slice(0, 2).toUpperCase()}
-            </span>
-            {!collapsed && (
-              <div className="flex-1 min-w-0">
-                <div className="truncate text-xs font-medium leading-none mb-0.5">{me?.username ?? 'Account'}</div>
-                {me?.role && <div className="text-[10px] text-slate-500 capitalize leading-none">{me.role}</div>}
-              </div>
-            )}
-          </NavLink>
-
-          <button title={collapsed ? 'Sign out' : undefined}
-            onClick={() => { localStorage.removeItem('token'); navigate('/login') }}
-            className={`flex items-center w-full rounded-lg text-sm text-slate-500 hover:text-slate-300 hover:bg-white/5 transition-all ${
-              collapsed ? 'justify-center px-0 py-2.5 mx-1' : 'gap-2.5 px-2.5 py-2'
-            }`}
-          >
-            {I.logout}
-            {!collapsed && <span>Sign out</span>}
-          </button>
+        {/* Footer — Wiki + account popover */}
+        <div className={`border-t border-slate-800 py-2 space-y-0.5 ${collapsed ? 'px-0' : 'px-3'}`}>
+          <Item to="/wiki" label="Wiki" icon={I.wiki} />
+          <AccountPopover me={me} collapsed={collapsed} />
         </div>
       </aside>
     </CollapsedCtx.Provider>

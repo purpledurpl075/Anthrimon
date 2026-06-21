@@ -12,9 +12,13 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import TYPE_CHECKING, Optional
 
+import ipaddress
+import socket
+from urllib.parse import urlparse
+
 import httpx
 import structlog
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from .. import crypto
 from ..database import AsyncSessionLocal
@@ -26,6 +30,38 @@ if TYPE_CHECKING:
     from ..models.alert import Alert, AlertRule
 
 logger = structlog.get_logger(__name__)
+
+_BLOCKED_NETS = [
+    ipaddress.ip_network("127.0.0.0/8"),
+    ipaddress.ip_network("10.0.0.0/8"),
+    ipaddress.ip_network("172.16.0.0/12"),
+    ipaddress.ip_network("192.168.0.0/16"),
+    ipaddress.ip_network("169.254.0.0/16"),
+    ipaddress.ip_network("::1/128"),
+    ipaddress.ip_network("fd00::/8"),
+    ipaddress.ip_network("fe80::/10"),
+]
+
+
+def _is_url_safe(url: str) -> bool:
+    """Return False if the URL resolves to a private/loopback/link-local IP."""
+    try:
+        parsed = urlparse(url)
+        host = parsed.hostname
+        if not host:
+            return False
+        addrs = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
+        for family, _type, _proto, _canon, sockaddr in addrs:
+            ip = ipaddress.ip_address(sockaddr[0])
+            for net in _BLOCKED_NETS:
+                if ip in net:
+                    logger.warning("webhook_url_blocked", url=url, resolved_ip=str(ip), blocked_by=str(net))
+                    return False
+    except (socket.gaierror, ValueError, OSError):
+        logger.warning("webhook_url_resolve_failed", url=url)
+        return False
+    return True
+
 
 _SMTP_KEY     = "smtp"
 _TEMPLATE_KEY = "email_template"
@@ -205,6 +241,23 @@ async def dispatch(alert: Alert, rule: AlertRule, *, resolved: bool = False) -> 
             if datetime.now(timezone.utc) < resume:
                 logger.info("notify_skipped_paused", alert_id=str(alert.id))
                 return
+            # Resume time has passed — remove the stale override so the UI
+            # badge clears without waiting for the next housekeeping tick.
+            async with AsyncSessionLocal() as _db:
+                await _db.execute(text("""
+                    UPDATE tenants
+                    SET settings = jsonb_set(
+                        settings,
+                        '{alerting}',
+                        COALESCE(settings->'alerting', '{}')::jsonb
+                        - 'notifications_paused'
+                        - 'notifications_paused_until'
+                    )
+                    WHERE id = CAST(:tid AS uuid)
+                      AND (settings->'alerting'->>'notifications_paused')::boolean = true
+                """), {"tid": str(alert.tenant_id)})
+                await _db.commit()
+            logger.info("notification_pause_auto_cleared_on_dispatch", tenant_id=str(alert.tenant_id))
         except (ValueError, TypeError):
             pass
 
@@ -298,6 +351,8 @@ async def dispatch(alert: Alert, rule: AlertRule, *, resolved: bool = False) -> 
 # ── Slack ──────────────────────────────────────────────────────────────────────
 
 async def _send_slack(webhook_url: str, ctx: dict) -> None:
+    if not _is_url_safe(webhook_url):
+        raise ValueError(f"Webhook URL resolves to a blocked private/internal address")
     tag   = ctx["tag"]
     color = "#16a34a" if ctx["tag"] == "RESOLVED" else ctx["severity_color"]
 
@@ -338,6 +393,8 @@ async def _send_slack(webhook_url: str, ctx: dict) -> None:
 
 
 async def _test_slack(webhook_url: str, platform_name: str = "Anthrimon") -> None:
+    if not _is_url_safe(webhook_url):
+        raise ValueError("Webhook URL resolves to a blocked private/internal address")
     payload = {
         "text": f"[TEST] {platform_name} notification test",
         "blocks": [{"type": "section", "text": {
@@ -353,6 +410,8 @@ async def _test_slack(webhook_url: str, platform_name: str = "Anthrimon") -> Non
 # ── Generic webhook ────────────────────────────────────────────────────────────
 
 async def _send_webhook(url: str, secret: Optional[str], ctx: dict) -> None:
+    if not _is_url_safe(url):
+        raise ValueError(f"Webhook URL resolves to a blocked private/internal address")
     payload: dict = {
         "event":        "alert.resolved" if ctx["tag"] == "RESOLVED" else "alert.fired",
         "alert_id":     ctx["alert_id"],
@@ -390,6 +449,8 @@ async def _send_webhook(url: str, secret: Optional[str], ctx: dict) -> None:
 
 
 async def _test_webhook(url: str, secret: Optional[str], platform_name: str = "Anthrimon") -> None:
+    if not _is_url_safe(url):
+        raise ValueError("Webhook URL resolves to a blocked private/internal address")
     payload = {"event": "test", "source": platform_name,
                "message": "Webhook test — if you receive this, the endpoint is reachable."}
     body_bytes = json.dumps(payload, separators=(",", ":")).encode()
@@ -469,6 +530,8 @@ async def _test_pagerduty(integration_key: str, platform_name: str = "Anthrimon"
 # ── Microsoft Teams ────────────────────────────────────────────────────────────
 
 async def _send_teams(webhook_url: str, ctx: dict) -> None:
+    if not _is_url_safe(webhook_url):
+        raise ValueError(f"Webhook URL resolves to a blocked private/internal address")
     resolved   = ctx["tag"] == "RESOLVED"
     hex_color  = ("#16a34a" if resolved else ctx["severity_color"]).lstrip("#")
 
@@ -512,6 +575,8 @@ async def _send_teams(webhook_url: str, ctx: dict) -> None:
 
 
 async def _test_teams(webhook_url: str, platform_name: str = "Anthrimon") -> None:
+    if not _is_url_safe(webhook_url):
+        raise ValueError("Webhook URL resolves to a blocked private/internal address")
     card = {
         "@type":      "MessageCard",
         "@context":   "https://schema.org/extensions",

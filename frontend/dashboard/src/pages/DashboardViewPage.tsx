@@ -165,7 +165,7 @@ export default function DashboardViewPage() {
               <h1 className="text-base font-semibold text-slate-800 truncate">{dashboard.name}</h1>
             )}
             {canEdit && !renaming && (
-              <button onClick={startRename} title="Rename" className="text-slate-300 hover:text-slate-500 transition-colors">
+              <button onClick={startRename} title="Rename" aria-label="Rename dashboard" className="text-slate-300 hover:text-slate-500 transition-colors">
                 <Pencil className="w-3.5 h-3.5" />
               </button>
             )}
@@ -195,11 +195,11 @@ export default function DashboardViewPage() {
           <select value={refreshIntervalS} onChange={e => setRefreshInterval(Number(e.target.value))} disabled={!canEdit} className={selectCls} title="Refresh interval">
             {REFRESH_INTERVALS.map(r => <option key={r.value} value={r.value}>{r.label}</option>)}
           </select>
-          <button onClick={() => qc.invalidateQueries()} title="Refresh now"
+          <button onClick={() => qc.invalidateQueries()} title="Refresh now" aria-label="Refresh dashboard"
             className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors">
             <RefreshCw className="w-3.5 h-3.5" />
           </button>
-          <button onClick={() => navigate(`/dashboards/kiosk?ids=${id}&interval=30`)} title="Kiosk mode"
+          <button onClick={() => navigate(`/dashboards/kiosk?ids=${id}&interval=30`)} title="Kiosk mode" aria-label="Enter kiosk mode"
             className="p-2 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors">
             <MonitorPlay className="w-3.5 h-3.5" />
           </button>

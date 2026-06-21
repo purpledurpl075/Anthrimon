@@ -7,7 +7,7 @@ import {
   type NodeProps, type Node, type Edge,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { useParams, Link, useNavigate } from 'react-router-dom'
+import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { fetchDevice, fetchDeviceHealth, fetchDeviceHealthHistory, fetchDeviceLatency, fetchDeviceInterfaces, fetchDeviceBaselines, overrideBaseline, deleteDevice, patchDevice, setAlertExclusions, fetchDeviceCredentials, linkDeviceCredential, unlinkDeviceCredential, runSnmpDiag, fetchDeviceNeighbors, fetchDeviceOSPF, fetchDeviceAddresses, fetchDeviceRoutes, fetchDeviceVlans, fetchDeviceStp, fetchDeviceTraps, discoverSnmpEngineId, type AddressEntry, type VlanEntry, type StpPort, type BaselineRow, type TrapEvent } from '../api/devices'
 import TimeSeriesChart from '../components/TimeSeriesChart'
 import { fetchCredentials } from '../api/credentials'
@@ -19,19 +19,8 @@ import { fetchMaintenanceWindows, createMaintenanceWindow, deleteMaintenanceWind
 import StatusBadge from '../components/StatusBadge'
 import VendorBadge from '../components/VendorBadge'
 import { DeviceTypeIcon, DEVICE_TYPE_COLOR, DEVICE_TYPE_LABEL } from '../components/DeviceTypeIcon'
-
-function formatUptime(secs: number | string | null) {
-  if (!secs) return '—'
-  const s = Number(secs)
-  const d = Math.floor(s / 86400)
-  const h = Math.floor((s % 86400) / 3600)
-  const m = Math.floor((s % 3600) / 60)
-  const parts = []
-  if (d > 0) parts.push(`${d}d`)
-  if (h > 0) parts.push(`${h}h`)
-  parts.push(`${m}m`)
-  return parts.join(' ')
-}
+import { formatAge, formatUptime } from '../utils/time'
+import ErrorState from '../components/ErrorState'
 
 function formatSpeed(bps: number | string | null) {
   if (!bps) return '—'
@@ -955,7 +944,7 @@ function CredentialSection({ deviceId }: { deviceId: string }) {
               <button onClick={() => setConfirmDel(null)} className="text-slate-400 hover:underline">Cancel</button>
             </div>
           ) : (
-            <button onClick={() => setConfirmDel(a.credential_id)} className="text-slate-400 hover:text-red-500">✕</button>
+            <button onClick={() => setConfirmDel(a.credential_id)} aria-label="Remove credential" className="text-slate-400 hover:text-red-500">✕</button>
           ))}
         </div>
       ))}
@@ -2154,15 +2143,6 @@ function HealthTab({ deviceId, currentHealth }: { deviceId: string; currentHealt
   )
 }
 
-function formatAge(iso: string | null) {
-  if (!iso) return '—'
-  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (secs < 120) return `${secs}s ago`
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
-  return `${Math.floor(secs / 86400)}d ago`
-}
-
 export default function DeviceDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -2172,7 +2152,18 @@ export default function DeviceDetail() {
   const canAdmin   = hasRole(role, 'admin')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
-  const [tab, setTab] = useState<'interfaces' | 'neighbors' | 'addresses' | 'routes' | 'vlans' | 'stp' | 'health' | 'config' | 'bgp' | 'traps'>('interfaces')
+  type TabKey = 'interfaces' | 'neighbors' | 'addresses' | 'routes' | 'vlans' | 'stp' | 'health' | 'config' | 'bgp' | 'traps'
+  const VALID_TABS: TabKey[] = ['interfaces', 'neighbors', 'addresses', 'routes', 'vlans', 'stp', 'health', 'config', 'bgp', 'traps']
+  const [searchParams, setSearchParams] = useSearchParams()
+  const rawTab = searchParams.get('tab')
+  const tab: TabKey = rawTab && VALID_TABS.includes(rawTab as TabKey) ? rawTab as TabKey : 'interfaces'
+  const setTab = useCallback((t: TabKey) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      next.set('tab', t)
+      return next
+    }, { replace: false })
+  }, [setSearchParams])
 
   // Check if device has any SSH/API credential — hides Config tab if not
   const { data: deviceCredsForTab = [] } = useQuery({
@@ -2203,7 +2194,7 @@ export default function DeviceDetail() {
     },
   })
 
-  const { data: device, isLoading, isError } = useQuery({
+  const { data: device, isLoading, isError, refetch } = useQuery({
     queryKey: ['device', id],
     queryFn: () => fetchDevice(id!),
     enabled: !!id,
@@ -2289,7 +2280,7 @@ export default function DeviceDetail() {
   })
 
   if (isLoading || !device) return <div className="p-8 text-slate-500">Loading…</div>
-  if (isError) return <div className="p-8 text-red-600">Failed to load device.</div>
+  if (isError) return <ErrorState message="Failed to load device." onRetry={() => refetch()} />
 
   const upIfaces = interfaces?.filter((i) => i.oper_status === 'up').length ?? 0
   const totalIfaces = interfaces?.length ?? 0
@@ -2556,7 +2547,7 @@ export default function DeviceDetail() {
                   {(device.tags ?? []).map((tag: string) => (
                     <span key={tag} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-100 text-slate-600 text-xs">
                       {tag}
-                      <button onClick={() => removeTag(tag)} className="text-slate-400 hover:text-red-500 leading-none">×</button>
+                      <button onClick={() => removeTag(tag)} aria-label={`Remove tag "${tag}"`} className="text-slate-400 hover:text-red-500 leading-none">×</button>
                     </span>
                   ))}
                 </div>
@@ -3906,7 +3897,7 @@ function RollbackModal({
               {fmtTime(target.collected_at)} — <span className="font-mono">{target.config_hash.slice(0, 12)}…</span>
             </p>
           </div>
-          <button onClick={onClose} className="text-slate-300 hover:text-slate-500 text-xl leading-none">×</button>
+          <button onClick={onClose} aria-label="Close dialog" className="text-slate-300 hover:text-slate-500 text-xl leading-none">×</button>
         </div>
 
         {result ? (
@@ -4166,7 +4157,7 @@ function DeployPanel({ deviceId, vendor }: { deviceId: string; vendor?: string }
             <span className="text-slate-400 text-xs">=</span>
             <input value={v.value} onChange={e => setVariables(vs => vs.map((x,j) => j===i ? {...x,value:e.target.value} : x))}
               placeholder="value" className={`${inputCls} flex-1`} />
-            <button onClick={() => setVariables(vs => vs.filter((_,j) => j!==i))} className="text-slate-300 hover:text-red-400 text-xs">✕</button>
+            <button onClick={() => setVariables(vs => vs.filter((_,j) => j!==i))} aria-label="Remove variable" className="text-slate-300 hover:text-red-400 text-xs">✕</button>
           </div>
         ))}
       </div>

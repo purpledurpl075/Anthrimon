@@ -14,6 +14,12 @@ class SavedViewCreate(BaseModel):
     is_shared: bool = False
 
 
+class SavedViewUpdate(BaseModel):
+    name: Optional[str] = None
+    query: Optional[str] = None
+    is_shared: Optional[bool] = None
+
+
 class SavedViewRead(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

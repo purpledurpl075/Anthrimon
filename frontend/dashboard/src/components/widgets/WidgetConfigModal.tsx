@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useQuery } from '@tanstack/react-query'
 import { fetchDevices, fetchDeviceInterfaces } from '../../api/devices'
 import { fetchMetricCatalog } from '../../api/metrics'
+import { useFocusTrap } from '../../hooks/useFocusTrap'
 import type { MetricWidgetConfig } from './metricWidgetConfig'
 
 interface Props {
@@ -64,6 +65,14 @@ export function WidgetConfigModal({ widgetType, initialConfig, onSave, onClose }
     }
   }, [selectedMetric, thresholdsTouched])
 
+  const trapRef = useFocusTrap<HTMLDivElement>(true)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    return () => document.removeEventListener('keydown', onKey)
+  }, [onClose])
+
   const canSave = isTextNote
     ? true
     : !!deviceId && !!metricId && (!isInterfaceMetric || !!ifaceName)
@@ -93,8 +102,8 @@ export function WidgetConfigModal({ widgetType, initialConfig, onSave, onClose }
   const interfaceMetrics = catalog.filter(m => m.category === 'interface')
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
-      <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" role="dialog" aria-modal="true" aria-label="Configure widget">
+      <div ref={trapRef} className="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
         <div className="px-6 py-4 border-b border-slate-100">
           <h2 className="text-sm font-semibold text-slate-800">Configure widget</h2>
         </div>

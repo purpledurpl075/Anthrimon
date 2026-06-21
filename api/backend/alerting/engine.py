@@ -345,6 +345,51 @@ class AlertEngine:
         except Exception as exc:
             logger.error("housekeeping_orphan_suppression_error", error=str(exc))
 
+        # ── Auto-clear expired notification pauses ────────────────────────────
+        # When notifications_paused=true and notifications_paused_until is in
+        # the past, the notify path already falls through correctly, but the DB
+        # flag stays set until someone manually un-pauses.  Clear it here so
+        # the UI badge reflects reality.  We use the already-loaded effective
+        # settings (which merge platform defaults + tenant overrides) so we
+        # catch the case where paused_until comes from the platform defaults
+        # rather than a tenant override.
+        now = datetime.now(timezone.utc)
+        for tid, settings in tenant_settings.items():
+            if not settings.get("notifications_paused"):
+                continue
+            paused_until_str = settings.get("notifications_paused_until")
+            if not paused_until_str:
+                continue
+            try:
+                resume = datetime.fromisoformat(paused_until_str)
+                if resume.tzinfo is None:
+                    resume = resume.replace(tzinfo=timezone.utc)
+                if now < resume:
+                    continue
+            except (ValueError, TypeError):
+                continue
+            # Resume time has passed — remove notifications_paused from the
+            # tenant's own overrides (setting it to false is a no-op if the
+            # platform default is already false; removing keeps settings sparse).
+            try:
+                async with AsyncSessionLocal() as db:
+                    await db.execute(text("""
+                        UPDATE tenants
+                        SET settings = jsonb_set(
+                            settings,
+                            '{alerting}',
+                            COALESCE(settings->'alerting', '{}')::jsonb
+                            - 'notifications_paused'
+                            - 'notifications_paused_until'
+                        )
+                        WHERE id = CAST(:tid AS uuid)
+                          AND (settings->'alerting'->>'notifications_paused')::boolean = true
+                    """), {"tid": tid})
+                    await db.commit()
+                logger.info("notification_pause_auto_cleared", tenant_id=tid)
+            except Exception as exc:
+                logger.error("housekeeping_pause_clear_error", tenant_id=tid, error=str(exc))
+
         # ── Purge old resolved/expired alerts ────────────────────────────────
         # Only purges non-open alerts; open/acknowledged alerts are never deleted
         # by retention — they must be resolved or auto-closed first.
@@ -385,6 +430,21 @@ class AlertEngine:
             logger.info("alert_state_pruned",
                         stale_fps=len(stale),
                         remaining_fps=len(self._fp_last_seen))
+
+        _MAX_FP = 50_000
+        _TRIM_TO = 40_000
+        if len(self._fp_last_seen) > _MAX_FP:
+            by_age = sorted(self._fp_last_seen.items(), key=lambda kv: kv[1])
+            evict = {fp for fp, _ in by_age[:len(self._fp_last_seen) - _TRIM_TO]}
+            for fp in evict:
+                self._breach_since.pop(fp, None)
+                self._clear_since.pop(fp, None)
+                self._last_clear.pop(fp, None)
+                self._suppress_until_clear.discard(fp)
+                del self._fp_last_seen[fp]
+            logger.warning("alert_state_cap_evicted",
+                           evicted=len(evict),
+                           remaining=len(self._fp_last_seen))
 
     async def _evaluate_all(self, db: AsyncSession, platform: dict | None = None) -> tuple[list[_PendingNotif], set[uuid.UUID]]:
         rules = (await db.execute(

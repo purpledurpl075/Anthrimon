@@ -417,6 +417,24 @@ async def store_config_backup(
     if not config_text:
         return False
 
+    # Normalise before hashing so hub-local and collector-managed configs are
+    # treated identically.  This catches CRLF variation from Netmiko, dynamic
+    # IOS-XR/NX-OS byte-count/timestamp headers, and session-noise words that
+    # can bleed into the start of the captured buffer.
+    config_text = config_text.replace("\r\n", "\n").replace("\r", "\n")
+    config_text = "\n".join(
+        ln for ln in config_text.splitlines()
+        if not _BANNER_NOISE.search(ln)
+    )
+    _lines = config_text.splitlines()
+    while _lines and _lines[0].strip() in ("exit", "quit", "logout"):
+        _lines.pop(0)
+    # Strip trailing whitespace per line to prevent spurious diffs when devices
+    # add trailing spaces on some firmware versions.
+    config_text = "\n".join(ln.rstrip() for ln in _lines).strip()
+    if not config_text:
+        return False
+
     # Need device metadata for diff labels and alert firing.
     dev = (await db.execute(
         select(Device).where(Device.id == device_id)
@@ -641,6 +659,8 @@ def _extract_show_output(raw: str, command: str) -> str:
         if ln.rstrip().endswith(command):
             start = i + 1          # last echo of the command wins
     body = lines[start:] if start is not None else lines
+    while body and body[0].strip() in ("exit", "quit", "logout"):
+        body.pop(0)
     while body and (
         body[-1].strip() == ""
         or body[-1].strip() in ("exit", "quit", "logout")

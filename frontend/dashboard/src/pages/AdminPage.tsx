@@ -1337,7 +1337,7 @@ function ConfigureModal({ device, method, onClose, onDone }: {
           <h2 className="text-sm font-semibold text-slate-800">
             Auto-configure {method === 'arista_eapi' ? 'Arista eAPI' : 'CX REST'} — {device.hostname}
           </h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-600">✕</button>
+          <button onClick={onClose} aria-label="Close dialog" className="text-slate-400 hover:text-slate-600">✕</button>
         </div>
         <div className="px-6 py-4 space-y-4">
           <div>

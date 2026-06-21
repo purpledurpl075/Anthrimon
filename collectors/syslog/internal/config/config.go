@@ -68,7 +68,7 @@ func defaults() Config {
 		Listener: ListenerConfig{
 			UDPAddr:    ":514",
 			TCPAddr:    ":514",
-			BufferSize: 65535,
+			BufferSize: 8192,
 		},
 		Writer: WriterConfig{
 			BatchSize:      1000,

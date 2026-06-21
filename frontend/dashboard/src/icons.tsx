@@ -5,6 +5,7 @@ import {
   Settings, CalendarDays, Activity, ScrollText, FileCode, Route, Boxes, BookOpen,
   LogOut, ChevronDown, ChevronLeft, ChevronRight, Building2, Users, LineChart,
   ShieldAlert, KeyRound,
+  Waypoints, Radar, ScanSearch, HeartPulse, ClipboardList, GitPullRequestDraft,
 } from 'lucide-react'
 import type { JSX } from 'react'
 
@@ -33,6 +34,12 @@ export const MODERN_NAV: Record<string, JSX.Element> = {
   users:        <Users className={c4} strokeWidth={2} />,
   platform:     <Building2 className={c4} strokeWidth={2} />,
   logout:       <LogOut className={c4} strokeWidth={2} />,
+  pathTrace:    <Waypoints className={c4} strokeWidth={2} />,
+  discover:     <Radar className={c4} strokeWidth={2} />,
+  probes:       <ScanSearch className={c4} strokeWidth={2} />,
+  health:       <HeartPulse className={c4} strokeWidth={2} />,
+  auditLog:     <ClipboardList className={c4} strokeWidth={2} />,
+  changes:      <GitPullRequestDraft className={c4} strokeWidth={2} />,
   // section headers
   observability:<Activity className={c35} strokeWidth={2} />,
   analysis:     <LineChart className={c35} strokeWidth={2} />,

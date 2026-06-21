@@ -5,10 +5,15 @@ import { fetchAlert, fetchAlertRule, acknowledgeAlert, resolveAlert } from '../a
 import { fetchDevice } from '../api/devices'
 import api from '../api/client'
 import { DeviceTypeIcon, DEVICE_TYPE_COLOR, DEVICE_TYPE_LABEL } from '../components/DeviceTypeIcon'
+import ErrorState from '../components/ErrorState'
+import { formatAge } from '../utils/time'
+import { useCurrentUser } from '../hooks/useCurrentUser'
 
-interface AlertComment { id: string; body: string; author: string; created_at: string }
+interface AlertComment { id: string; body: string; author: string; user_id: string; created_at: string; updated_at: string | null }
 const fetchComments = (id: string) => api.get<AlertComment[]>(`/alerts/${id}/comments`).then(r => r.data)
 const postComment   = (id: string, body: string) => api.post<AlertComment>(`/alerts/${id}/comments`, { body }).then(r => r.data)
+const editComment   = (alertId: string, commentId: string, body: string) => api.patch<AlertComment>(`/alerts/${alertId}/comments/${commentId}`, { body }).then(r => r.data)
+const deleteComment = (alertId: string, commentId: string) => api.delete(`/alerts/${alertId}/comments/${commentId}`)
 
 const SEVERITY_COLOR: Record<string, string> = {
   critical: '#dc2626',
@@ -96,7 +101,7 @@ export default function AlertDetailPage() {
   const navigate = useNavigate()
   const qc = useQueryClient()
 
-  const { data: alert, isLoading, isError } = useQuery({
+  const { data: alert, isLoading, isError, refetch } = useQuery({
     queryKey: ['alert', id],
     queryFn: () => fetchAlert(id!),
     enabled: !!id,
@@ -128,7 +133,7 @@ export default function AlertDetailPage() {
   })
 
   if (isLoading) return <div className="p-8 text-slate-400 text-sm">Loading…</div>
-  if (isError || !alert) return <div className="p-8 text-red-600 text-sm">Alert not found.</div>
+  if (isError || !alert) return <ErrorState message="Alert not found." onRetry={() => refetch()} />
 
   const ctx = alert.context ?? {}
   const metric = ctx.metric as string | undefined
@@ -437,7 +442,10 @@ export default function AlertDetailPage() {
 
 function CommentThread({ alertId }: { alertId: string }) {
   const qc = useQueryClient()
+  const { data: me } = useCurrentUser()
   const [text, setText] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editText, setEditText] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
   const { data: comments = [] } = useQuery({
@@ -455,34 +463,80 @@ function CommentThread({ alertId }: { alertId: string }) {
     },
   })
 
-  function timeAgo(iso: string) {
-    const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-    if (secs < 60) return `${secs}s ago`
-    if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
-    if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
-    return new Date(iso).toLocaleDateString()
+  const editMut = useMutation({
+    mutationFn: (vars: { commentId: string; body: string }) => editComment(alertId, vars.commentId, vars.body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['alert-comments', alertId] })
+      setEditingId(null)
+      setEditText('')
+    },
+  })
+
+  const deleteMut = useMutation({
+    mutationFn: (commentId: string) => deleteComment(alertId, commentId),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['alert-comments', alertId] }),
+  })
+
+  const startEdit = (c: AlertComment) => {
+    setEditingId(c.id)
+    setEditText(c.body)
   }
 
   return (
     <div className="bg-white rounded-xl border border-slate-200 p-5">
       <h2 className="text-sm font-semibold text-slate-700 mb-4">Comments</h2>
 
-      {/* Thread */}
       {comments.length === 0 ? (
         <p className="text-xs text-slate-400 mb-4">No comments yet — add one below.</p>
       ) : (
         <div className="space-y-4 mb-5">
           {comments.map(c => (
-            <div key={c.id} className="flex gap-3">
+            <div key={c.id} className="flex gap-3 group">
               <div className="w-7 h-7 rounded-full bg-slate-200 flex items-center justify-center shrink-0 text-[10px] font-bold text-slate-600 uppercase">
                 {c.author.slice(0, 2)}
               </div>
               <div className="flex-1">
                 <div className="flex items-baseline gap-2 mb-1">
                   <span className="text-xs font-semibold text-slate-700">{c.author}</span>
-                  <span className="text-[10px] text-slate-400">{timeAgo(c.created_at)}</span>
+                  <span className="text-[10px] text-slate-400">{formatAge(c.updated_at || c.created_at)}</span>
+                  {c.updated_at && <span className="text-[10px] text-slate-400 italic">(edited)</span>}
+                  {me && c.user_id === me.id && editingId !== c.id && (
+                    <span className="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1.5 ml-1">
+                      <button onClick={() => startEdit(c)} className="text-[10px] text-slate-400 hover:text-blue-600">edit</button>
+                      <button onClick={() => { if (confirm('Delete this comment?')) deleteMut.mutate(c.id) }}
+                        className="text-[10px] text-slate-400 hover:text-red-600">delete</button>
+                    </span>
+                  )}
                 </div>
-                <p className="text-xs text-slate-600 whitespace-pre-wrap leading-relaxed">{c.body}</p>
+                {editingId === c.id ? (
+                  <div className="space-y-2">
+                    <textarea
+                      value={editText}
+                      onChange={e => setEditText(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && editText.trim()) {
+                          e.preventDefault()
+                          editMut.mutate({ commentId: c.id, body: editText.trim() })
+                        }
+                        if (e.key === 'Escape') setEditingId(null)
+                      }}
+                      rows={3}
+                      className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 resize-none"
+                      autoFocus
+                    />
+                    <div className="flex gap-2 justify-end">
+                      <button onClick={() => setEditingId(null)}
+                        className="px-3 py-1 text-xs text-slate-500 hover:text-slate-700 transition-colors">Cancel</button>
+                      <button onClick={() => editMut.mutate({ commentId: c.id, body: editText.trim() })}
+                        disabled={!editText.trim() || editMut.isPending}
+                        className="px-3 py-1 text-xs font-medium bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 transition-colors">
+                        {editMut.isPending ? 'Saving…' : 'Save'}
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <p className="text-xs text-slate-600 whitespace-pre-wrap leading-relaxed">{c.body}</p>
+                )}
               </div>
             </div>
           ))}

@@ -28,6 +28,10 @@ _REDACTED  = "***"
 def _encrypt_data(data: dict) -> dict:
     """Return a copy of data with sensitive fields encrypted."""
     if not _crypto.is_configured():
+        logger.critical(
+            "credential_stored_plaintext",
+            reason="ANTHRIMON_ENCRYPTION_KEY is not set; secrets will be stored unencrypted",
+        )
         return data
     out = dict(data)
     for field in _SENSITIVE:

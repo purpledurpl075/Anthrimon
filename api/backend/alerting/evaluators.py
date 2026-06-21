@@ -23,6 +23,7 @@ from ..services.urls import ch_url, vm_url
 # drop-in async context manager that yields the shared client WITHOUT closing
 # it on exit, so existing `async with ... as client:` call sites are unchanged.
 _http_client_singleton: Optional[httpx.AsyncClient] = None
+_snmp_sem = asyncio.Semaphore(10)
 
 
 def _http_client() -> httpx.AsyncClient:
@@ -486,12 +487,18 @@ async def eval_custom_oid(db: AsyncSession, device: dict, oid: str,
     host = device.get("mgmt_ip") or str(device["id"])
 
     try:
-        val = await asyncio.to_thread(_snmp_get_sync, host, cred_type, cred_data, oid)
+        async with _snmp_sem:
+            val = await asyncio.wait_for(
+                asyncio.to_thread(_snmp_get_sync, host, cred_type, cred_data, oid),
+                timeout=8.0,
+            )
         if val is None:
             return None
         if _check(val, condition, threshold):
             return Breach(device["id"], device["hostname"], value=val,
                           extra={"oid": oid, "raw": str(val)})
+    except asyncio.TimeoutError:
+        pass
     except Exception:
         pass
     return None
@@ -533,6 +540,7 @@ async def eval_ospf_state(db: AsyncSession, device: dict) -> Optional[Breach]:
             FROM ospf_neighbors
             WHERE device_id = :did
               AND state NOT IN ('full', 'unknown')
+              AND updated_at > NOW() - INTERVAL '5 minutes'
             ORDER BY
                 CASE state
                     WHEN 'down'     THEN 1
@@ -780,7 +788,8 @@ async def eval_bgp_session_down(db: AsyncSession, device: dict) -> list[Breach]:
             "WHERE device_id = :did "
             "  AND admin_status = 'start' "
             "  AND session_state != 'established' "
-            "  AND session_state != 'unknown'"
+            "  AND session_state != 'unknown' "
+            "  AND updated_at > NOW() - INTERVAL '5 minutes'"
         ),
         {"did": device["id"]},
     )).mappings().all()
@@ -1093,6 +1102,7 @@ async def eval_isis_state(db: AsyncSession, device: dict) -> Optional[Breach]:
             FROM isis_neighbors
             WHERE device_id = :did
               AND adjacency_state NOT IN ('up', 'unknown')
+              AND updated_at > NOW() - INTERVAL '5 minutes'
             ORDER BY
                 CASE adjacency_state
                     WHEN 'down'         THEN 1

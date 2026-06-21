@@ -15,6 +15,7 @@ import { fetchDevices } from '../api/devices'
 import TimeSeriesChart from '../components/TimeSeriesChart'
 import { DEVICE_TYPE_COLOR, DeviceTypeIcon } from '../components/DeviceTypeIcon'
 import SavedViewsMenu from '../components/SavedViewsMenu'
+import { SkeletonTable, SkeletonInline, SkeletonChart } from '../components/Skeleton'
 
 // ── Intel helpers ─────────────────────────────────────────────────────────────
 
@@ -99,7 +100,7 @@ function FilterChips({ filters, onRemove }: { filters: Filters; onRemove: (k: ke
       {chips.map(c => (
         <span key={c.key} className="flex items-center gap-1 px-2 py-0.5 bg-blue-50 border border-blue-200 rounded-full text-xs text-blue-700 font-mono">
           {c.label}
-          <button onClick={() => onRemove(c.key)} className="text-blue-400 hover:text-blue-700 ml-0.5 leading-none">×</button>
+          <button onClick={() => onRemove(c.key)} aria-label={`Remove ${c.label} filter`} className="text-blue-400 hover:text-blue-700 ml-0.5 leading-none">×</button>
         </span>
       ))}
     </div>
@@ -216,7 +217,7 @@ function IpDetailPanel({ ip, minutes, deviceId, onClose, onFilter }: {
 
         <div className="flex-1 overflow-y-auto">
           {isLoading ? (
-            <div className="p-6 text-center text-sm text-slate-400">Loading…</div>
+            <div className="p-6"><SkeletonTable rows={4} cols={3} /></div>
           ) : !data ? null : (
             <>
               {/* In/Out totals */}
@@ -380,7 +381,7 @@ function IpDetailPanel({ ip, minutes, deviceId, onClose, onFilter }: {
 
 function SummaryCards({ minutes, deviceId, filters }: { minutes: number; deviceId: string; filters: Filters }) {
   const { data, isLoading } = useQuery({
-    queryKey:        ['flow-summary', minutes, deviceId, filters],
+    queryKey:        ['flow-summary', minutes, deviceId],
     queryFn:         () => fetchFlowSummary(minutes, deviceId || undefined),
     refetchInterval: 30_000,
   })
@@ -399,7 +400,7 @@ function SummaryCards({ minutes, deviceId, filters }: { minutes: number; deviceI
           <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-xl" style={{ backgroundColor: c.accent }} />
           <p className="text-xs text-slate-400 mb-1">{c.name}</p>
           <p className="text-xl font-bold text-slate-800 tabular-nums">
-            {isLoading ? <span className="text-slate-300">…</span> : c.value}
+            {isLoading ? <SkeletonInline /> : c.value}
           </p>
         </div>
       ))}
@@ -441,7 +442,7 @@ function TopTalkersTable({ minutes, deviceId, filters, onFilter, onDetail }: {
   const setFilterProtoLocal = (_p: number) => {}
 
   const { data = [], isLoading } = useQuery({
-    queryKey:        ['flow-top-talkers', minutes, deviceId, filters],
+    queryKey:        ['flow-top-talkers', minutes, deviceId, filters.protocol],
     queryFn:         () => fetchTopTalkers(minutes, 20, deviceId || undefined, filters.protocol),
     refetchInterval: 30_000,
   })
@@ -471,7 +472,7 @@ function TopTalkersTable({ minutes, deviceId, filters, onFilter, onDetail }: {
         <span className="text-[10px] text-slate-400">{filtered.length} pairs</span>
       </div>
       {isLoading ? (
-        <div className="px-5 py-8 text-center text-xs text-slate-400">Loading…</div>
+        <SkeletonTable rows={6} cols={4} />
       ) : filtered.length === 0 ? <EmptyFlow /> : (
         <div className="divide-y divide-slate-50">
           {filtered.map((r, i) => {
@@ -544,7 +545,7 @@ function ConversationTimeSeries({ srcIp, dstIp, minutes, deviceId }: {
         {srcIp} → {dstIp}
       </p>
       {isLoading ? (
-        <div className="text-xs text-slate-400 py-2">Loading…</div>
+        <SkeletonTable rows={3} cols={3} />
       ) : (
         <TimeSeriesChart series={series} height={80} yFmt={v => fmtBytes(v) + '/s'} empty="No data for this conversation" />
       )}
@@ -617,7 +618,7 @@ function TopPortsTable({ minutes, deviceId, filters, onFilterPort }: {
       <div className="px-5 py-3.5 border-b border-slate-100">
         <h2 className="text-sm font-semibold text-slate-800">Top destination ports</h2>
       </div>
-      {isLoading ? <div className="px-5 py-8 text-center text-xs text-slate-400">Loading…</div>
+      {isLoading ? <SkeletonTable rows={6} cols={4} />
         : data.length === 0 ? <EmptyFlow /> : (
         <div className="divide-y divide-slate-50">
           {data.map((r, i) => (
@@ -810,7 +811,7 @@ function GeoTab({ minutes, deviceId }: { minutes: number; deviceId: string }) {
   const maxBytes = Math.max(...data.map(r => r.bytes_total), 1)
   const total    = data.reduce((s, r) => s + r.bytes_total, 0)
 
-  if (isLoading) return <div className="p-8 text-center text-xs text-slate-400">Loading geo data…</div>
+  if (isLoading) return <div className="p-8"><SkeletonTable rows={5} cols={4} /></div>
   if (data.length === 0) return <EmptyFlow />
 
   return (
@@ -954,7 +955,7 @@ function DirectionTab({ minutes, deviceId, onDetail }: { minutes: number; device
     refetchInterval: 60_000,
   })
 
-  if (isLoading) return <div className="p-8 text-center text-xs text-slate-400">Analysing traffic directions…</div>
+  if (isLoading) return <div className="p-8"><SkeletonTable rows={4} cols={3} /></div>
   if (!data) return <EmptyFlow />
 
   const dirs = Object.entries(data.summary).sort((a, b) => b[1].bytes_total - a[1].bytes_total)
@@ -1157,7 +1158,7 @@ function ApplicationsTab({ minutes, deviceId }: { minutes: number; deviceId: str
   const totalBytes = categories.reduce((s, c) => s + c.bytes_total, 0) || 1
   const maxBytes   = Math.max(...categories.map(c => c.bytes_total), 1)
 
-  if (isLoading) return <div className="p-8 text-center text-xs text-slate-400">Analysing applications…</div>
+  if (isLoading) return <div className="p-8"><SkeletonTable rows={5} cols={4} /></div>
   if (categories.length === 0) return <EmptyFlow />
 
   return (
@@ -1366,7 +1367,7 @@ function ConnectionsTab({ minutes, deviceId, onDetail }: { minutes: number; devi
           </div>
         </div>
         {eLoading ? (
-          <div className="px-5 py-8 text-center text-xs text-slate-400">Loading…</div>
+          <SkeletonTable rows={6} cols={4} />
         ) : elephants.length === 0 ? (
           <div className="px-5 py-8 text-center text-xs text-slate-400">No flows above {minMb}MB in this window</div>
         ) : (

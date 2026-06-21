@@ -138,6 +138,9 @@ async def _principal_from_jwt(token: str, db: AsyncSession) -> Optional[Principa
         user_id_str: str = payload.get("sub")
         if not user_id_str:
             return None
+        # Reject TOTP-pending tokens — they have no API access.
+        if payload.get("scope") == "totp_pending":
+            return None
     except JWTError:
         return None
 
@@ -146,6 +149,10 @@ async def _principal_from_jwt(token: str, db: AsyncSession) -> Optional[Principa
     )
     user = result.scalar_one_or_none()
     if user is None:
+        return None
+
+    token_gen = payload.get("gen", 0)
+    if token_gen < user.token_generation:
         return None
 
     # Parse extended claims (absent in tokens issued before Phase B — fall back gracefully)

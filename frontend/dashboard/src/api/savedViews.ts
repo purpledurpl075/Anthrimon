@@ -25,5 +25,14 @@ export const fetchSavedViews = (page: string) =>
 export const createSavedView = (data: SavedViewCreate) =>
   api.post<SavedView>('/saved-views', data).then(r => r.data)
 
+export interface SavedViewUpdate {
+  name?: string
+  query?: string
+  is_shared?: boolean
+}
+
+export const updateSavedView = (id: string, data: SavedViewUpdate) =>
+  api.patch<SavedView>(`/saved-views/${id}`, data).then(r => r.data)
+
 export const deleteSavedView = (id: string) =>
   api.delete<void>(`/saved-views/${id}`)

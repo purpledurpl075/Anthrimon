@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom'
 import { fetchTraps, fetchTrapSummary, fetchTrapRate, fetchTrapTopTypes, fetchTrapTopDevices } from '../api/devices'
 import { DEVICE_TYPE_COLOR, DeviceTypeIcon } from '../components/DeviceTypeIcon'
 import { fmtNum, fmtTs, fmtIso, TIME_WINDOWS } from './logHelpers'
+import { SkeletonTable, SkeletonInline } from '../components/Skeleton'
 
 // ── Severity / alert styling ─────────────────────────────────────────────────
 
@@ -136,7 +137,7 @@ function TrapSummaryCards({ minutes, deviceId }: { minutes: number; deviceId: st
           <div className="absolute left-0 top-0 bottom-0 w-1 rounded-l-xl" style={{ backgroundColor: c.accent }} />
           <p className="text-xs text-slate-400 mb-1">{c.label}</p>
           <p className="text-xl font-bold text-slate-800 tabular-nums">
-            {isLoading ? <span className="text-slate-300">…</span> : c.value}
+            {isLoading ? <SkeletonInline /> : c.value}
           </p>
         </div>
       ))}
@@ -326,7 +327,7 @@ function TrapTable({ minutes, deviceId, severity, trapType, query }: {
       </div>
 
       {isLoading ? (
-        <div className="px-5 py-8 text-center text-xs text-slate-400">Loading…</div>
+        <SkeletonTable rows={8} cols={5} />
       ) : items.length === 0 ? (
         <div className="px-5 py-10 text-center">
           <p className="text-sm text-slate-400">No traps match the current filters</p>
@@ -530,19 +531,19 @@ export default function TrapsTab({ devices }: { devices: any[] }) {
             {severity !== null && (
               <span className="flex items-center gap-1 px-2 py-0.5 bg-red-50 border border-red-200 rounded-full text-xs text-red-700 capitalize">
                 {severity}
-                <button onClick={() => setSeverity(null)} className="text-red-400 hover:text-red-700 ml-0.5">×</button>
+                <button onClick={() => setSeverity(null)} aria-label="Clear severity filter" className="text-red-400 hover:text-red-700 ml-0.5">×</button>
               </span>
             )}
             {trapType && (
               <span className="flex items-center gap-1 px-2 py-0.5 bg-blue-50 border border-blue-200 rounded-full text-xs text-blue-700 font-mono">
                 {trapType}
-                <button onClick={() => setTrapType('')} className="text-blue-400 hover:text-blue-700 ml-0.5">×</button>
+                <button onClick={() => setTrapType('')} aria-label="Clear trap type filter" className="text-blue-400 hover:text-blue-700 ml-0.5">×</button>
               </span>
             )}
             {query && (
               <span className="flex items-center gap-1 px-2 py-0.5 bg-purple-50 border border-purple-200 rounded-full text-xs text-purple-700">
                 "{query}"
-                <button onClick={() => { setQuery(''); setQueryInput('') }} className="text-purple-400 hover:text-purple-700 ml-0.5">×</button>
+                <button onClick={() => { setQuery(''); setQueryInput('') }} aria-label="Clear search query" className="text-purple-400 hover:text-purple-700 ml-0.5">×</button>
               </span>
             )}
             <button onClick={clearFilters} className="text-[10px] text-slate-400 hover:text-slate-600 underline">Clear all</button>

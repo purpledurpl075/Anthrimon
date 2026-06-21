@@ -29,6 +29,8 @@ _PUBKEY_PATH = os.path.join(os.path.dirname(__file__), "keys", "anthrimon_licens
 
 _lock = threading.Lock()
 _cached: Optional["LicenseInfo"] = None
+_last_checked: float = 0.0
+_RECHECK_INTERVAL = 3600.0
 
 
 @dataclass
@@ -157,6 +159,9 @@ def load_license() -> LicenseInfo:
                     logger.warning("license_invalid", detail=msg)
                     info = LicenseInfo(valid=False, reason=msg)
 
+    import time
+    global _last_checked
+    _last_checked = time.monotonic()
     with _lock:
         _cached = info
     if info.valid:
@@ -170,8 +175,12 @@ def reload_license() -> LicenseInfo:
 
 
 def license_info() -> LicenseInfo:
-    """Return the cached license status (loads on first access)."""
-    if _cached is None:
+    """Return the cached license status, re-validating every _RECHECK_INTERVAL seconds."""
+    import time
+    global _last_checked
+    now = time.monotonic()
+    if _cached is None or (now - _last_checked) > _RECHECK_INTERVAL:
+        _last_checked = now
         return load_license()
     return _cached
 

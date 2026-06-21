@@ -952,9 +952,11 @@ async def set_flow_retention(body: RetentionUpdate, _: Principal = Depends(requi
         try:
             await _ch_admin(f"ALTER TABLE {table} MODIFY TTL toDateTime({col}) + toIntervalDay({d})")
         except Exception as exc:
-            errors.append(f"{table}: {exc}")
+            errors.append(str(exc))
+            logger.error("clickhouse_ttl_update_failed", table=table, error=str(exc))
     if errors:
-        raise HTTPException(status_code=502, detail="Some TTLs failed to update: " + "; ".join(errors))
+        raise HTTPException(status_code=502,
+                            detail=f"{len(errors)} TTL update(s) failed — check server logs")
     return {"retention_days": d}
 
 
@@ -968,7 +970,9 @@ async def set_syslog_retention(body: RetentionUpdate, _: Principal = Depends(req
         try:
             await _ch_admin(f"ALTER TABLE {table} MODIFY TTL toDateTime({col}) + toIntervalDay({d})")
         except Exception as exc:
-            errors.append(f"{table}: {exc}")
+            errors.append(str(exc))
+            logger.error("clickhouse_ttl_update_failed", table=table, error=str(exc))
     if errors:
-        raise HTTPException(status_code=502, detail="Some TTLs failed to update: " + "; ".join(errors))
+        raise HTTPException(status_code=502,
+                            detail=f"{len(errors)} TTL update(s) failed — check server logs")
     return {"retention_days": d}

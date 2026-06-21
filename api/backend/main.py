@@ -32,12 +32,14 @@ from .configmgmt.rest_state import start_rest_state_collector
 from .configmgmt.api_orchestrator import start_api_probe_loop
 from .configmgmt.eapi_collector import start_eapi_isis_collector
 from .collectors.monitor import start_collector_monitor
+from .housekeeping import start_housekeeping
 from .routers import (admin_router, platform_router, platform_health_router, alerts_router, api_methods_router, audit_router, auth_router,
                       channels_router, bgp_router, clients_router, collectors_router, config_router,
                       credentials_router, devices_router, discovery_router, flow_router,
                       syslog_router, interfaces_router, maintenance_router, overview_router,
                       policies_router, probes_router, path_trace_router, saved_views_router, search_router, topology_router, traps_router, users_router,
-                      licensing_router, dashboards_router, metrics_router)
+                      licensing_router, dashboards_router, metrics_router,
+                      orchestration_router)
 from .routers.topology import start_topology_refresh_loop
 
 configure_logging()
@@ -125,7 +127,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     baseline_task    = start_baseline_task(interval_s=3600)
     probe_task       = start_api_probe_loop(interval_s=300)
     eapi_isis_task   = start_eapi_isis_collector(interval_s=60)
+    housekeeping_task = start_housekeeping()
     yield
+    housekeeping_task.cancel()
     eapi_isis_task.cancel()
     probe_task.cancel()
     engine_task.cancel()
@@ -166,6 +170,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         await probe_task
     except asyncio.CancelledError:
         pass
+    try:
+        await housekeeping_task
+    except asyncio.CancelledError:
+        pass
     from .alerting.evaluators import aclose_http_client
     await aclose_http_client()
     await engine.dispose()
@@ -181,6 +189,7 @@ app = FastAPI(
     openapi_url="/api/openapi.json",
     lifespan=lifespan,
 )
+
 
 # Allow the React dev server. In production, set CORS_ORIGINS env var.
 _cors_origins = _settings.cors_origins if _settings.cors_origins else [
@@ -236,7 +245,7 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 
 @app.get("/health", tags=["meta"], summary="Liveness probe")
 async def health_check() -> dict:
-    return {"status": "ok", "version": __version__}
+    return {"status": "ok"}
 
 
 # ── API v1 routers ─────────────────────────────────────────────────────────────
@@ -274,6 +283,7 @@ app.include_router(saved_views_router, prefix=PREFIX)
 app.include_router(licensing_router,   prefix=PREFIX)
 app.include_router(dashboards_router,  prefix=PREFIX)
 app.include_router(metrics_router,     prefix=PREFIX)
+app.include_router(orchestration_router, prefix=PREFIX)
 
 # Load the license once and mount any licensed feature modules.
 from .licensing import load_license          # noqa: E402

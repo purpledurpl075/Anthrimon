@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 
 interface Article {
   slug: string
@@ -85,6 +86,7 @@ export default function WikiPage() {
 
   useEffect(() => {
     if (!slug) { setContent(null); return }
+    if (!/^[a-zA-Z0-9_-]+$/.test(slug)) { setContent(null); return }
     setLoading(true)
     fetch(`/wiki/${slug}.md`)
       .then(r => r.ok ? r.text() : Promise.reject())
@@ -125,7 +127,7 @@ export default function WikiPage() {
 
   const activeArticle  = articles.find(a => a.slug === slug)
   const activeMeta     = activeArticle ? (CAT_META[activeArticle.category] ?? CAT_META.Reference) : null
-  const renderedHtml   = content ? marked(content) as string : null
+  const renderedHtml   = content ? DOMPurify.sanitize(marked(content) as string) : null
   const toggleCat      = (cat: string) => setOpenCats(prev => ({ ...prev, [cat]: !prev[cat] }))
 
   return (

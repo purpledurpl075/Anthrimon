@@ -452,6 +452,12 @@ func cleanOutput(raw, cmd string) string {
 		}
 	}
 
+	// Strip session-noise words that can leak to the head of the buffer when
+	// the SSH channel drains across command boundaries (e.g. vEOS with ECHO:0).
+	for len(out) > 0 && (out[0] == "exit" || out[0] == "quit" || out[0] == "logout") {
+		out = out[1:]
+	}
+
 	return strings.TrimSpace(strings.Join(out, "\n"))
 }
 

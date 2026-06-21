@@ -12,6 +12,7 @@ import {
 } from '../api/dashboards'
 import { useRole, useCurrentUser, hasRole } from '../hooks/useCurrentUser'
 import { formatAge } from '../components/widgets'
+import { SkeletonCard } from '../components/Skeleton'
 
 function uniqueName(base: string, existing: Dashboard[]): string {
   const names = new Set(existing.map(d => d.name))
@@ -160,7 +161,9 @@ export default function DashboardsListPage() {
 
       <div className="flex-1 overflow-y-auto p-6">
         {isLoading ? (
-          <div className="text-slate-400 text-sm">Loading…</div>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+            {Array.from({ length: 4 }).map((_, i) => <SkeletonCard key={i} h="h-36" />)}
+          </div>
         ) : (
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
             {dashboards.map(d => {

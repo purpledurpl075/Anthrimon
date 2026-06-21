@@ -85,13 +85,17 @@ ask_yn() {
     printf -v "${_var}" '%s' "${_input,,}"
 }
 
+# Escape a string for safe interpolation inside a single-quoted SQL literal.
+# Doubles every single quote: O'Brien → O''Brien
+_sql_esc() { printf "%s" "$1" | sed "s/'/''/g"; }
+
 # ── Preflight ─────────────────────────────────────────────────────────────────
 
 hdr "Preflight"
 [[ $EUID -eq 0 ]] || die "Run with sudo: sudo bash $0"
 
 REAL_USER="${SUDO_USER:-$USER}"
-REAL_HOME=$(eval echo "~${REAL_USER}")
+REAL_HOME=$(getent passwd "${REAL_USER}" | cut -d: -f6)
 info "Installing for user: ${REAL_USER} (home: ${REAL_HOME})"
 
 if ! grep -qE 'Ubuntu (22|24)\.04' /etc/os-release 2>/dev/null; then
@@ -159,6 +163,22 @@ else
     info "Downloading ${GO_ARCHIVE}..."
     TMP_GO=$(mktemp -d)
     curl -fsSL "${GO_URL}" -o "${TMP_GO}/${GO_ARCHIVE}"
+    # Fetch expected sha256 from go.dev's JSON manifest (same TLS channel as download site)
+    _GO_SHA256=$(curl -fsSL "https://go.dev/dl/?mode=json" \
+        | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for v in data:
+    if v.get('version')=='go${GO_VERSION}':
+        for f in v.get('files',[]):
+            if f.get('filename')=='${GO_ARCHIVE}':
+                print(f['sha256']); break
+" 2>/dev/null)
+    if [[ -z "${_GO_SHA256}" ]]; then
+        die "Could not fetch sha256 for ${GO_ARCHIVE} from go.dev — aborting"
+    fi
+    echo "${_GO_SHA256}  ${TMP_GO}/${GO_ARCHIVE}" | sha256sum -c - \
+        || die "Go download checksum mismatch — aborting"
     rm -rf "${GO_INSTALL_DIR}/go"
     tar -C "${GO_INSTALL_DIR}" -xzf "${TMP_GO}/${GO_ARCHIVE}"
     rm -rf "${TMP_GO}"
@@ -219,19 +239,19 @@ ok "PostgreSQL service running"
 
 pg_su() { sudo -u postgres bash -c 'cd /tmp && psql "$@"' -- "$@"; }
 
-if pg_su -tAc "SELECT 1 FROM pg_roles WHERE rolname='${DB_USER}'" 2>/dev/null | grep -q 1; then
+if pg_su -tAc "SELECT 1 FROM pg_roles WHERE rolname='$(_sql_esc "${DB_USER}")'" 2>/dev/null | grep -q 1; then
     ok "Role '${DB_USER}' exists"
 else
     info "Creating role '${DB_USER}'..."
-    pg_su -c "CREATE ROLE ${DB_USER} WITH LOGIN PASSWORD '${DB_PASS}';"
+    pg_su -c "CREATE ROLE \"$(_sql_esc "${DB_USER}")\" WITH LOGIN PASSWORD '$(_sql_esc "${DB_PASS}")';"
     ok "Role created"
 fi
 
-if pg_su -tAc "SELECT 1 FROM pg_database WHERE datname='${DB_NAME}'" 2>/dev/null | grep -q 1; then
+if pg_su -tAc "SELECT 1 FROM pg_database WHERE datname='$(_sql_esc "${DB_NAME}")'" 2>/dev/null | grep -q 1; then
     ok "Database '${DB_NAME}' exists"
 else
     info "Creating database '${DB_NAME}'..."
-    pg_su -c "CREATE DATABASE ${DB_NAME} OWNER ${DB_USER};"
+    pg_su -c "CREATE DATABASE \"$(_sql_esc "${DB_NAME}")\" OWNER \"$(_sql_esc "${DB_USER}")\";"
     ok "Database created"
 fi
 
@@ -251,13 +271,13 @@ for f in "${PG_MIGRATIONS}"/*.sql; do
     [[ -f "$f" ]] || continue
     fname=$(basename "$f")
     if pg_su -d "${DB_NAME}" -tAc \
-        "SELECT 1 FROM schema_migrations WHERE filename='${fname}'" 2>/dev/null | grep -q 1; then
+        "SELECT 1 FROM schema_migrations WHERE filename='$(_sql_esc "${fname}")'" 2>/dev/null | grep -q 1; then
         ok "${fname} — already applied"
     else
         info "Applying ${fname}..."
         pg_su -d "${DB_NAME}" < "$f"
         pg_su -d "${DB_NAME}" -c \
-            "INSERT INTO schema_migrations(filename) VALUES ('${fname}');"
+            "INSERT INTO schema_migrations(filename) VALUES ('$(_sql_esc "${fname}")');"
         ok "${fname} — applied"
     fi
 done
@@ -267,20 +287,20 @@ done
 # migrations — tables created by any migration will be granted here.
 info "Granting database privileges to ${DB_USER}..."
 pg_su -d "${DB_NAME}" -c "
-    GRANT ALL PRIVILEGES ON ALL TABLES    IN SCHEMA public TO ${DB_USER};
-    GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO ${DB_USER};
-    GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO ${DB_USER};
+    GRANT ALL PRIVILEGES ON ALL TABLES    IN SCHEMA public TO \"$(_sql_esc "${DB_USER}")\";
+    GRANT ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public TO \"$(_sql_esc "${DB_USER}")\";
+    GRANT ALL PRIVILEGES ON ALL FUNCTIONS IN SCHEMA public TO \"$(_sql_esc "${DB_USER}")\";
 " 2>/dev/null || true
 
 # Ensure any future objects (created by later migrations or pg_su commands)
 # are also automatically accessible to the app role.
 pg_su -d "${DB_NAME}" -c "
     ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-        GRANT ALL ON TABLES    TO ${DB_USER};
+        GRANT ALL ON TABLES    TO \"$(_sql_esc "${DB_USER}")\";
     ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-        GRANT ALL ON SEQUENCES TO ${DB_USER};
+        GRANT ALL ON SEQUENCES TO \"$(_sql_esc "${DB_USER}")\";
     ALTER DEFAULT PRIVILEGES FOR ROLE postgres IN SCHEMA public
-        GRANT ALL ON FUNCTIONS TO ${DB_USER};
+        GRANT ALL ON FUNCTIONS TO \"$(_sql_esc "${DB_USER}")\";
 " 2>/dev/null || true
 ok "Database privileges granted"
 
@@ -326,7 +346,14 @@ if [[ -x "${VM_INSTALL}" ]]; then
 else
     info "Downloading VictoriaMetrics v${VM_VERSION}..."
     TMP_VM=$(mktemp -d)
+    _VM_SHA256_URL="https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v${VM_VERSION}/${VM_BINARY}.sha256"
+    _VM_SHA256=$(curl -fsSL "${_VM_SHA256_URL}" 2>/dev/null | awk '{print $1}')
+    if [[ -z "${_VM_SHA256}" ]]; then
+        die "Could not fetch sha256 for VictoriaMetrics v${VM_VERSION} — aborting"
+    fi
     curl -fsSL "${VM_URL}" -o "${TMP_VM}/${VM_BINARY}"
+    echo "${_VM_SHA256}  ${TMP_VM}/${VM_BINARY}" | sha256sum -c - \
+        || die "VictoriaMetrics download checksum mismatch — aborting"
     tar -xzf "${TMP_VM}/${VM_BINARY}" -C "${TMP_VM}"
     install -m 755 "${TMP_VM}/victoria-metrics-prod" "${VM_INSTALL}"
     rm -rf "${TMP_VM}"
@@ -588,13 +615,14 @@ else
     if [[ -z "${TENANT_ID}" ]]; then
         warn "No tenant found — cannot provision trap API key (run after first login)"
     else
+        _TOKEN_HASH=$(openssl rand -hex 32)
         pg_su -d "${DB_NAME}" -c "
             INSERT INTO remote_collectors
                 (tenant_id, name, token_hash, api_key_hash, status, capabilities, registered_at)
             VALUES
-                ('${TENANT_ID}', 'hub-trap-receiver',
-                 '$(openssl rand -hex 32)',
-                 '${TRAP_KEY_HASH}',
+                ('$(_sql_esc "${TENANT_ID}")'::uuid, 'hub-trap-receiver',
+                 '$(_sql_esc "${_TOKEN_HASH}")',
+                 '$(_sql_esc "${TRAP_KEY_HASH}")',
                  'online',
                  '[\"traps\"]',
                  NOW())

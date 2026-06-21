@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..dependencies import Principal, get_current_principal, get_db
 from ..models.saved_view import SavedView
 from ..models.tenant import User
-from ..schemas.saved_view import SavedViewCreate, SavedViewRead
+from ..schemas.saved_view import SavedViewCreate, SavedViewRead, SavedViewUpdate
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/saved-views", tags=["saved-views"])
@@ -81,6 +81,46 @@ async def create_saved_view(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"A saved view named '{body.name}' already exists for this page",
         ) from exc
+
+    read = SavedViewRead.model_validate(view)
+    read.owner_name = principal.user.username
+    return read
+
+
+@router.patch("/{view_id}", response_model=SavedViewRead, summary="Update a saved view")
+async def update_saved_view(
+    view_id: uuid.UUID,
+    body: SavedViewUpdate,
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+) -> SavedViewRead:
+    view: Optional[SavedView] = (await db.execute(
+        select(SavedView).where(
+            SavedView.id == view_id,
+            SavedView.tenant_id == principal.active_tenant_id,
+            SavedView.user_id == principal.user.id,
+        )
+    )).scalar_one_or_none()
+    if view is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Saved view not found")
+
+    if body.is_shared is not None and body.is_shared and principal.tenant_role not in _SHARE_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Only operators and tenant admins can share views with the tenant",
+        )
+
+    if body.name is not None:
+        view.name = body.name
+    if body.query is not None:
+        view.query = body.query
+    if body.is_shared is not None:
+        view.is_shared = body.is_shared
+
+    from datetime import datetime, timezone
+    view.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(view)
 
     read = SavedViewRead.model_validate(view)
     read.owner_name = principal.user.username

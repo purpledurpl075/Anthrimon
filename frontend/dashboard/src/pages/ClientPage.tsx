@@ -1,6 +1,7 @@
 import { useParams, Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { fetchClient } from '../api/clients'
+import ErrorState from '../components/ErrorState'
 
 function fmtTime(iso: string) {
   const d = new Date(iso)
@@ -28,7 +29,7 @@ export default function ClientPage() {
   const { mac } = useParams<{ mac: string }>()
   const navigate = useNavigate()
 
-  const { data, isLoading, isError } = useQuery({
+  const { data, isLoading, isError, refetch } = useQuery({
     queryKey: ['client', mac],
     queryFn: () => fetchClient(mac!),
     retry: false,
@@ -47,8 +48,8 @@ export default function ClientPage() {
     return (
       <div className="min-h-screen bg-slate-50 flex items-center justify-center">
         <div className="text-center">
-          <p className="text-slate-500 text-sm mb-3">Client not found in ARP or MAC tables.</p>
-          <button onClick={() => navigate(-1)} className="text-blue-600 text-sm hover:underline">Go back</button>
+          <ErrorState message="Client not found in ARP or MAC tables." onRetry={() => refetch()} />
+          <button onClick={() => navigate(-1)} className="text-blue-600 text-sm hover:underline mt-2">Go back</button>
         </div>
       </div>
     )

@@ -169,6 +169,7 @@ class AlertComment(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("users.id"), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
+    updated_at: Mapped[Optional[datetime]] = mapped_column(nullable=True)
 
 
 class NotificationSendLog(Base):

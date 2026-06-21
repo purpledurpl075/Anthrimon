@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useNavigate, useSearchParams } from 'react-router-dom'
-import { fetchAlerts, acknowledgeAlert, resolveAlert, subscribeAlerts } from '../api/alerts'
+import { fetchAlerts, acknowledgeAlert, resolveAlert, subscribeAlerts, bulkAlertAction, exportAlertsCsv } from '../api/alerts'
 import type { AlertsWsStatus } from '../api/alerts'
 import type { Alert } from '../api/types'
 import { useRole, hasRole } from '../hooks/useCurrentUser'
 import SavedViewsMenu from '../components/SavedViewsMenu'
+import Pagination from '../components/Pagination'
+import { formatAge } from '../utils/time'
 
 const SEVERITY_STYLE: Record<string, string> = {
   critical: 'bg-red-100 text-red-700 border-red-200',
@@ -29,14 +31,6 @@ const STATUS_STYLE: Record<string, string> = {
   resolved:     'text-green-600 bg-green-50',
 }
 
-function timeAgo(iso: string) {
-  const secs = Math.floor((Date.now() - new Date(iso).getTime()) / 1000)
-  if (secs < 60)  return `${secs}s ago`
-  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
-  return `${Math.floor(secs / 86400)}d ago`
-}
-
 export default function AlertsPage() {
   const qc = useQueryClient()
   const navigate = useNavigate()
@@ -46,11 +40,14 @@ export default function AlertsPage() {
   const statusFilter = searchParams.get('status') ?? 'open'
   const severityFilter = searchParams.get('severity') ?? ''
   const showHistory = searchParams.get('history') === '1'
+  const pageOffset = parseInt(searchParams.get('offset') ?? '0', 10) || 0
+  const PAGE_SIZE = 50
 
   const setStatusFilter = (s: string) => {
     setSearchParams(prev => {
       const next = new URLSearchParams(prev)
       if (s === 'open') next.delete('status'); else next.set('status', s)
+      next.delete('offset')
       return next
     })
   }
@@ -58,6 +55,7 @@ export default function AlertsPage() {
     setSearchParams(prev => {
       const next = new URLSearchParams(prev)
       if (s === '') next.delete('severity'); else next.set('severity', s)
+      next.delete('offset')
       return next
     })
   }
@@ -76,15 +74,42 @@ export default function AlertsPage() {
 
   const effectiveStatus = showHistory ? (statusFilter === 'open' ? '' : statusFilter) : statusFilter
 
+  const setPage = (newOffset: number) => {
+    setSearchParams(prev => {
+      const next = new URLSearchParams(prev)
+      if (newOffset === 0) next.delete('offset'); else next.set('offset', String(newOffset))
+      return next
+    })
+  }
+
   const { data } = useQuery({
-    queryKey: ['alerts', effectiveStatus, severityFilter],
+    queryKey: ['alerts', effectiveStatus, severityFilter, pageOffset],
     queryFn: () => fetchAlerts({
       status: effectiveStatus || undefined,
       severity: severityFilter || undefined,
-      limit: 200,
+      limit: PAGE_SIZE,
+      offset: pageOffset,
     }),
-    // WebSocket pushes drive live updates; this poll is just a safety net.
     refetchInterval: 60_000,
+  })
+
+  const [selected, setSelected] = useState<Set<string>>(new Set())
+
+  const toggleSelect = (id: string) => setSelected(s => {
+    const next = new Set(s)
+    if (next.has(id)) next.delete(id); else next.add(id)
+    return next
+  })
+  const clearSelection = () => setSelected(new Set())
+
+  const bulkMut = useMutation({
+    mutationFn: ({ action }: { action: 'acknowledge' | 'resolve' }) =>
+      bulkAlertAction(Array.from(selected), action),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['alerts'] })
+      qc.invalidateQueries({ queryKey: ['alert-count'] })
+      clearSelection()
+    },
   })
 
   const [wsStatus, setWsStatus] = useState<AlertsWsStatus>('connecting')
@@ -135,6 +160,16 @@ export default function AlertsPage() {
           </div>
           <div className="flex items-center gap-2">
             <SavedViewsMenu page="alerts" query={searchParams.toString()} onApply={q => setSearchParams(new URLSearchParams(q))} />
+            <button
+              onClick={() => exportAlertsCsv({ status: effectiveStatus || undefined, severity: severityFilter || undefined })}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border text-slate-500 border-slate-200 hover:border-slate-400 transition-colors"
+              title="Export alerts as CSV"
+            >
+              <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0-3-3m3 3 3-3M3 17V7a2 2 0 0 1 2-2h6l2 2h4a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+              </svg>
+              Export
+            </button>
             <button
               onClick={toggleHistory}
               className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg border transition-colors ${
@@ -196,6 +231,23 @@ export default function AlertsPage() {
             <p className="text-slate-400 text-xs mt-1">No alerts match the current filters.</p>
           </div>
         ) : (
+          <>
+          {canAct && selected.size > 0 && (
+            <div className="flex items-center gap-3 bg-blue-50 border border-blue-200 rounded-xl px-4 py-2.5 mb-2">
+              <span className="text-xs font-semibold text-blue-800">{selected.size} selected</span>
+              <button onClick={clearSelection} className="text-xs text-blue-600 hover:underline">Clear</button>
+              <div className="flex-1" />
+              <button onClick={() => bulkMut.mutate({ action: 'acknowledge' })} disabled={bulkMut.isPending}
+                className="px-2.5 py-1 text-xs font-medium text-amber-700 border border-amber-200 bg-amber-50 rounded-lg hover:bg-amber-100 disabled:opacity-50 transition-colors">
+                Acknowledge all
+              </button>
+              <button onClick={() => bulkMut.mutate({ action: 'resolve' })} disabled={bulkMut.isPending}
+                className="px-2.5 py-1 text-xs font-medium text-green-700 border border-green-200 bg-green-50 rounded-lg hover:bg-green-100 disabled:opacity-50 transition-colors">
+                Resolve all
+              </button>
+            </div>
+          )}
+
           <div className="space-y-1.5">
             {alerts.map((a: Alert) => {
               const sc = SEV_COLOR[a.severity] ?? '#94a3b8'
@@ -207,6 +259,17 @@ export default function AlertsPage() {
                   className="group bg-white border border-slate-200 rounded-xl px-4 py-3.5 cursor-pointer hover:shadow-sm hover:-translate-y-px transition-all duration-150 flex items-center gap-4"
                   style={{ borderLeft: `3px solid ${sc}` }}
                 >
+                  {/* Checkbox */}
+                  {canAct && (a.status === 'open' || a.status === 'acknowledged') && (
+                    <input
+                      type="checkbox"
+                      checked={selected.has(a.id)}
+                      onChange={() => toggleSelect(a.id)}
+                      onClick={e => e.stopPropagation()}
+                      className="w-4 h-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500 shrink-0"
+                    />
+                  )}
+
                   {/* Severity dot */}
                   <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: sc }} />
 
@@ -249,7 +312,7 @@ export default function AlertsPage() {
                         ↓ {a.suppressed_child_count}
                       </span>
                     )}
-                    <span className="text-xs text-slate-400 w-16 text-right">{timeAgo(a.triggered_at)}</span>
+                    <span className="text-xs text-slate-400 w-16 text-right">{formatAge(a.triggered_at)}</span>
                   </div>
 
                   {/* Actions */}
@@ -274,7 +337,9 @@ export default function AlertsPage() {
               )
             })}
           </div>
+          </>
         )}
+        {data && <Pagination total={data.total} limit={PAGE_SIZE} offset={pageOffset} onChange={setPage} />}
       </main>
     </div>
   )

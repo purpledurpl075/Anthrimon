@@ -245,7 +245,21 @@ async def create_device(
     current_user: User = Depends(require_role("admin", "superadmin", "operator")),
     db: AsyncSession = Depends(get_db),
 ) -> DeviceRead:
-    fields = body.model_dump(exclude_none=True, exclude={"mgmt_ip", "credential_id"})
+    from ..licensing import license_info
+    lic = license_info()
+    if lic.valid and lic.max_devices > 0:
+        count = (await db.execute(
+            select(func.count()).select_from(
+                select(Device.id).where(Device.tenant_id == current_user.tenant_id, Device.is_active == True).subquery()
+            )
+        )).scalar_one()
+        if count >= lic.max_devices:
+            raise HTTPException(
+                status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                detail=f"Device limit reached ({lic.max_devices}). Upgrade your license to add more devices.",
+            )
+
+    fields = body.model_dump(exclude_none=True, exclude={"mgmt_ip", "credential_id", "credential_ids"})
     fields.setdefault("hostname", str(body.mgmt_ip))
     if "device_type" not in fields and "vendor" in fields:
         fields.setdefault("device_type", _VENDOR_DEVICE_TYPE.get(fields["vendor"], "unknown"))
@@ -272,51 +286,64 @@ async def create_device(
     db.add(device)
     await db.flush()  # get device.id before probing and linking credential
 
-    # Resolve credential first (needed for both probe and linking).
-    cred = None
-    if body.credential_id:
-        cred = (await db.execute(
+    # Resolve credentials — support both singular credential_id (legacy) and
+    # plural credential_ids (multi-select).  Merge into an ordered list.
+    cred_ids_ordered: list[uuid.UUID] = []
+    if body.credential_ids:
+        cred_ids_ordered = list(body.credential_ids)
+    elif body.credential_id:
+        cred_ids_ordered = [body.credential_id]
+
+    creds: list[Credential] = []
+    if cred_ids_ordered:
+        rows = (await db.execute(
             select(Credential).where(
-                Credential.id == body.credential_id,
+                Credential.id.in_(cred_ids_ordered),
                 Credential.tenant_id == current_user.tenant_id,
             )
-        )).scalar_one_or_none()
-        if cred is None:
-            raise HTTPException(status_code=404, detail="Credential not found")
+        )).scalars().all()
+        cred_map = {c.id: c for c in rows}
+        for cid in cred_ids_ordered:
+            if cid not in cred_map:
+                raise HTTPException(status_code=404, detail=f"Credential {cid} not found")
+            creds.append(cred_map[cid])
 
-    # Probe the device to fill in hostname/vendor/sys_description immediately.
-    # Hub-local: call probe functions directly.
-    # Remote-collector: forward to the collector's /probe control endpoint.
+    # Probe the device using SNMP credentials only.  Non-SNMP creds (SSH, API,
+    # gNMI, NETCONF) are linked to the device but not used for the initial probe.
+    snmp_creds = [c for c in creds if c.type in ("snmp_v2c", "snmp_v3")]
     probed_data: dict | None = None
     probe_attempted = False
+    working_cred: Credential | None = None
     ip   = str(body.mgmt_ip)
     port = body.snmp_port or 161
 
     if not body.collector_id:
-        # Hub can reach the device directly.
         probe_attempted = True
-        result = None
-        if cred is not None and cred.type == "snmp_v3":
-            result = await probe_v3(ip, cred.data, port, timeout=3)
-        elif cred is not None and cred.type == "snmp_v2c":
-            result = await probe_v2c(ip, cred.data.get("community", "public"), port, timeout=3)
-        else:
-            result = await probe_v2c(ip, "public", port, timeout=3)
-        if result:
-            probed_data = {
-                "hostname": result.hostname,
-                "vendor":   result.vendor,
-                "sys_descr": result.sys_descr,
-            }
+        probe_list = snmp_creds if snmp_creds else [None]
+        for c in probe_list:
+            result = None
+            if c is not None and c.type == "snmp_v3":
+                result = await probe_v3(ip, c.data, port, timeout=3)
+            elif c is not None and c.type == "snmp_v2c":
+                result = await probe_v2c(ip, c.data.get("community", "public"), port, timeout=3)
+            else:
+                result = await probe_v2c(ip, "public", port, timeout=3)
+            if result:
+                probed_data = {
+                    "hostname": result.hostname,
+                    "vendor":   result.vendor,
+                    "sys_descr": result.sys_descr,
+                }
+                working_cred = c
+                break
     else:
-        # Route probe through the remote collector (_collector already validated above).
         col = _collector
         if col and col.wg_ip:
             wg_ip = str(col.wg_ip).split("/")[0]
             import ipaddress as _ip
             if _ip.ip_address(wg_ip) in _ip.ip_network("10.100.0.0/24"):
                 probe_attempted = True
-                cred_specs = [_cred_to_spec(cred)] if cred else []
+                cred_specs = [_cred_to_spec(c) for c in snmp_creds] if snmp_creds else []
                 try:
                     async with httpx.AsyncClient(timeout=max(3 * len(cred_specs) + 2, 10)) as hc:
                         resp = await hc.post(
@@ -326,6 +353,8 @@ async def create_device(
                         )
                     if resp.status_code == 200:
                         probed_data = resp.json()
+                        if creds:
+                            working_cred = creds[0]
                 except Exception:
                     pass
 
@@ -346,15 +375,19 @@ async def create_device(
         if probed_data.get("sys_descr"):
             device.sys_description = probed_data["sys_descr"]
 
-    # Sync snmp_version from the linked credential's type so the device detail
-    # header displays the correct protocol version rather than always defaulting to v2c.
-    if cred is not None and cred.type == "snmp_v3":
+    # Sync snmp_version from the working credential.
+    if working_cred is not None and working_cred.type == "snmp_v3":
         device.snmp_version = "v3"
-    elif cred is not None and cred.type == "snmp_v2c":
+    elif working_cred is not None and working_cred.type == "snmp_v2c":
         device.snmp_version = "v2c"
 
-    if cred is not None:
-        db.add(DeviceCredential(device_id=device.id, credential_id=body.credential_id, priority=0))
+    # Link all selected credentials with priority ordering.
+    # The credential that succeeded the probe gets priority 0.
+    if creds:
+        working_id = working_cred.id if working_cred else None
+        ordered = sorted(creds, key=lambda c: (0 if c.id == working_id else 1))
+        for pri, c in enumerate(ordered):
+            db.add(DeviceCredential(device_id=device.id, credential_id=c.id, priority=pri))
 
     await db.commit()
     await db.refresh(device)
@@ -398,6 +431,51 @@ async def baselines_status(
             for r in rows
         ]
     }
+
+
+# ── CSV Export (must be before /{device_id} to avoid path-param shadowing) ────
+
+@router.get("/export.csv", summary="Export devices as CSV")
+async def export_devices_csv(
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+):
+    import csv
+    import io
+    from datetime import datetime, timezone
+    from fastapi.responses import Response
+
+    devices = (await db.execute(
+        select(Device)
+        .where(Device.id.in_(accessible_device_ids_subquery(principal)), Device.is_active == True)
+        .order_by(Device.hostname)
+    )).scalars().all()
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Hostname", "FQDN", "Management IP", "Vendor", "Type", "Status",
+                "Platform", "OS Version", "Serial", "Last Seen", "Tags"])
+    for d in devices:
+        w.writerow([
+            d.hostname,
+            d.fqdn or "",
+            str(d.mgmt_ip).split("/")[0],
+            d.vendor,
+            d.device_type,
+            d.status,
+            d.platform or "",
+            d.os_version or "",
+            d.serial_number or "",
+            d.last_seen.isoformat() if d.last_seen else "",
+            ",".join(d.tags or []),
+        ])
+
+    fname = f"anthrimon-devices-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
 
 
 # ── Sites (must be before /{device_id} to avoid path-param shadowing) ───────────

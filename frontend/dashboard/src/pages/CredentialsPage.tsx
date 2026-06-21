@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { fetchCredentials, createCredential, updateCredential, deleteCredential, type Credential } from '../api/credentials'
 import { useRole, hasRole } from '../hooks/useCurrentUser'
+import { SkeletonTable } from '../components/Skeleton'
 
 // ── Type metadata ──────────────────────────────────────────────────────────────
 
@@ -334,7 +335,7 @@ export default function CredentialsPage() {
 
       <div className="p-6">
         {isLoading ? (
-          <div className="text-slate-400 text-sm">Loading…</div>
+          <SkeletonTable rows={4} cols={4} />
         ) : creds.length === 0 ? (
           <div className="bg-white rounded-xl border border-slate-200 p-10 text-center">
             <p className="text-slate-400 text-sm mb-3">No credentials yet.</p>

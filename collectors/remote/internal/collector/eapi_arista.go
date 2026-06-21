@@ -14,7 +14,6 @@ package collector
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +27,7 @@ import (
 	zlog "github.com/rs/zerolog/log"
 
 	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/hub"
+	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/httpstofu"
 )
 
 var eapiLog = zlog.Logger.With().Str("subsystem", "arista_eapi").Logger()
@@ -188,7 +188,7 @@ func (c *AristaEAPICollector) collectCounters(ctx context.Context) {
 		password, _ := cred.Data["password"].(string)
 
 		results, err := eapiCall(ctx, dev.MgmtIP, username, password,
-			[]string{"show spanning-tree", "show ip route vrf all"})
+			[]string{"show spanning-tree", "show ip route vrf all", "show ipv6 route vrf all"})
 		if err != nil {
 			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("arista counter collection failed")
 			continue
@@ -206,10 +206,13 @@ func (c *AristaEAPICollector) collectCounters(ctx context.Context) {
 			}
 		}
 
-		// Route table (result[1]) — always posted even when empty so the hub
-		// can prune previously-reported routes for a device whose table is empty.
+		// Route table (result[1] = IPv4, result[2] = IPv6) — always posted
+		// even when empty so the hub can prune stale entries.
 		if len(results) > 1 {
 			routes := parseAristaRoutes(dev.ID, results[1])
+			if len(results) > 2 {
+				routes = append(routes, parseAristaRoutes(dev.ID, results[2])...)
+			}
 			if err := c.hubClient.PostRoutes(ctx, dev.ID, routes); err != nil {
 				c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("routes post to hub failed")
 			} else {
@@ -221,15 +224,17 @@ func (c *AristaEAPICollector) collectCounters(ctx context.Context) {
 
 // ── eAPI HTTP client ──────────────────────────────────────────────────────────
 
-var eapiHTTP = &http.Client{
-	Timeout: 15 * time.Second,
-	Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{
-			InsecureSkipVerify: true, //nolint:gosec — enterprise self-signed certs
+// eapiClientFor returns a per-host HTTP client with TOFU certificate pinning.
+// Each host gets its own TLS config so the TOFU fingerprint is scoped correctly.
+func eapiClientFor(host string) *http.Client {
+	return &http.Client{
+		Timeout: 15 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig:     httpstofu.PinningConfig(host + ":443"),
+			MaxIdleConnsPerHost: 2,
+			IdleConnTimeout:     30 * time.Second,
 		},
-		MaxIdleConnsPerHost: 2,
-		IdleConnTimeout:     30 * time.Second,
-	},
+	}
 }
 
 func eapiCall(ctx context.Context, host, username, password string, cmds []string) ([]map[string]any, error) {
@@ -245,8 +250,10 @@ func eapiCall(ctx context.Context, host, username, password string, cmds []strin
 	}
 	body, _ := json.Marshal(payload)
 
+	client := eapiClientFor(host)
+
 	// Always try HTTPS first, fall back to HTTP — matches hub-side Python behavior.
-	// TLS verification is skipped (InsecureSkipVerify) so self-signed certs work.
+	// TLS uses TOFU pinning: cert fingerprint learned on first contact, pinned thereafter.
 	for _, scheme := range []string{"https", "http"} {
 		url := fmt.Sprintf("%s://%s/command-api", scheme, host)
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -256,7 +263,7 @@ func eapiCall(ctx context.Context, host, username, password string, cmds []strin
 		req.Header.Set("Content-Type", "application/json")
 		req.SetBasicAuth(username, password)
 
-		resp, err := eapiHTTP.Do(req)
+		resp, err := client.Do(req)
 		if err != nil {
 			eapiLog.Debug().Err(err).Str("scheme", scheme).Str("host", host).Msg("eapi do failed")
 			continue

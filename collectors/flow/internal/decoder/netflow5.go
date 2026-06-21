@@ -36,7 +36,7 @@ func ParseNetFlow5(pkt []byte, exporterIP net.IP) ([]model.FlowRecord, error) {
 	// engineID   := pkt[21]
 	samplingInterval := binary.BigEndian.Uint16(pkt[22:24])
 	samplingRate := uint32(samplingInterval & 0x3FFF)
-	if samplingRate == 0 {
+	if samplingRate == 0 || samplingRate > 1000000 {
 		samplingRate = 1
 	}
 

@@ -29,6 +29,7 @@ from .saved_views import router as saved_views_router
 from .licensing import router as licensing_router
 from .dashboards import router as dashboards_router
 from .metrics import router as metrics_router
+from .orchestration import router as orchestration_router
 
 __all__ = ["admin_router", "platform_router", "auth_router", "bgp_router", "collectors_router", "config_router",
            "flow_router", "syslog_router", "topology_router", "channels_router",
@@ -37,4 +38,5 @@ __all__ = ["admin_router", "platform_router", "auth_router", "bgp_router", "coll
            "overview_router", "policies_router", "users_router", "api_methods_router",
            "clients_router", "search_router", "traps_router", "audit_router",
            "platform_health_router", "probes_router", "path_trace_router",
-           "saved_views_router", "licensing_router", "dashboards_router", "metrics_router"]
+           "saved_views_router", "licensing_router", "dashboards_router", "metrics_router",
+           "orchestration_router"]

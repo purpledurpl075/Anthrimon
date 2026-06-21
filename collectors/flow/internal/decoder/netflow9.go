@@ -44,6 +44,8 @@ const (
 
 // ---- Template cache ---------------------------------------------------------
 
+const maxTemplates = 10000
+
 // FieldDef describes one field within a NetFlow v9 / IPFIX template.
 type FieldDef struct {
 	TypeID uint16
@@ -64,25 +66,61 @@ type templateKey struct {
 type TemplateCache struct {
 	mu        sync.RWMutex
 	templates map[templateKey][]FieldDef
+	lastSeen  map[templateKey]time.Time
 }
 
 // NewTemplateCache constructs an empty TemplateCache.
 func NewTemplateCache() *TemplateCache {
 	return &TemplateCache{
 		templates: make(map[templateKey][]FieldDef),
+		lastSeen:  make(map[templateKey]time.Time),
 	}
 }
 
 func (tc *TemplateCache) store(key templateKey, fields []FieldDef) {
 	tc.mu.Lock()
 	tc.templates[key] = fields
+	tc.lastSeen[key] = time.Now()
+	if len(tc.templates) > maxTemplates {
+		tc.evictOldest()
+	}
 	tc.mu.Unlock()
+}
+
+// evictOldest removes the oldest 20% of templates. Must be called with mu held.
+func (tc *TemplateCache) evictOldest() {
+	toEvict := len(tc.templates) / 5
+	if toEvict == 0 {
+		toEvict = 1
+	}
+	for i := 0; i < toEvict; i++ {
+		var oldestKey templateKey
+		var oldestTime time.Time
+		first := true
+		for k, t := range tc.lastSeen {
+			if first || t.Before(oldestTime) {
+				oldestKey = k
+				oldestTime = t
+				first = false
+			}
+		}
+		if first {
+			break
+		}
+		delete(tc.templates, oldestKey)
+		delete(tc.lastSeen, oldestKey)
+	}
 }
 
 func (tc *TemplateCache) load(key templateKey) ([]FieldDef, bool) {
 	tc.mu.RLock()
 	f, ok := tc.templates[key]
 	tc.mu.RUnlock()
+	if ok {
+		tc.mu.Lock()
+		tc.lastSeen[key] = time.Now()
+		tc.mu.Unlock()
+	}
 	return f, ok
 }
 

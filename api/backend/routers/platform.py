@@ -57,6 +57,11 @@ class PlatformGlobalSettingsWrite(PlatformGlobalSettingsRead):
     pass
 
 
+# Explicit set of keys that may be written via the platform settings API.
+# Must stay in sync with PlatformGlobalSettingsRead fields.
+_ALLOWED_PLATFORM_KEYS: frozenset[str] = frozenset(PlatformGlobalSettingsRead.model_fields.keys())
+
+
 @router.get("/settings", response_model=PlatformGlobalSettingsRead,
             summary="Get platform-wide setting defaults")
 async def get_platform_global_settings(
@@ -76,6 +81,8 @@ async def update_platform_global_settings(
 ) -> PlatformGlobalSettingsRead:
     updates = body.model_dump()
     for key, val in updates.items():
+        if key not in _ALLOWED_PLATFORM_KEYS:
+            continue
         row = (await db.execute(
             select(PlatformSetting).where(PlatformSetting.key == key)
         )).scalar_one_or_none()
@@ -362,6 +369,8 @@ async def update_platform_user(
         user.role = body.role
     if body.is_active is not None:
         user.is_active = body.is_active
+        if not body.is_active:
+            user.token_generation += 1
     if body.email is not None:
         user.email = body.email
     if body.full_name is not None:
@@ -407,6 +416,7 @@ async def reset_platform_user_password(
     if len(body.new_password) < 8:
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
     user.password_hash = _hash(body.new_password)
+    user.token_generation += 1
     await db.commit()
     logger.info("platform_password_reset", user_id=str(user_id))
     return Response(status_code=204)

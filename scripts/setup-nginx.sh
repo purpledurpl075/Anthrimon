@@ -22,6 +22,12 @@ server {
     listen 80 default_server;
     server_name _;
 
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+    add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws:; font-src 'self'" always;
+
     root /home/poly/Anthri-mon/frontend/dashboard/dist;
     index index.html;
 

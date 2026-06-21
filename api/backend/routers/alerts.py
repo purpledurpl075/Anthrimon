@@ -18,14 +18,47 @@ from ..dependencies import (
 )
 from ..models.alert import Alert, AlertComment, AlertRule
 from ..models.tenant import User
-from ..schemas.alert import AlertRead, AlertRuleCreate, AlertRuleRead, AlertRuleUpdate, SuppressedChildSummary
+from ..schemas.alert import AlertRead, AlertRuleCreate, AlertRuleRead, AlertRuleUpdate, SuppressedChildSummary, AlertBulkRequest
 from ..schemas.common import PaginatedResponse
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(tags=["alerts"])
 
 
+def _validate_alert_rule_body(body) -> None:
+    """Raise 422 if metric-specific config is invalid."""
+    import json as _json
+    import re as _re
+    metric = getattr(body, "metric", None) or ""
+    if metric == "syslog_match":
+        raw_oid = getattr(body, "custom_oid", None) or ""
+        # custom_oid is stored as a JSON string: '{"pattern": "OSPF.*down"}'
+        try:
+            custom = _json.loads(raw_oid) if raw_oid else {}
+        except _json.JSONDecodeError:
+            raise HTTPException(
+                status_code=422,
+                detail="custom_oid must be a JSON object, e.g. {\"pattern\": \"OSPF.*down\"}",
+            )
+        pattern = (custom.get("pattern") or "").strip() if isinstance(custom, dict) else ""
+        if not pattern:
+            raise HTTPException(
+                status_code=422,
+                detail="syslog_match rules require custom_oid.pattern (regex string)",
+            )
+        try:
+            _re.compile(pattern)
+        except _re.error as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Invalid regex pattern in custom_oid.pattern: {exc}",
+            )
+
+
 # ── Alerts ─────────────────────────────────────────────────────────────────────
+
+_VALID_ALERT_STATUSES = {"open", "acknowledged", "resolved", "suppressed", "expired"}
+
 
 @router.get("/alerts", response_model=PaginatedResponse[AlertRead], summary="List alerts")
 async def list_alerts(
@@ -37,6 +70,12 @@ async def list_alerts(
     principal: Principal = Depends(get_current_principal),
     db: AsyncSession = Depends(get_db),
 ) -> PaginatedResponse[AlertRead]:
+    if alert_status and alert_status not in _VALID_ALERT_STATUSES:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"Invalid status '{alert_status}'. Valid values: {sorted(_VALID_ALERT_STATUSES)}",
+        )
+
     q = select(Alert).where(
         Alert.tenant_id == principal.active_tenant_id,
         or_(Alert.device_id.is_(None), Alert.device_id.in_(accessible_device_ids_subquery(principal))),
@@ -200,6 +239,102 @@ async def resolve_alert(
     return AlertRead.model_validate(alert)
 
 
+# ── Bulk operations ───────────────────────────────────────────────────────────
+
+@router.post("/alerts/bulk", summary="Bulk acknowledge or resolve alerts")
+async def bulk_alert_action(
+    body: AlertBulkRequest,
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    if not principal.is_platform_admin and not _has_tenant_role(principal, "operator"):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Requires operator access")
+
+    alerts = (await db.execute(
+        select(Alert).where(
+            Alert.id.in_(body.alert_ids),
+            Alert.tenant_id == principal.active_tenant_id,
+        )
+    )).scalars().all()
+
+    now = datetime.now(timezone.utc)
+    updated = 0
+    for alert in alerts:
+        if body.action.value == "acknowledge" and alert.status == "open":
+            alert.status = "acknowledged"
+            alert.acknowledged_at = now
+            alert.acknowledged_by = principal.user.id
+            updated += 1
+        elif body.action.value == "resolve" and alert.status in ("open", "acknowledged"):
+            alert.status = "resolved"
+            alert.resolved_at = now
+            alert.resolved_by = principal.user.id
+            updated += 1
+
+    await db.commit()
+    await alert_ws_manager.broadcast(principal.active_tenant_id, {"event": "alerts_changed"})
+    logger.info("bulk_alert_action", action=body.action.value, requested=len(body.alert_ids), updated=updated)
+    return {"updated": updated}
+
+
+# ── CSV Export ────────────────────────────────────────────────────────────────
+
+@router.get("/alerts/export.csv", summary="Export alerts as CSV")
+async def export_alerts_csv(
+    alert_status: Optional[str] = Query(default=None, alias="status"),
+    severity: Optional[str] = Query(default=None),
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+):
+    import csv
+    import io
+    from fastapi.responses import Response
+
+    q = select(Alert).where(
+        Alert.tenant_id == principal.active_tenant_id,
+        or_(Alert.device_id.is_(None), Alert.device_id.in_(accessible_device_ids_subquery(principal))),
+    )
+    if alert_status:
+        q = q.where(Alert.status == alert_status)
+    if severity:
+        q = q.where(Alert.severity == severity)
+    q = q.order_by(Alert.triggered_at.desc()).limit(50_000)
+
+    alerts = (await db.execute(q)).scalars().all()
+
+    device_ids = {a.device_id for a in alerts if a.device_id}
+    device_names: dict[uuid.UUID, str] = {}
+    if device_ids:
+        from ..models.device import Device
+        rows = (await db.execute(
+            select(Device.id, Device.hostname).where(Device.id.in_(device_ids))
+        )).all()
+        device_names = {r.id: r.hostname for r in rows}
+
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["Triggered", "Severity", "Status", "Title", "Device", "Message",
+                "Acknowledged At", "Resolved At"])
+    for a in alerts:
+        w.writerow([
+            a.triggered_at.isoformat() if a.triggered_at else "",
+            a.severity,
+            a.status,
+            a.title or "",
+            device_names.get(a.device_id, "") if a.device_id else "",
+            a.message or "",
+            a.acknowledged_at.isoformat() if a.acknowledged_at else "",
+            a.resolved_at.isoformat() if a.resolved_at else "",
+        ])
+
+    fname = f"anthrimon-alerts-{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.csv"
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+    )
+
+
 # ── Alert Rules ────────────────────────────────────────────────────────────────
 
 @router.get("/alert-rules", response_model=PaginatedResponse[AlertRuleRead], summary="List alert rules")
@@ -230,6 +365,7 @@ async def create_alert_rule(
     current_user: User = Depends(require_role("admin", "superadmin")),
     db: AsyncSession = Depends(get_db),
 ) -> AlertRuleRead:
+    _validate_alert_rule_body(body)
     rule = AlertRule(
         tenant_id=current_user.tenant_id,
         **body.model_dump(mode='json', exclude_none=True),
@@ -265,6 +401,7 @@ async def update_alert_rule(
     current_user: User = Depends(require_role("admin", "superadmin")),
     db: AsyncSession = Depends(get_db),
 ) -> AlertRuleRead:
+    _validate_alert_rule_body(body)
     rule = await _get_rule(rule_id, current_user.tenant_id, db)
     before = {"name": rule.name, "metric": rule.metric, "severity": rule.severity,
               "threshold": rule.threshold, "is_enabled": rule.is_enabled}
@@ -322,7 +459,9 @@ async def list_comments(
             "id":         str(c.id),
             "body":       c.body,
             "author":     u.username,
+            "user_id":    str(c.user_id),
             "created_at": c.created_at.isoformat(),
+            "updated_at": c.updated_at.isoformat() if c.updated_at else None,
         }
         for c, u in rows
     ]
@@ -359,7 +498,74 @@ async def add_comment(
         "body":       comment.body,
         "author":     current_user.username,
         "created_at": comment.created_at.isoformat(),
+        "updated_at": None,
     }
+
+
+@router.patch("/alerts/{alert_id}/comments/{comment_id}",
+              summary="Edit a comment on an alert")
+async def edit_comment(
+    alert_id: uuid.UUID,
+    comment_id: uuid.UUID,
+    body: dict,
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    new_text = (body.get("body") or "").strip()
+    if not new_text:
+        raise HTTPException(status_code=400, detail="Comment body cannot be empty")
+    alert = await _get_alert(alert_id, principal, db)
+    comment = (await db.execute(
+        select(AlertComment).where(
+            AlertComment.id == comment_id,
+            AlertComment.alert_id == alert_id,
+            AlertComment.tenant_id == principal.active_tenant_id,
+        )
+    )).scalar_one_or_none()
+    if comment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found")
+    if comment.user_id != principal.user.id and not principal.is_platform_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Can only edit your own comments")
+    comment.body = new_text
+    comment.updated_at = datetime.now(timezone.utc)
+    await db.commit()
+    await db.refresh(comment)
+    author = (await db.execute(
+        select(User.username).where(User.id == comment.user_id)
+    )).scalar_one()
+    return {
+        "id":         str(comment.id),
+        "body":       comment.body,
+        "author":     author,
+        "created_at": comment.created_at.isoformat(),
+        "updated_at": comment.updated_at.isoformat() if comment.updated_at else None,
+    }
+
+
+@router.delete("/alerts/{alert_id}/comments/{comment_id}",
+               status_code=status.HTTP_204_NO_CONTENT,
+               response_model=None,
+               summary="Delete a comment on an alert")
+async def delete_comment(
+    alert_id: uuid.UUID,
+    comment_id: uuid.UUID,
+    principal: Principal = Depends(get_current_principal),
+    db: AsyncSession = Depends(get_db),
+) -> None:
+    await _get_alert(alert_id, principal, db)
+    comment = (await db.execute(
+        select(AlertComment).where(
+            AlertComment.id == comment_id,
+            AlertComment.alert_id == alert_id,
+            AlertComment.tenant_id == principal.active_tenant_id,
+        )
+    )).scalar_one_or_none()
+    if comment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Comment not found")
+    if comment.user_id != principal.user.id and not principal.is_platform_admin:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Can only delete your own comments")
+    await db.delete(comment)
+    await db.commit()
 
 
 # ── Internal helpers ───────────────────────────────────────────────────────────

@@ -3,6 +3,7 @@ import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
 import { fetchAllAddresses, fetchDevices } from '../api/devices'
 import { macToUrl } from '../api/clients'
+import { SkeletonTable } from '../components/Skeleton'
 
 export default function AddressesPage() {
   const [search, setSearch]         = useState('')
@@ -85,7 +86,7 @@ export default function AddressesPage() {
       <div className="p-6">
         <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
           {isLoading ? (
-            <div className="p-10 text-center text-slate-400 text-sm">Loading…</div>
+            <div className="p-4"><SkeletonTable rows={8} cols={5} /></div>
           ) : items.length === 0 ? (
             <div className="p-10 text-center">
               <p className="text-slate-400 text-sm">

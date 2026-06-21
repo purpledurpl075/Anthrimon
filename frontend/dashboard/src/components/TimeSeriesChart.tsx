@@ -23,13 +23,14 @@ interface Props {
   height?: number
   yFmt?:   (v: number) => string
   empty?:  string
+  live?:   boolean
 }
 
 // ── Chart ──────────────────────────────────────────────────────────────────
 
 const M = { top: 10, right: 16, bottom: 28, left: 56 }
 
-export default function TimeSeriesChart({ series, height = 180, yFmt = String, empty = 'No data' }: Props) {
+export default function TimeSeriesChart({ series, height = 180, yFmt = String, empty = 'No data', live = false }: Props) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [w, setW]       = useState(700)
   const [hoverI, setHI] = useState<number | null>(null)
@@ -64,7 +65,8 @@ export default function TimeSeriesChart({ series, height = 180, yFmt = String, e
   const xTicks  = 5
   const refData = series.find(s => s.data.length > 0)?.data ?? []
 
-  const linePts  = (data: [number, number][]) => data.map(([t, v]) => `${sx(t)},${sy(v)}`).join(' ')
+  const linePts  = (data: [number, number][]) =>
+    data.length < 2 ? '' : data.map(([t, v]) => `${sx(t)},${sy(v)}`).join(' ')
   const areaPath = (data: [number, number][]) => {
     if (data.length < 2) return ''
     const line = data.map(([t, v]) => `${sx(t)},${sy(v)}`).join(' L ')
@@ -74,7 +76,7 @@ export default function TimeSeriesChart({ series, height = 180, yFmt = String, e
   const onMouseMove = (e: React.MouseEvent<SVGSVGElement>) => {
     const rect = e.currentTarget.getBoundingClientRect()
     const mx   = e.clientX - rect.left - M.left
-    if (mx < 0 || mx > iW) { setHI(null); return }
+    if (mx < 0 || mx > iW || refData.length === 0) { setHI(null); return }
     const t = minT + (mx / iW) * rangeT
     let ni = 0, minD = Infinity
     refData.forEach(([pt], idx) => {
@@ -104,9 +106,11 @@ export default function TimeSeriesChart({ series, height = 180, yFmt = String, e
           const frac    = i / (xTicks - 1)
           const t       = minT + frac * rangeT
           const secsAgo = maxT - t
-          const label   = i === xTicks - 1 ? 'now'
-            : secsAgo >= 3600 ? `${Math.round(secsAgo / 3600)}h`
-            : `${Math.round(secsAgo / 60)}m`
+          const label   = live
+            ? (i === xTicks - 1 ? 'now' : `-${Math.round(secsAgo)}s`)
+            : (i === xTicks - 1 ? 'now'
+              : secsAgo >= 3600 ? `${Math.round(secsAgo / 3600)}h`
+              : `${Math.round(secsAgo / 60)}m`)
           return (
             <text key={i} x={sx(t)} y={height - 6} textAnchor="middle" fontSize={10} fill="#94a3b8">
               {label}

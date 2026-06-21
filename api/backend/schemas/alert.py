@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -196,3 +197,17 @@ class AlertPolicyRead(BaseModel):
     device_selector: Optional[dict] = None
     created_at: datetime
     updated_at: datetime
+
+
+class AlertBulkAction(str, Enum):
+    acknowledge = "acknowledge"
+    resolve = "resolve"
+
+
+class AlertBulkRequest(BaseModel):
+    alert_ids: list[uuid.UUID] = Field(min_length=1, max_length=500)
+    action: AlertBulkAction
+
+
+class AlertBulkResponse(BaseModel):
+    updated: int

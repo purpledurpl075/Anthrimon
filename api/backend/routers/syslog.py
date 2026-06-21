@@ -61,7 +61,8 @@ async def _ch(query: str) -> list[dict]:
 
 
 def _device_filter(device_ids: list[str]) -> str:
-    ids = ", ".join(f"toUUID('{d}')" for d in device_ids)
+    import uuid as _uuid
+    ids = ", ".join(f"toUUID('{_uuid.UUID(d)}')" for d in device_ids)
     return f"device_id IN ({ids})"
 
 

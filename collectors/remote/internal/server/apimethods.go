@@ -1,10 +1,11 @@
 package server
 
 import (
-	"crypto/tls"
 	"encoding/json"
 	"net/http"
 	"time"
+
+	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/httpstofu"
 )
 
 // ── /api-probe ────────────────────────────────────────────────────────────────
@@ -79,16 +80,16 @@ func (s *Server) handleAPIProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-		},
-	}
-
 	var lastErr string
 	for _, tmpl := range urls {
 		target := replaceIP(tmpl, req.IP)
+		hostPort := req.IP + ":443"
+		client := &http.Client{
+			Timeout: 5 * time.Second,
+			Transport: &http.Transport{
+				TLSClientConfig: httpstofu.PinningConfig(hostPort),
+			},
+		}
 		resp, err := client.Get(target)
 		if err == nil {
 			resp.Body.Close()

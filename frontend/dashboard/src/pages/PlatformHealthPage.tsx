@@ -5,6 +5,7 @@ import {
   uploadBackup, deleteUploadedBackup, fetchUploadedBackups,
   type UploadedBackup,
 } from '../api/platformHealth'
+import ErrorState from '../components/ErrorState'
 
 function fmtBytes(n: number): string {
   if (n < 1024) return `${n} B`
@@ -232,6 +233,7 @@ function UploadBackupButton() {
           </button>
           <button
             onClick={() => setSuccess(null)}
+            aria-label="Dismiss notification"
             className="absolute top-2 right-2 text-slate-300 hover:text-slate-500"
           >×</button>
         </div>
@@ -343,14 +345,14 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 export default function PlatformHealthPage() {
-  const { data, isLoading, error } = useQuery({
+  const { data, isLoading, error, refetch } = useQuery({
     queryKey:        ['platform-health'],
     queryFn:         fetchPlatformHealth,
     refetchInterval: 5_000,
   })
 
   if (isLoading) return <div className="p-6 text-sm text-slate-400">Loading platform health…</div>
-  if (error)     return <div className="p-6 text-sm text-red-500">Failed to load: {(error as Error).message}</div>
+  if (error)     return <ErrorState message={`Failed to load: ${(error as Error).message}`} onRetry={() => refetch()} />
   if (!data)     return null
 
   const reqP95Ms = data.api.request_duration.p95 * 1000

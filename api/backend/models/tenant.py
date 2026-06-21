@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import ARRAY, CITEXT, ENUM, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -48,6 +48,12 @@ class User(Base):
     is_platform_admin: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     platform_role: Mapped[Optional[str]] = mapped_column(Text)  # 'platform_admin' | 'platform_support' | None
     last_login: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    # TOTP two-factor authentication (migration 054_totp.sql)
+    totp_secret:       Mapped[Optional[str]]       = mapped_column(Text)
+    totp_enabled:      Mapped[bool]                = mapped_column(Boolean, nullable=False,
+                                                       server_default="false", default=False)
+    totp_backup_codes: Mapped[Optional[list[str]]] = mapped_column(ARRAY(Text))
+    token_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     created_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(nullable=False, server_default=func.now())
 
