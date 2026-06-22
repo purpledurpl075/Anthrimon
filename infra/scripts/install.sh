@@ -5,7 +5,7 @@
 #
 # What this script does:
 #   1.  Installs system packages (nginx, wireguard-tools, build tools, etc.)
-#   2.  Installs Go 1.22.3
+#   2.  Installs Go 1.26.4
 #   3.  Installs Node.js 20.x (via NodeSource)
 #   4.  Installs Python virtualenv + API requirements
 #   5.  Installs PostgreSQL 14, creates role/database
@@ -30,7 +30,7 @@ set -euo pipefail
 
 # ── Fixed constants ───────────────────────────────────────────────────────────
 
-GO_VERSION="1.22.3"
+GO_VERSION="1.26.4"
 GO_ARCHIVE="go${GO_VERSION}.linux-amd64.tar.gz"
 GO_URL="https://go.dev/dl/${GO_ARCHIVE}"
 GO_INSTALL_DIR="/usr/local"
@@ -164,16 +164,19 @@ else
     TMP_GO=$(mktemp -d)
     curl -fsSL "${GO_URL}" -o "${TMP_GO}/${GO_ARCHIVE}"
     # Fetch expected sha256 from go.dev's JSON manifest (same TLS channel as download site)
-    _GO_SHA256=$(curl -fsSL "https://go.dev/dl/?mode=json" \
-        | python3 -c "
+    _GO_SHA_SCRIPT='
 import json,sys
 data=json.load(sys.stdin)
 for v in data:
-    if v.get('version')=='go${GO_VERSION}':
-        for f in v.get('files',[]):
-            if f.get('filename')=='${GO_ARCHIVE}':
-                print(f['sha256']); break
-" 2>/dev/null)
+    if v.get("version")=="go'"${GO_VERSION}"'":
+        for f in v.get("files",[]):
+            if f.get("filename")=="'"${GO_ARCHIVE}"'":
+                print(f["sha256"]); break
+'
+    _GO_SHA256=$(curl -fsSL "https://go.dev/dl/?mode=json" | python3 -c "${_GO_SHA_SCRIPT}" 2>/dev/null)
+    if [[ -z "${_GO_SHA256}" ]]; then
+        _GO_SHA256=$(curl -fsSL "https://go.dev/dl/?mode=json&include=all" | python3 -c "${_GO_SHA_SCRIPT}" 2>/dev/null)
+    fi
     if [[ -z "${_GO_SHA256}" ]]; then
         die "Could not fetch sha256 for ${GO_ARCHIVE} from go.dev — aborting"
     fi
@@ -346,8 +349,8 @@ if [[ -x "${VM_INSTALL}" ]]; then
 else
     info "Downloading VictoriaMetrics v${VM_VERSION}..."
     TMP_VM=$(mktemp -d)
-    _VM_SHA256_URL="https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v${VM_VERSION}/${VM_BINARY}.sha256"
-    _VM_SHA256=$(curl -fsSL "${_VM_SHA256_URL}" 2>/dev/null | awk '{print $1}')
+    _VM_SHA256_URL="https://github.com/VictoriaMetrics/VictoriaMetrics/releases/download/v${VM_VERSION}/victoria-metrics-linux-amd64-v${VM_VERSION}_checksums.txt"
+    _VM_SHA256=$(curl -fsSL "${_VM_SHA256_URL}" 2>/dev/null | grep "${VM_BINARY}" | awk '{print $1}')
     if [[ -z "${_VM_SHA256}" ]]; then
         die "Could not fetch sha256 for VictoriaMetrics v${VM_VERSION} — aborting"
     fi

@@ -2,8 +2,6 @@ module github.com/purpledurpl075/anthri-mon/collectors/flow
 
 go 1.22.0
 
-toolchain go1.22.3
-
 require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.30.0
 	github.com/google/uuid v1.6.0
