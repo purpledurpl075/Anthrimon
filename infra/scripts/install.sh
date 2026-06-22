@@ -149,6 +149,7 @@ apt-get install -y -qq \
     libpq-dev postgresql-client \
     nginx \
     wireguard wireguard-tools \
+    snmptrapd \
     net-tools iproute2 traceroute mtr iputils-ping \
     jq unzip
 ok "System packages installed"
@@ -1019,7 +1020,7 @@ echo -e "    ${BOLD}systemctl status anthrimon-api${RESET}"
 echo -e "    ${BOLD}systemctl status snmp-collector${RESET}"
 echo -e "    ${BOLD}systemctl status flow-collector${RESET}"
 echo -e "    ${BOLD}systemctl status syslog-collector${RESET}"
-echo -e "    ${BOLD}systemctl status anthrimon-trap-receiver${RESET}"
+echo -e "    ${BOLD}systemctl status snmptrapd${RESET}"
 echo -e "    ${BOLD}systemctl status nginx${RESET}"
 echo -e "    ${BOLD}systemctl status victoria-metrics${RESET}"
 echo -e "    ${BOLD}systemctl status clickhouse-server${RESET}"
