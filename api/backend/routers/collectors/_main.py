@@ -53,6 +53,22 @@ from ...services.urls import ch_url, vm_url
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/collectors", tags=["collectors"])
 
+_wake_cooldown: dict[str, float] = {}
+_WAKE_COOLDOWN_S = 60.0
+
+
+def _should_wake(reason: str) -> bool:
+    """Rate-limit engine wake-events to at most once per reason per 60s."""
+    now = time.monotonic()
+    last = _wake_cooldown.get(reason, 0.0)
+    if now - last < _WAKE_COOLDOWN_S:
+        return False
+    _wake_cooldown[reason] = now
+    if len(_wake_cooldown) > 500:
+        _wake_cooldown.clear()
+    return True
+
+
 _WG_IF           = "wg0"
 _WG_SUBNET       = ipaddress.ip_network("10.100.0.0/24")
 _COLLECTOR_DIST  = Path("/var/lib/anthrimon/downloads")
@@ -1912,15 +1928,17 @@ async def ingest_metrics(
         # Capture which devices are about to transition from non-up → up.
         # These get a fast engine pass so device_down doesn't sit around the
         # full poll-interval + engine-cycle waiting to auto-resolve.
-        recovered_ids = [
-            r[0] for r in (await db.execute(
-                select(Device.id).where(
-                    Device.id.in_(valid_ids),
-                    Device.tenant_id == collector.tenant_id,
-                    Device.status != "up",
-                )
-            )).all()
-        ]
+        recovered_rows = (await db.execute(
+            select(Device.id, Device.hostname, Device.status).where(
+                Device.id.in_(valid_ids),
+                Device.tenant_id == collector.tenant_id,
+                Device.status != "up",
+            )
+        )).all()
+        recovered_ids = [r[0] for r in recovered_rows]
+        for r in recovered_rows:
+            logger.debug("device_status_change", device_id=str(r.id),
+                         hostname=r.hostname, old=r.status, new="up")
         await db.execute(
             update(Device)
             .where(
@@ -2134,11 +2152,16 @@ async def ingest_metrics(
     # device_down resolves within one cycle instead of waiting up to the full
     # EVAL_INTERVAL on top of the SNMP poll interval.
     if recovered_ids:
-        try:
-            from ...alerting.engine import _engine
-            _engine.request_immediate_pass(reason=f"device_recovered:{len(recovered_ids)}")
-        except Exception as exc:
-            logger.debug("alert_engine_wake_failed", error=str(exc))
+        reason = f"device_recovered:{len(recovered_ids)}"
+        if _should_wake(reason):
+            try:
+                from ...alerting.engine import _engine
+                logger.debug("engine_wake_triggered", reason=reason)
+                _engine.request_immediate_pass(reason=reason)
+            except Exception as exc:
+                logger.debug("alert_engine_wake_failed", error=str(exc))
+        else:
+            logger.debug("engine_wake_suppressed", reason=reason)
 
     lines = body.count(b"\n")
     logger.debug("collector_metrics_ingested", collector=collector.name, lines=lines)
@@ -2268,11 +2291,12 @@ async def ingest_flows(
         logger.warning("flows_ingest_failed", collector=collector.name,
                        status=resp.status_code, detail=resp.text[:200])
 
-    try:
-        from ...alerting.engine import _engine
-        _engine.request_immediate_pass(reason="flow_received")
-    except Exception:
-        pass
+    if _should_wake("flow_received"):
+        try:
+            from ...alerting.engine import _engine
+            _engine.request_immediate_pass(reason="flow_received")
+        except Exception:
+            pass
 
     return {"written": len(rows)}
 
@@ -2327,11 +2351,12 @@ async def ingest_syslog(
         logger.warning("syslog_ingest_failed", collector=collector.name,
                        status=resp.status_code, detail=resp.text[:200])
 
-    try:
-        from ...alerting.engine import _engine
-        _engine.request_immediate_pass(reason="syslog_received")
-    except Exception:
-        pass
+    if _should_wake("syslog_received"):
+        try:
+            from ...alerting.engine import _engine
+            _engine.request_immediate_pass(reason="syslog_received")
+        except Exception:
+            pass
 
     return {"written": len(rows)}
 
@@ -2423,11 +2448,12 @@ async def ingest_bgp_sessions(
                        device_id=did, error=str(exc))
         return {"written": 0}
 
-    try:
-        from ...alerting.engine import _engine
-        _engine.request_immediate_pass(reason="bgp_state_changed")
-    except Exception:
-        pass
+    if _should_wake("bgp_state_changed"):
+        try:
+            from ...alerting.engine import _engine
+            _engine.request_immediate_pass(reason="bgp_state_changed")
+        except Exception:
+            pass
 
     return {"written": len(sessions)}
 
@@ -2518,11 +2544,12 @@ async def ingest_ospf_neighbors(
                        device_id=did, error=str(exc))
         return {"written": 0}
 
-    try:
-        from ...alerting.engine import _engine
-        _engine.request_immediate_pass(reason="ospf_state_changed")
-    except Exception:
-        pass
+    if _should_wake("ospf_state_changed"):
+        try:
+            from ...alerting.engine import _engine
+            _engine.request_immediate_pass(reason="ospf_state_changed")
+        except Exception:
+            pass
 
     return {"written": len(neighbors)}
 
@@ -2576,11 +2603,12 @@ async def ingest_routes(
                        device_id=did, error=str(exc))
         return {"written": 0}
 
-    try:
-        from ...alerting.engine import _engine
-        _engine.request_immediate_pass(reason="routes_changed")
-    except Exception:
-        pass
+    if _should_wake("routes_changed"):
+        try:
+            from ...alerting.engine import _engine
+            _engine.request_immediate_pass(reason="routes_changed")
+        except Exception:
+            pass
 
     return {"written": len(routes)}
 
@@ -2642,11 +2670,12 @@ async def ingest_isis_neighbors(
                        device_id=did, error=str(exc))
         return {"written": 0}
 
-    try:
-        from ...alerting.engine import _engine
-        _engine.request_immediate_pass(reason="isis_state_changed")
-    except Exception:
-        pass
+    if _should_wake("isis_state_changed"):
+        try:
+            from ...alerting.engine import _engine
+            _engine.request_immediate_pass(reason="isis_state_changed")
+        except Exception:
+            pass
 
     return {"written": len(rows)}
 
@@ -3092,11 +3121,12 @@ async def ingest_traps(
             token = _control_token(collector.api_key_hash)
             asyncio.create_task(_trigger_repolls(wg_ip, token, repoll_ids))
 
-    try:
-        from ...alerting.engine import _engine
-        _engine.request_immediate_pass(reason="trap_received")
-    except Exception:
-        pass
+    if _should_wake("trap_received"):
+        try:
+            from ...alerting.engine import _engine
+            _engine.request_immediate_pass(reason="trap_received")
+        except Exception:
+            pass
 
 
 async def _trigger_repolls(wg_ip: str, token: str, device_ids: set[str]) -> None:

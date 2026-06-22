@@ -188,7 +188,7 @@ func (c *AristaEAPICollector) collectCounters(ctx context.Context) {
 		password, _ := cred.Data["password"].(string)
 
 		results, err := eapiCall(ctx, dev.MgmtIP, username, password,
-			[]string{"show spanning-tree", "show ip route vrf all", "show ipv6 route vrf all"})
+			[]string{"show spanning-tree", "show ip route vrf all"})
 		if err != nil {
 			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("arista counter collection failed")
 			continue
@@ -206,18 +206,23 @@ func (c *AristaEAPICollector) collectCounters(ctx context.Context) {
 			}
 		}
 
-		// Route table (result[1] = IPv4, result[2] = IPv6) — always posted
-		// even when empty so the hub can prune stale entries.
+		// IPv4 routes (result[1])
+		var routes []map[string]any
 		if len(results) > 1 {
-			routes := parseAristaRoutes(dev.ID, results[1])
-			if len(results) > 2 {
-				routes = append(routes, parseAristaRoutes(dev.ID, results[2])...)
-			}
-			if err := c.hubClient.PostRoutes(ctx, dev.ID, routes); err != nil {
-				c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("routes post to hub failed")
-			} else {
-				c.logger.Info().Str("device", dev.Hostname).Int("routes", len(routes)).Msg("routes posted")
-			}
+			routes = parseAristaRoutes(dev.ID, results[1])
+		}
+
+		// IPv6 routes — separate call so failure doesn't break STP + IPv4
+		v6results, err := eapiCall(ctx, dev.MgmtIP, username, password,
+			[]string{"show ipv6 route vrf all"})
+		if err == nil && len(v6results) > 0 {
+			routes = append(routes, parseAristaRoutes(dev.ID, v6results[0])...)
+		}
+
+		if err := c.hubClient.PostRoutes(ctx, dev.ID, routes); err != nil {
+			c.logger.Warn().Err(err).Str("device", dev.Hostname).Msg("routes post to hub failed")
+		} else {
+			c.logger.Info().Str("device", dev.Hostname).Int("routes", len(routes)).Msg("routes posted")
 		}
 	}
 }

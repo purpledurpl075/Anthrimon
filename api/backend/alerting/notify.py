@@ -278,6 +278,14 @@ async def dispatch(alert: Alert, rule: AlertRule, *, resolved: bool = False) -> 
         except Exception:
             pass
 
+    # Notification cooldown — suppress rapid re-notifications on the same alert
+    if alert.last_notified_at:
+        since_last = (datetime.now(timezone.utc) - alert.last_notified_at).total_seconds()
+        if since_last < 60:
+            logger.info("notification_cooldown", alert_id=str(alert.id),
+                        seconds_since_last=round(since_last), resolved=resolved)
+            return
+
     ctx   = _build_ctx(alert, rule, resolved, platform)
     loop  = asyncio.get_running_loop()
     event = "alert.resolved" if resolved else "alert.fired"

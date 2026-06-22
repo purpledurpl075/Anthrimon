@@ -20,7 +20,7 @@ PLATFORM_DEFAULTS: dict = {
     "timezone":      "UTC",
     # Alerting engine — platform-wide defaults; tenants may override the
     # subset in TENANT_OVERRIDABLE_KEYS via /admin/settings/alerting
-    "device_down_stale_min_s":        45,
+    "device_down_stale_min_s":        90,
     "max_alerts_per_device_per_hour": 0,
     "auto_close_stale_days":          0,
     "alert_retention_days":           90,

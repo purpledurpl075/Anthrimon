@@ -160,7 +160,9 @@ type SNMPCollector struct {
 	mu      sync.RWMutex
 	devices []hub.Device
 
-	pollNowCh chan string // device ID to repoll immediately; "" = all devices
+	pollNowCh   chan string // device ID to repoll immediately; "" = all devices
+	reachMu     sync.Mutex
+	reachable   map[string]bool // device_id → last-known reachability
 }
 
 // NewSNMPCollector creates a new SNMPCollector.
@@ -170,6 +172,7 @@ func NewSNMPCollector(hubClient *hub.Client, cfg config.SNMPConfig, log zerolog.
 		cfg:       cfg,
 		log:       log.With().Str("component", "snmp_collector").Logger(),
 		pollNowCh: make(chan string, 16),
+		reachable: make(map[string]bool),
 	}
 }
 
@@ -212,7 +215,22 @@ func (c *SNMPCollector) Run(ctx context.Context) {
 		case <-ticker.C:
 			c.pollAll(ctx)
 		case deviceID := <-c.pollNowCh:
+			c.log.Debug().Str("device_id", deviceID).Msg("trap-triggered immediate re-poll")
 			go c.pollOneByID(ctx, deviceID)
+		}
+	}
+}
+
+func (c *SNMPCollector) logReachability(deviceID, ip string, nowReachable bool) {
+	c.reachMu.Lock()
+	prev, known := c.reachable[deviceID]
+	c.reachable[deviceID] = nowReachable
+	c.reachMu.Unlock()
+	if known && prev != nowReachable {
+		if nowReachable {
+			c.log.Info().Str("device_id", deviceID).Str("ip", ip).Str("transition", "unreachable->reachable").Msg("device reachability changed")
+		} else {
+			c.log.Info().Str("device_id", deviceID).Str("ip", ip).Str("transition", "reachable->unreachable").Msg("device reachability changed")
 		}
 	}
 }
@@ -236,20 +254,23 @@ func (c *SNMPCollector) pollOneByID(ctx context.Context, deviceID string) {
 		return
 	}
 
+	pollStart := time.Now()
 	lines, _, err := c.pollDevice(*dev)
+	pollDur := time.Since(pollStart)
 	ts := time.Now().UnixMilli()
-	if err != nil || len(lines) == 0 {
+	success := err == nil && len(lines) > 0
+	if !success {
 		if err != nil {
-			c.log.Warn().Err(err).Str("device_id", deviceID).Msg("trap repoll failed")
+			c.log.Warn().Err(err).Str("device_id", deviceID).Str("ip", dev.MgmtIP).Msg("trap repoll failed")
 		}
 		lines = []string{fmt.Sprintf(`anthrimon_device_unreachable{device_id=%q} 1 %d`, deviceID, ts)}
 	}
+	c.logReachability(deviceID, dev.MgmtIP, success)
+	c.log.Debug().Str("device_id", deviceID).Str("ip", dev.MgmtIP).Dur("poll_duration", pollDur).Bool("success", success).Msg("trap repoll cycle complete")
 
 	text := strings.Join(lines, "\n") + "\n"
 	if err := c.hub.PostMetrics(ctx, text); err != nil {
 		c.log.Error().Err(err).Str("device_id", deviceID).Msg("trap repoll: failed to post metrics")
-	} else {
-		c.log.Debug().Str("device_id", deviceID).Msg("trap repoll metrics posted")
 	}
 }
 
@@ -283,14 +304,18 @@ outer:
 			defer wg.Done()
 			defer func() { <-sem }()
 
+			pollStart := time.Now()
 			devLines, devRoutes, err := c.pollDevice(dev)
+			pollDur := time.Since(pollStart)
+			success := err == nil && len(devLines) > 0
+
+			c.logReachability(dev.ID, dev.MgmtIP, success)
+			c.log.Debug().Str("device_id", dev.ID).Str("ip", dev.MgmtIP).Dur("poll_duration", pollDur).Bool("success", success).Int("metrics", len(devLines)).Msg("poll cycle complete")
 
 			mu.Lock()
 			defer mu.Unlock()
 
-			if err != nil || len(devLines) == 0 {
-				// Active failure report: hub sets status='unreachable' immediately,
-				// bypassing ARP cache / management-plane survivability gaps.
+			if !success {
 				if err != nil {
 					c.log.Warn().Err(err).Str("device_id", dev.ID).
 						Str("ip", dev.MgmtIP).Msg("snmp poll failed")

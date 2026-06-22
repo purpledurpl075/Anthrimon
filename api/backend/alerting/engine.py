@@ -42,6 +42,8 @@ logger = structlog.get_logger(__name__)
 
 EVAL_INTERVAL = 15  # seconds
 
+_MIN_STABLE_FOR = 60
+
 # How long to keep an fp in the in-memory state dicts after it was last active.
 # Must exceed any realistic duration_seconds + stable_for_seconds to avoid
 # clearing a pending duration gate early.  4 h is a safe upper bound.
@@ -181,6 +183,7 @@ class AlertEngine:
         multiple calls within a single sleep window collapse into one pass."""
         if not self._wake_event.is_set():
             logger.info("alert_engine_woken", reason=reason)
+            logger.debug("engine_wake", reason=reason)
             alert_engine_wake_events().inc(reason=reason)
         self._wake_event.set()
 
@@ -688,9 +691,15 @@ class AlertEngine:
             if rule.duration_seconds > 0 and rule.metric != "interface_flap":
                 if fp not in self._breach_since:
                     self._breach_since[fp] = now
+                    logger.debug("breach_detected", fingerprint=fp[:12],
+                                 metric=rule.metric, device_id=breach.device_id,
+                                 duration_gate_s=rule.duration_seconds)
                     continue
-                if (now - self._breach_since[fp]).total_seconds() < rule.duration_seconds:
+                held = (now - self._breach_since[fp]).total_seconds()
+                if held < rule.duration_seconds:
                     continue
+                logger.debug("breach_firing", fingerprint=fp[:12],
+                             metric=rule.metric, duration_held_s=round(held))
             else:
                 self._breach_since.pop(fp, None)
 
@@ -856,6 +865,11 @@ class AlertEngine:
                 db.add(alert)
                 dirty_tenants.add(rule.tenant_id)
                 if not suppressed:
+                    last_resolve_ts = self._last_clear.get(fp)
+                    if last_resolve_ts and (now - last_resolve_ts).total_seconds() < 300:
+                        logger.info("alert_flap_detected", alert_id=str(alert.id),
+                                    metric=rule.metric, device=breach.device_name,
+                                    seconds_since_last_resolve=round((now - last_resolve_ts).total_seconds()))
                     logger.info("alert_fired", rule=rule.name, device=breach.device_name,
                                 iface=breach.interface_name, severity=rule.severity)
                     alert_engine_alerts_fired().inc(metric=rule.metric, severity=rule.severity)
@@ -947,12 +961,19 @@ class AlertEngine:
             # future recurrence via the fingerprint dedup check above.
 
             # Condition cleared — start or check the stable clock
-            if rule.stable_for_seconds > 0:
-                if fp not in self._clear_since:
-                    self._clear_since[fp] = now
-                    continue  # wait for stability
-                if (now - self._clear_since[fp]).total_seconds() < rule.stable_for_seconds:
-                    continue  # not stable yet
+            stable_gate = max(rule.stable_for_seconds or 0, _MIN_STABLE_FOR)
+            if fp not in self._clear_since:
+                self._clear_since[fp] = now
+                logger.debug("breach_cleared", fingerprint=fp[:12],
+                             metric=rule.metric, alert_id=str(alert.id),
+                             stable_gate_s=stable_gate)
+                continue  # wait for stability
+            stable_elapsed = (now - self._clear_since[fp]).total_seconds()
+            if stable_elapsed < stable_gate:
+                continue  # not stable yet
+
+            logger.debug("alert_auto_resolving", alert_id=str(alert.id),
+                         metric=rule.metric, stable_for_s=round(stable_elapsed))
 
             # Resolve
             alert.status = "resolved"

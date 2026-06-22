@@ -9,10 +9,13 @@ from typing import Optional
 from dataclasses import dataclass, field
 
 import httpx
+import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..services.urls import ch_url, vm_url
+
+logger = structlog.get_logger(__name__)
 
 # ── Shared pooled HTTP client ───────────────────────────────────────────────
 # The alert engine evaluates every metric rule against every device on a ~15s
@@ -187,7 +190,13 @@ async def eval_device_down(db: AsyncSession, device: dict, platform: dict | None
         last_polled is None or
         (datetime.now(timezone.utc) - last_polled).total_seconds() > stale_seconds
     )
-    if status != "up" or stale:
+    breached = status != "up" or stale
+    last_polled_age = round((datetime.now(timezone.utc) - last_polled).total_seconds()) if last_polled else None
+    logger.debug("eval_device_down",
+                 hostname=device.get("hostname"), status=status,
+                 last_polled_age_s=last_polled_age,
+                 stale_threshold_s=stale_seconds, breached=breached)
+    if breached:
         # Suppress when the device's remote collector is offline — the collector-offline
         # alert already covers this, and firing device_down on top creates alert spam
         # during collector restarts or updates.
@@ -234,6 +243,8 @@ async def eval_interface_down(db: AsyncSession, device: dict) -> list[Breach]:
         {"did": device["id"]},
     )).mappings().all()
 
+    logger.debug("eval_interface_down", device_id=device.get("id"),
+                 hostname=device.get("hostname"), interfaces_down=len(rows))
     breaches = []
     for r in rows:
         force_alert    = r["force_alert"]    or False

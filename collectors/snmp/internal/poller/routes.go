@@ -2,6 +2,7 @@ package poller
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 
@@ -195,37 +196,76 @@ func inetCidrParseCol(pduName string) (col int, idx string, ok bool) {
 	return c, rest[dot+1:], true
 }
 
-// inetCidrParseIndex decodes the inetCidrRouteTable OID index for IPv4.
-// Index: 1.4.a.b.c.d.pfxLen.[policy...].1.4.n.m.o.p
-// Only IPv4 (destType=1) is handled; IPv6 entries are skipped.
+// inetCidrParseIndex decodes the inetCidrRouteTable OID index for IPv4 and IPv6.
+// Index: destType.destLen.addr[destLen].pfxLen.[policy...].nhType.nhLen.nhAddr[nhLen]
 func inetCidrParseIndex(idx string) (dest, nexthop string, ok bool) {
 	parts := strings.Split(idx, ".")
-	// Minimum: destType(1)+destLen(1)+addr(4)+pfxLen(1)+policy(≥1)+nhType(1)+nhLen(1)+nhAddr(4) = 14
 	if len(parts) < 14 {
 		return "", "", false
 	}
-	if parts[0] != "1" || parts[1] != "4" {
-		return "", "", false // only IPv4
-	}
-	destIP := strings.Join(parts[2:6], ".")
-	pfxLen := parts[6]
-	dest = fmt.Sprintf("%s/%s", destIP, pfxLen)
 
-	// Scan for nexthop: find "1.4" followed by 4 valid octets anywhere after pfxLen
-	for i := 7; i < len(parts)-5; i++ {
-		if parts[i] != "1" || parts[i+1] != "4" {
-			continue
+	destType := parts[0]
+	destLen, _ := strconv.Atoi(parts[1])
+
+	switch destType {
+	case "1": // IPv4
+		if destLen != 4 || len(parts) < 14 {
+			return "", "", false
 		}
-		if len(parts) < i+6 { break }
-		nh := strings.Join(parts[i+2:i+6], ".")
-		if isValidIPOctets(parts[i+2 : i+6]) {
-			if nh == "0.0.0.0" {
-				nh = ""
+		destIP := strings.Join(parts[2:6], ".")
+		pfxLen := parts[6]
+		dest = fmt.Sprintf("%s/%s", destIP, pfxLen)
+		// Scan for nexthop: find "1.4" followed by 4 valid octets
+		for i := 7; i < len(parts)-5; i++ {
+			if parts[i] != "1" || parts[i+1] != "4" {
+				continue
 			}
-			return dest, nh, true
+			if len(parts) < i+6 { break }
+			nh := strings.Join(parts[i+2:i+6], ".")
+			if isValidIPOctets(parts[i+2 : i+6]) {
+				if nh == "0.0.0.0" {
+					nh = ""
+				}
+				return dest, nh, true
+			}
 		}
+		return dest, "", true
+
+	case "2": // IPv6
+		if destLen != 16 || len(parts) < 2+16+1 {
+			return "", "", false
+		}
+		destIP := octetsToIPv6(parts[2 : 2+16])
+		pfxLen := parts[2+16]
+		dest = fmt.Sprintf("%s/%s", destIP, pfxLen)
+		// Scan for nexthop: find "2.16" followed by 16 octets
+		start := 2 + 16 + 1 // past destAddr + pfxLen
+		for i := start; i < len(parts)-17; i++ {
+			if parts[i] == "2" && parts[i+1] == "16" && len(parts) >= i+18 {
+				nhIP := octetsToIPv6(parts[i+2 : i+18])
+				if nhIP == "::" {
+					nhIP = ""
+				}
+				return dest, nhIP, true
+			}
+		}
+		return dest, "", true
+
+	default:
+		return "", "", false
 	}
-	return dest, "", true // connected — no nexthop found
+}
+
+func octetsToIPv6(octets []string) string {
+	if len(octets) != 16 {
+		return ""
+	}
+	raw := make(net.IP, 16)
+	for i, o := range octets {
+		v, _ := strconv.Atoi(o)
+		raw[i] = byte(v)
+	}
+	return raw.String()
 }
 
 func isValidIPOctets(parts []string) bool {
