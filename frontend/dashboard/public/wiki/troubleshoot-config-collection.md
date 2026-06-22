@@ -8,7 +8,7 @@ journalctl -u anthrimon-api -n 100 --no-pager | grep -i "config\|ssh\|collect\|b
 
 ## 2. Verify an SSH credential is linked
 
-Go to the device detail page → **Credentials** tab. Confirm an SSH credential is linked. Without one, config collection is skipped silently.
+On the device detail page, click the **gear icon** to open **Device Settings** → scroll to the **Credentials** section. Confirm an SSH credential is linked. Without one, config collection is skipped silently.
 
 ## 3. Test SSH connectivity manually
 

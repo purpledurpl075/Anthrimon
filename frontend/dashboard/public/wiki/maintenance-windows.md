@@ -9,7 +9,7 @@ Go to **Maintenance** to manage windows.
 | Field | Description |
 |-------|-------------|
 | Name | Description of the maintenance (e.g. "Firmware upgrade core-sw-01") |
-| Devices | One or more devices to suppress |
+| Scope | All devices, specific devices, by vendor, or by tag |
 | Start / End | Date and time in your local timezone |
 | Recurring | Repeat the window on a schedule (e.g. every Sunday 02:00–04:00) |
 

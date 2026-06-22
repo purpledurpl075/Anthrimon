@@ -15,7 +15,7 @@ Config management collects device configurations, tracks changes over time, diff
 3. Fill in username and password (or paste a private key)
 4. Set a name and save
 
-Then link it to the device on the device's **Credentials** tab with a priority lower than SNMP (e.g. priority 5).
+Then link it to the device in the Device Settings drawer (gear icon) → **Credentials** section, with a priority lower than SNMP (e.g. priority 5).
 
 ## Collection
 
@@ -28,15 +28,16 @@ The collected config is stored as a versioned backup. Each backup shows:
 
 ## Compliance policies
 
-Compliance policies check the collected config against rules. Go to **Config** → **Policies** to create them.
+Compliance policies check the collected config against rules. Go to **Policies** (under Analysis in the sidebar) to create them.
 
 ### Rule types
 
 | Type | Description |
 |------|-------------|
-| `must_contain` | Config must include this string or regex |
-| `must_not_contain` | Config must not include this string or regex |
-| `line_regex` | A specific line must match a regex pattern |
+| `regex_present` | Config must match this regex pattern |
+| `regex_absent` | Config must NOT match this regex pattern |
+| `contains` | Config must include this literal string |
+| `not_contains` | Config must not include this literal string |
 
 ### Example policies
 
@@ -62,4 +63,4 @@ On the device detail page → **Config** tab:
 
 ## Change alerts
 
-If a config changes between polls, a `config_change` event is recorded. You can alert on this via a syslog match rule targeting config audit log messages, or monitor the **Config** tab directly.
+If a config changes between polls, a `config_change` event is recorded. Create an alert rule with metric **Config change detected** (`config_change`) under **Alert Rules** to receive notifications when any device's running config changes.

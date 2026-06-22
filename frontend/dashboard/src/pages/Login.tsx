@@ -1,6 +1,7 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { login, totpChallenge } from '../api/devices'
+import api from '../api/client'
 
 type Step = 'credentials' | 'totp'
 
@@ -14,7 +15,25 @@ export default function Login() {
   const [session, setSession]       = useState('')
   const [error, setError]           = useState('')
   const [loading, setLoading]       = useState(false)
+  const [demoMode, setDemoMode]     = useState(false)
   const navigate = useNavigate()
+
+  useEffect(() => {
+    fetch('/api/v1/auth/demo-status').then(r => r.json()).then(d => {
+      if (d.demo_mode) {
+        setDemoMode(true)
+        fetch('/api/v1/auth/demo-login', { method: 'POST' })
+          .then(r => r.json())
+          .then(d => {
+            if (d.access_token) {
+              localStorage.setItem('token', d.access_token)
+              navigate('/')
+            }
+          })
+          .catch(() => setDemoMode(true))
+      }
+    }).catch(() => {})
+  }, [])
 
   async function handleCredentials(e: React.FormEvent) {
     e.preventDefault()

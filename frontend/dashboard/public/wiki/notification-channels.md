@@ -2,13 +2,13 @@
 
 Notification channels define where alerts are sent. Channels are assigned to **Policies**, which are then linked to alert rules.
 
-Go to **Alert Rules** → **Channels** to manage channels.
+Go to **Administration** (under Admin in the sidebar) → **Channels** tab to manage channels.
 
 ---
 
 ## Email
 
-Requires SMTP to be configured first under **Administration** → **SMTP Settings**.
+Requires SMTP to be configured first under **Administration** → **SMTP Server** tab.
 
 ### SMTP settings (one-time setup)
 
@@ -23,7 +23,7 @@ Requires SMTP to be configured first under **Administration** → **SMTP Setting
 
 ### Channel config
 
-When adding an email channel, set **To** to a comma-separated list of recipient addresses. One channel per team or escalation group is typical.
+When adding an email channel, enter recipient addresses **one per line** in the To field. One channel per team or escalation group is typical.
 
 ---
 
@@ -68,6 +68,7 @@ Posts a JSON payload to any HTTP/HTTPS endpoint via POST.
 | Field | Description |
 |-------|-------------|
 | URL | The endpoint to POST to |
+| Secret | Optional — HMAC signing secret for payload verification |
 
 ### Payload format
 

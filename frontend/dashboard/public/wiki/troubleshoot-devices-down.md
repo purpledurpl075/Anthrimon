@@ -26,7 +26,7 @@ The collector has the wrong DB password. Update `/home/poly/Anthri-mon/collector
 ```
 request timeout for device <id>
 ```
-SNMP credentials may be wrong, or the device's SNMP access list is blocking the collector. Run the **SNMP Diagnostics** tool on the device's Credentials tab.
+SNMP credentials may be wrong, or the device's SNMP access list is blocking the collector. Open the device's **Device Settings** drawer (gear icon) → **SNMP Diagnostic** section and click **Run**.
 
 ## Check last_polled in the database
 

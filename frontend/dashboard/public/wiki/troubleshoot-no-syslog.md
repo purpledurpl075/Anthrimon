@@ -41,7 +41,7 @@ Check the device's management IP in Anthrimon matches the IP actually used for s
 
 ## 5. Check the syslog page filter
 
-On the **Syslog** page, ensure the time range and severity filter are not hiding recent messages. Set severity to **All** and time range to **Last 15 minutes**.
+On the **Logging** page (under Operations in the sidebar), ensure the time range and severity filter are not hiding recent messages. Set severity to **All** and time range to **Last 15 minutes**.
 
 ## 6. Database errors
 

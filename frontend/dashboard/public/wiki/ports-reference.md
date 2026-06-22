@@ -44,4 +44,6 @@ The remote collector connects **outbound** to the hub only. For SNMP trap collec
 | SSH to devices | 22 | TCP | Outbound to devices at the remote site |
 | SNMP trap reception (snmptrapd) | 162 | UDP | Inbound from devices at the remote site |
 
+| Health / hot-patch HTTP server | 9090 | TCP | Listens on wg0 only (not public) |
+
 The collector's local HTTP server (used for hot-patch and health checks) listens on `wg0` only — not the public interface.

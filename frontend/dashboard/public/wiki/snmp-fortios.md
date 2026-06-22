@@ -61,4 +61,4 @@ snmpwalk -v2c -c <community-string> <fortigate-ip> 1.3.6.1.2.1.1.1.0
 
 - FortiOS supports SNMP across VDOMs; configure SNMP in each VDOM if needed
 - The `hosts` list acts as an ACL — only listed IPs can query the device
-- `events` in the community config controls which SNMP traps are sent; Anthrimon does not currently consume traps so this is informational only
+- `events` in the community config controls which SNMP traps are sent to the hub on UDP 162; Anthrimon classifies traps automatically by OID

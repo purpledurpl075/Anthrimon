@@ -10,18 +10,20 @@ Complete reference for installation, configuration, operation, and extension of 
 2. [Architecture](#architecture)
 3. [Installation](#installation)
 4. [First Steps](#first-steps)
-5. [SNMP Monitoring](#snmp-monitoring)
-6. [Alerting](#alerting)
-7. [Flow Monitoring](#flow-monitoring)
-8. [Syslog](#syslog)
-9. [SNMP Traps](#snmp-traps)
-10. [Config Management](#config-management)
-11. [Topology](#topology)
-12. [Remote Collectors](#remote-collectors)
-13. [Administration](#administration)
-14. [API Reference](#api-reference)
-15. [Troubleshooting](#troubleshooting)
-16. [Data Retention](#data-retention)
+5. [Dashboards](#dashboards)
+6. [SNMP Monitoring](#snmp-monitoring)
+7. [Alerting](#alerting)
+8. [Flow Monitoring](#flow-monitoring)
+9. [Syslog](#syslog)
+10. [SNMP Traps](#snmp-traps)
+11. [BGP Monitoring](#bgp-monitoring)
+12. [Config Management](#config-management)
+13. [Topology](#topology)
+14. [Remote Collectors](#remote-collectors)
+15. [Administration](#administration)
+16. [API Reference](#api-reference)
+17. [Troubleshooting](#troubleshooting)
+18. [Data Retention](#data-retention)
 
 ---
 
@@ -29,14 +31,19 @@ Complete reference for installation, configuration, operation, and extension of 
 
 Anthrimon is a self-hosted network monitoring and orchestration platform. It provides:
 
+- **Custom dashboards** — drag-and-drop widget grid with shared/private dashboards and kiosk mode
 - **Deep SNMP polling** — interfaces, health metrics, optical power, neighbors, routes, VLANs, STP, IS-IS
 - **Flow analysis** — NetFlow v5/v9, IPFIX, sFlow v5 with top-talkers and per-interface breakdown
 - **Syslog ingest** — RFC 3164/5424, severity analysis, pattern-match alerts
 - **SNMP traps** — v1/v2c/v3 authPriv, vendor-aware classification, hub and remote-site collection
-- **Config management** — SSH backup, diff viewer, compliance policies, multi-device deploy
-- **Alerting** — 13 metric types, email notifications, maintenance windows, syslog correlation
+- **Config management** — SSH backup, diff viewer, compliance policies, golden config, multi-device deploy
+- **Alerting** — 23 metric types, email/Slack/Teams/PagerDuty/webhook notifications, maintenance windows, syslog correlation
+- **BGP monitoring** — session state, prefix counts, flap detection, prefix-drop baselines
 - **Topology** — live L2/L3 map from LLDP/CDP with bandwidth sparklines
+- **Path trace** — hop-by-hop network path visualization
 - **Remote collectors** — WireGuard-tunnelled distributed polling agents with local trap collection
+- **Multi-tenancy** — tenant isolation with platform admin cross-tenant switching
+- **Audit log** — full change tracking for compliance
 
 ### Default credentials
 
@@ -45,7 +52,7 @@ Anthrimon is a self-hosted network monitoring and orchestration platform. It pro
 | Username | `admin` |
 | Password | `admin` |
 
-**Change the password immediately** after first login: Administration → Users.
+**Change the password immediately** after first login: **Users** (Admin section in the sidebar).
 
 ---
 
@@ -168,7 +175,7 @@ sudo bash scripts/setup-tls.sh
 
 1. Navigate to **Credentials → New**
 2. Select type: **SNMP v2c** (community string) or **SNMP v3**
-3. Assign the credential to your device under the device's **Settings → Credentials** tab
+3. Assign the credential to your device in the Device Settings drawer (gear icon) → **Credentials** section
 
 ### Create your first alert rule
 
@@ -177,6 +184,23 @@ sudo bash scripts/setup-tls.sh
 3. Set threshold, duration, severity
 4. Assign a notification channel
 5. The engine evaluates every 15 seconds
+
+---
+
+## Dashboards
+
+Dashboards is the home page. Create custom widget-based dashboards with drag-and-drop layout.
+
+### Widget types
+
+Stat cards, metric gauges, metric graphs, time-series charts, alert severity bars, alert timelines, open alerts, problem devices, top bandwidth, top CPU, top memory, syslog feed, syslog heatmap, syslog rate, BGP summary, BGP flap log, BGP prefix totals, OSPF areas, routing health, interface health, collector status, config changes, device type grid, text notes, and more.
+
+### Features
+
+- **Shared / private** — dashboards can be shared with all users or kept private
+- **Default dashboard** — one dashboard can be marked as the default home page (star icon)
+- **Quick access** — the sidebar shows a collapsible list of dashboards for fast navigation
+- **Kiosk mode** — full-screen auto-rotating display for NOC screens (`/dashboards/kiosk`)
 
 ---
 
@@ -205,7 +229,7 @@ sudo bash scripts/setup-tls.sh
 
 ### Polling intervals
 
-Default: 60 seconds per device. Adjustable per device in Settings → SNMP. The health metrics multiplier (default 1x) controls how often health metrics are collected vs interface counters.
+Default: 60 seconds per device. Adjustable per device in the Device Settings drawer → SNMP section. The health metrics multiplier (default 1x) controls how often health metrics are collected vs interface counters.
 
 ### Vendor support
 
@@ -253,17 +277,24 @@ Runs every 15 seconds. Evaluates all enabled alert rules against all active devi
 | `cpu_util_pct` | CPU utilisation % |
 | `mem_util_pct` | Memory utilisation % |
 | `device_down` | Device unreachable via SNMP |
+| `device_latency` | Device latency (ping RTT) above threshold |
 | `interface_down` | Interface operationally down (admin up) |
 | `interface_flap` | Interface state changes within window |
+| `interface_errors` | Interface error count (5-min window) |
+| `interface_discards` | Interface discard count (5-min window) |
+| `interface_util_pct` | Interface bandwidth utilisation % |
 | `uptime` | Device rebooted (uptime below threshold) |
 | `temperature` | Temperature sensor above threshold |
-| `interface_errors` | Interface error count (5-min window) |
-| `interface_util_pct` | Interface bandwidth utilisation % |
 | `ospf_state` | OSPF neighbor not in Full state |
+| `isis_state` | IS-IS adjacency not in Up state |
+| `bgp_session_down` | BGP session dropped |
+| `bgp_session_flapping` | BGP session flapping within window |
+| `bgp_prefix_drop` | BGP prefix count dropped by threshold % |
 | `route_missing` | Specific route prefix absent from routing table |
 | `flow_bandwidth` | Flow bandwidth bytes/s above threshold |
 | `syslog_match` | Syslog message matches RE2 regex |
 | `config_change` | Device running config hash changed |
+| `snmp_trap` | SNMP trap received from device |
 | `collector_offline` | Remote collector heartbeat timeout (system) |
 | `custom_oid` | Arbitrary OID value threshold |
 
@@ -273,9 +304,9 @@ Runs every 15 seconds. Evaluates all enabled alert rules against all active devi
 
 ### Email notifications
 
-Configure SMTP under **Administration → SMTP Server**. Create channels under **Notification Channels**. Assign channels to alert rules.
+Configure SMTP under **Administration** → **SMTP Server** tab. Create channels under **Administration** → **Channels** tab. Assign channels to alert rules.
 
-Email templates are fully customizable per alert type — **Administration → Email Template**.
+Email templates are fully customizable per alert type — **Administration** → **Email Template** tab.
 
 ### Maintenance windows
 
@@ -402,6 +433,31 @@ Longest-prefix match wins. SNMPv1 traps are normalised to v2c format by snmptrap
 
 ---
 
+## BGP Monitoring
+
+### What is collected
+
+BGP session state, peer IP, remote AS, received prefix counts, and UPDATE message counts are collected via SNMP (BGP4-MIB, RFC 4273). Session history and prefix counts are stored in VictoriaMetrics as time-series data.
+
+### Alert rules
+
+| Metric | Description |
+|---|---|
+| `bgp_session_down` | BGP session leaves Established state |
+| `bgp_session_flapping` | Session up/down more than N times within a window |
+| `bgp_prefix_drop` | Received prefix count drops by more than threshold % from 24h average |
+
+### Viewing BGP data
+
+- **Routing page** (Analysis section in sidebar) — all peers across all devices, session state timeline, prefix count charts
+- **Device detail → BGP tab** — per-device peer list, session events, prefix history
+
+### Full-table analysis
+
+For devices receiving a full BGP routing table, the prefix count baseline adapts to gradual growth using a rolling Welford mean/stddev. Sudden large drops trigger `bgp_prefix_drop` once at least 50 historical samples exist (~25 minutes).
+
+---
+
 ## Config Management
 
 ### How it works
@@ -429,11 +485,11 @@ ProCurve uses direct paramiko `invoke_shell` because Netmiko's hp_procurve drive
 
 ### SSH credentials
 
-Assign an SSH credential to the device under **Device → Settings → Credentials**. The credential type must be `ssh` with `username` and `password` fields. Optional: `enable_secret` for Cisco enable mode.
+Assign an SSH credential to the device in the Device Settings drawer (gear icon) → **Credentials** section. The credential type must be `ssh` with `username` and `password` fields. Optional: `enable_secret` for Cisco enable mode.
 
 ### Compliance policies
 
-Create policies under **Config → Policies**. Each policy has N rules:
+Create policies under **Policies** (Analysis section in the sidebar). Each policy has N rules:
 
 | Rule type | Description |
 |---|---|
@@ -489,7 +545,7 @@ wg0: 10.100.0.X ──UDP 51820──▶ hub WireGuard endpoint
 
 ### Deploying a collector
 
-1. In the Anthrimon UI go to **Configuration → Collectors → New collector**
+1. In the Anthrimon UI go to **Collectors** (Admin section in the sidebar) → **Add Collector**
 2. Complete the setup wizard — name the collector and select the site
 3. Download the deployment package (`anthrimon-remote-collector-linux-amd64.zip`)
 4. On the remote server:
@@ -505,7 +561,7 @@ The collector self-registers over HTTPS, establishes the WireGuard tunnel, downl
 
 ### Device assignment
 
-Assign devices to a remote collector in **Device Settings → Collection**. The dropdown shows all active collectors with their WireGuard IP and online/offline status. Select "Hub (local)" to revert to direct polling.
+Assign devices to a remote collector in the Device Settings drawer (gear icon) → **Collector** section. The dropdown shows all active collectors with their WireGuard IP and online/offline status. Select "Hub (local)" to revert to direct polling.
 
 ### Collector health
 
@@ -535,7 +591,7 @@ POST http://10.100.0.X:9090/refresh  → force device config reload
 
 ### Platform settings
 
-Under **Administration → Platform**:
+Under **Administration** (Admin section in the sidebar) → **Alerting** tab:
 
 - Timezone (affects business hours gating for alerts)
 - Session timeout
@@ -547,7 +603,7 @@ Under **Administration → Platform**:
 
 ### Data retention
 
-Configured under **Administration → Data**:
+Configured under **Platform Admin** (platform admins only) or **Administration** → data settings:
 
 | Data | Default | Location |
 |---|---|---|
@@ -667,4 +723,4 @@ VictoriaMetrics compresses aggressively — real usage is typically 30–50% low
 
 ---
 
-*This wiki covers Anthrimon as of Phases 1–10 complete.*
+*This wiki covers Anthrimon as of Phase 11 (custom dashboards) complete.*

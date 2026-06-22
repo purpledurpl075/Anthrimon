@@ -259,7 +259,7 @@ async def create_device(
                 detail=f"Device limit reached ({lic.max_devices}). Upgrade your license to add more devices.",
             )
 
-    fields = body.model_dump(exclude_none=True, exclude={"mgmt_ip", "credential_id", "credential_ids"})
+    fields = body.model_dump(exclude_none=True, exclude={"mgmt_ip", "credential_id", "credential_ids", "skip_probe"})
     fields.setdefault("hostname", str(body.mgmt_ip))
     if "device_type" not in fields and "vendor" in fields:
         fields.setdefault("device_type", _VENDOR_DEVICE_TYPE.get(fields["vendor"], "unknown"))
@@ -310,6 +310,7 @@ async def create_device(
 
     # Probe the device using SNMP credentials only.  Non-SNMP creds (SSH, API,
     # gNMI, NETCONF) are linked to the device but not used for the initial probe.
+    # skip_probe=True bypasses probing entirely (used by demo seeder / bulk import).
     snmp_creds = [c for c in creds if c.type in ("snmp_v2c", "snmp_v3")]
     probed_data: dict | None = None
     probe_attempted = False
@@ -317,7 +318,9 @@ async def create_device(
     ip   = str(body.mgmt_ip)
     port = body.snmp_port or 161
 
-    if not body.collector_id:
+    if body.skip_probe:
+        pass
+    elif not body.collector_id:
         probe_attempted = True
         probe_list = snmp_creds if snmp_creds else [None]
         for c in probe_list:

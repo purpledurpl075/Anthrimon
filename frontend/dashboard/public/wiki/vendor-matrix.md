@@ -11,7 +11,7 @@
 | Juniper JunOS | ✓ | ✓ | — | — | ✓ IPFIX/J-Flow | ✓ | ✓ |
 | HP ProCurve | ✓ | ✓ (invoke_shell) | — | ✓ | — | ✓ (UDP only) | ✓ |
 | Aruba CX | ✓ | ✓ (REST) | ✓ | ✓ | — | ✓ | ✓ |
-| Fortinet FortiOS | ✓ | — | — | — | ✓ v9 | ✓ | ✓ |
+| Fortinet FortiOS | ✓ | ✓ | — | — | ✓ v9 | ✓ | ✓ |
 | Ubiquiti EdgeOS | ✓ | ✓ | — | — | ✓ v9 | ✓ | ✓ |
 | Ubiquiti UniFi | ✓ | — | — | — | ✓ | ✓ | ✓ |
 | Ubiquiti AirOS | — | — | — | — | — | ✓ | — |
@@ -65,9 +65,9 @@
 ## Notes
 
 - **Config (invoke_shell)** — ProCurve switches require an interactive terminal session; collection is slower but fully supported
-- **Arista eAPI** — supplements SNMP with richer BGP, IS-IS, and LLDP data; requires an `eapi` credential type
+- **Arista eAPI** — supplements SNMP with richer BGP, IS-IS, and LLDP data; requires an `api_token` credential
 - **Aruba CX REST** — config collection uses the REST API; link an `api_token` credential
-- **FortiOS config** — SSH-based config collection is not yet implemented; use the Fortinet CLI backup export as a workaround
+- **FortiOS config** — SSH-based config collection runs `show full-configuration` via Netmiko (`fortinet` driver)
 - **UniFi** — metrics come from the gateway (UDM/USG), not individual APs
 - **Traps (hub)** — the hub receives traps directly via `anthrimon-trap-receiver` on UDP 162
 - **Traps (remote collector)** — the remote collector uses `snmptrapd` + `anthrimon-traphandler`; v3 user keys are pushed automatically from the hub when credentials are saved

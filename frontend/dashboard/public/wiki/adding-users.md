@@ -4,13 +4,14 @@
 
 | Role | Permissions |
 |------|-------------|
-| `admin` | Full access — create users, modify settings, manage credentials |
+| `superadmin` | Full access including user management and platform administration |
+| `admin` | Full access — modify settings, manage credentials, view audit log |
 | `operator` | Read/write access to devices, alerts, config |
 | `readonly` | View-only access |
 
 ## Creating a user
 
-Go to **Administration** → **Users** and click **New User**. Fill in username, password, and role.
+Go to **Users** (under Admin in the sidebar) and click **New User**. Fill in username, password, and role.
 
 Alternatively via the API:
 
@@ -23,11 +24,11 @@ curl -X POST https://<host>/api/v1/admin/users \
 
 ## Resetting a password
 
-Go to **Administration** → **Users**, click the user, and use **Reset Password**.
+Go to **Users**, click the user, and use **Reset Password**.
 
 ## Revoking access
 
-Delete the user from **Administration** → **Users**. All active sessions for that user are invalidated immediately.
+Delete the user from **Users**. All active sessions for that user are invalidated immediately.
 
 ## API tokens
 

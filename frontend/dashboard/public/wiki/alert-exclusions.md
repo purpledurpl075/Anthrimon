@@ -7,16 +7,17 @@ Use exclusions when a rule applies broadly across all devices but one particular
 ## Adding an exclusion
 
 1. Go to the device detail page
-2. Click **Alert Exclusions** (in the Settings or Actions area)
-3. Select the **metric** to suppress (e.g. `cpu_util_pct`, `interface_down`)
-4. Optionally select a specific **interface** (for interface-scoped metrics)
-5. Save
+2. Click the **gear icon** to open **Device Settings**
+3. Scroll to the **Alert ignores** section
+4. Check the **metric** to suppress (e.g. `cpu_util_pct`, `device_down`, `temperature`)
+5. For interface-down alerts, check specific **interfaces** to ignore
+6. Click **Save ignores**
 
 The exclusion takes effect on the next alert engine cycle (~15 seconds).
 
 ## Removing an exclusion
 
-Go to **Alert Exclusions** on the device and delete the relevant entry. Alerts for that metric will resume on the next evaluation.
+Open the Device Settings drawer → **Alert ignores** section, uncheck the metric or interface, and click **Save ignores**. Alerts for that metric will resume on the next evaluation.
 
 ## Exclusions vs maintenance windows
 

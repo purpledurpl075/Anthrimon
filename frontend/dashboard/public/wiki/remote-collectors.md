@@ -36,7 +36,7 @@ Use the **Hot Patch** button on the Collectors page. This builds the latest bina
 
 The remote collector receives SNMP traps from devices on the local site via `snmptrapd` (installed automatically by `install.sh`). When you save SNMP v3 credentials for a device on the hub, the hub automatically pushes a trap configuration to the collector, which restarts `snmptrapd` with the updated v3 user keys.
 
-Traps received by the collector are forwarded to the hub in real time and appear under **Logging → Traps**.
+Traps received by the collector are forwarded to the hub in real time and appear on the device detail page → **Traps** tab.
 
 ### Manual snmptrapd notes
 

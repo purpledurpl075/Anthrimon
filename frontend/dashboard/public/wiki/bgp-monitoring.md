@@ -55,4 +55,4 @@ Go to **Routing** and select a device. The **BGP** section shows:
 - Session history timeline
 - Prefix count chart per peer
 
-For a device-specific view, open the device detail page → **Routing** tab → **BGP**.
+For a device-specific view, open the device detail page → **BGP** tab.

@@ -2,7 +2,7 @@
 
 ## Run the built-in diagnostic
 
-On the device detail page, go to the **Credentials** tab and click **Run SNMP Diagnostics**. This performs a live SNMP walk and shows:
+On the device detail page, click the **gear icon** to open **Device Settings** and scroll to the **SNMP Diagnostic** section. Click **Run** to perform a live SNMP walk. This shows:
 - Which credential succeeded or failed
 - Response time
 - Sample OID values returned
@@ -62,4 +62,4 @@ The SNMP collector tries credentials in ascending priority order (1 = first). If
 Arista devices support both SNMP and eAPI. If eAPI collection is failing:
 - Verify HTTPS is enabled on the device: `management api http-commands`
 - If using HTTP (not HTTPS), ensure `eapi_allow_http: true` is set on the device record in the database
-- Check the eAPI credential type is set to `eapi` in Credentials
+- Check the credential type is set to `api_token` in Credentials

@@ -5,7 +5,7 @@
 Each rule has:
 - **Metric** — what to monitor (CPU, interface down, BGP session, etc.)
 - **Threshold** — the value that triggers the alert
-- **Severity** — `critical`, `warning`, or `info`
+- **Severity** — `critical`, `major`, `minor`, `warning`, or `info`
 - **Policy** — which notification channels to use
 
 ## Supported metrics
@@ -19,6 +19,13 @@ Each rule has:
 | `uptime` | Device uptime drops below threshold (reboot detection) | seconds |
 | `temperature` | Any sensor temperature exceeds threshold | °C |
 
+### Health
+
+| Metric | Description | Threshold |
+|--------|-------------|-----------|
+| `cpu_util_pct` | CPU utilisation above threshold | % |
+| `mem_util_pct` | Memory utilisation above threshold | % |
+
 ### Interfaces
 
 | Metric | Description | Threshold |
@@ -26,13 +33,15 @@ Each rule has:
 | `interface_down` | Interface transitions to operationally down | — |
 | `interface_flap` | Interface flaps more than N times within a time window | flap count |
 | `interface_util_pct` | Interface bandwidth utilisation exceeds threshold | % |
-| `interface_errors` | Interface error rate exceeds threshold | errors/sec |
+| `interface_errors` | Interface error rate exceeds threshold | error count (5 min) |
+| `interface_discards` | Interface discard rate exceeds threshold | discard count (5 min) |
 
 ### Routing
 
 | Metric | Description | Threshold |
 |--------|-------------|-----------|
 | `ospf_state` | OSPF neighbour adjacency lost or in non-Full state | — |
+| `isis_state` | IS-IS adjacency not in Up state | — |
 | `bgp_session_down` | BGP session drops | — |
 | `bgp_session_flapping` | BGP session flaps more than N times in a window | flap count |
 | `bgp_prefix_drop` | BGP received prefix count drops by more than threshold% | % drop |
@@ -42,15 +51,21 @@ Each rule has:
 
 | Metric | Description | Threshold |
 |--------|-------------|-----------|
-| `flow_bandwidth` | Flow traffic on an interface exceeds threshold | bps |
+| `flow_bandwidth` | Flow traffic on an interface exceeds threshold | bytes/s |
 | `syslog_match` | Syslog message matches a regex pattern | regex string |
+| `config_change` | Device running config hash changed | — |
+| `snmp_trap` | SNMP trap received from device | min occurrences in window |
+
+### System
+
+| Metric | Description | Threshold |
+|--------|-------------|-----------|
+| `collector_offline` | Remote collector heartbeat timeout | — |
 
 ### Custom
 
 | Metric | Description | Threshold |
 |--------|-------------|-----------|
-| `cpu_util_pct` | CPU utilisation above threshold | % |
-| `mem_util_pct` | Memory utilisation above threshold | % |
 | `custom_oid` | Any SNMP OID value compared against a threshold | numeric value |
 
 ## Creating a rule

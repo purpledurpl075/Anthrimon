@@ -13,13 +13,13 @@ Go to **Devices** → **Add Device** and fill in:
 
 ## 2. Link a credential
 
-Go to the device detail page → **Credentials** tab → **Link Credential**.
+On the device detail page, click the **gear icon** to open **Device Settings** → scroll to the **Credentials** section → **Link Credential**.
 
-Select an existing credential or create a new one first under **Credentials** in the sidebar. Set **priority 1** for the primary credential. See [Configuring SNMP Credentials](snmp-credentials) for details.
+Select an existing credential or create a new one first under **Credentials** in the sidebar (Admin section). Set **priority 1** for the primary credential. See [Configuring SNMP Credentials](snmp-credentials) for details.
 
 ## 3. Run SNMP diagnostics
 
-On the **Credentials** tab, click **Run SNMP Diagnostics**. This performs a live test walk and confirms:
+In the Device Settings drawer, scroll to **SNMP Diagnostic** and click **Run**. This performs a live test walk and confirms:
 
 - Which credential is being used
 - Response time in milliseconds
@@ -29,7 +29,7 @@ If this fails, see [SNMP Collection Failures](troubleshoot-snmp-failures).
 
 ## 4. Assign to a collector (if needed)
 
-By default the device is polled by the hub SNMP collector. If the device is at a remote site, assign it to a remote collector on the **Collectors** page. See [Assigning Devices to Remote Collectors](collector-device-assignment).
+By default the device is polled by the hub SNMP collector. If the device is at a remote site, set the **Collector** in the Device Settings drawer to assign it to a remote collector. See [Assigning Devices to Remote Collectors](collector-device-assignment).
 
 ## 5. Verify metrics are flowing
 

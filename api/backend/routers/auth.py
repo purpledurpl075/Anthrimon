@@ -314,6 +314,29 @@ async def _me_response(user: User, db: AsyncSession) -> MeResponse:
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
 
+@router.get("/demo-status", summary="Check if demo mode is enabled")
+async def demo_status() -> dict:
+    return {"demo_mode": _settings.demo_mode}
+
+
+@router.post("/demo-login", response_model=TokenResponse, summary="Auto-login as demo user (demo mode only)")
+async def demo_login(
+    db: AsyncSession = Depends(get_db),
+) -> TokenResponse:
+    if not _settings.demo_mode:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Not found")
+    user = (await db.execute(
+        select(User).where(User.username == "demo", User.is_active == True)  # noqa: E712
+    )).scalar_one_or_none()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Demo user not configured")
+    token, expire = _create_jwt(user)
+    await db.execute(update(User).where(User.id == user.id).values(last_login=datetime.now(timezone.utc)))
+    await db.commit()
+    logger.info("demo_login", user_id=str(user.id))
+    return TokenResponse(access_token=token, expires_in=_settings.jwt_expire_minutes * 60)
+
+
 @router.post("/login", response_model=TokenResponse, summary="Exchange username+password for a JWT")
 async def login(
     body: LoginRequest,

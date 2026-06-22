@@ -18,9 +18,9 @@ Go to **Credentials** and click **Add Credential**. Choose the SNMP version:
 ## Linking credentials to a device
 
 1. Open the device detail page
-2. Go to the **Credentials** tab
-3. Click **Link Credential** and select from the list
-4. Set **priority** — lower number = tried first (1 = highest priority)
+2. Click the **gear icon** to open the **Device Settings** drawer
+3. Scroll to the **Credentials** section and click **Link Credential**
+4. Select from the list and set **priority** — lower number = tried first (1 = highest priority)
 
 The SNMP collector tries credentials in priority order and uses the first one that responds.
 
@@ -32,7 +32,7 @@ This means: saving a v3 credential and linking it to a device is all you need to
 
 ## Testing credentials
 
-Use the **SNMP Diagnostics** button on the device's Credentials tab. This runs a live SNMP walk against the device and shows response time and sample OID values.
+In the Device Settings drawer, scroll to the **SNMP Diagnostic** section and click **Run**. This performs a live SNMP walk against the device and shows response time and sample OID values.
 
 ## ProCurve / HP switches
 

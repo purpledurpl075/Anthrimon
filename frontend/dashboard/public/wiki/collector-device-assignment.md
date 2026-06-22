@@ -5,8 +5,8 @@ By default all devices are polled by the **hub SNMP collector**. Devices at remo
 ## Assign a device to a remote collector
 
 1. Go to the device detail page
-2. Open the **Settings** or **Edit** section
-3. Set **Collector** to the desired remote collector
+2. Click the **gear icon** to open **Device Settings**
+3. In the **Collector** section, select the desired remote collector
 4. Save
 
 The remote collector pulls its device list from the hub on a 30-second refresh. The device will be picked up within the next refresh cycle.

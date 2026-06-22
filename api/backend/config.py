@@ -68,6 +68,11 @@ class Settings(BaseSettings):
     # instead of degrading to free tier. Default False (soft-fail).
     license_strict: bool = False
 
+    # ── Demo mode ─────────────────────────────────────────────────────────
+    # When True, exposes GET /auth/demo-login which auto-authenticates as a
+    # readonly demo user. Set DEMO_MODE=true in the environment.
+    demo_mode: bool = False
+
 
 @lru_cache
 def get_settings() -> Settings:

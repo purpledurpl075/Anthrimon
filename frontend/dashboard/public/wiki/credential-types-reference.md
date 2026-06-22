@@ -51,27 +51,14 @@ Used for: config collection (show running-config), ProCurve collection via invok
 
 ### `api_token`
 
-Generic API token / bearer token.
+API token or bearer token for REST API access.
 
 | Field | Description |
 |-------|-------------|
 | Token | The API token or bearer token value |
+| Base URL | Optional — base URL for API requests |
 
-Used for: Aruba CX REST API config collection.
-
----
-
-### `eapi`
-
-Arista eAPI username and password (HTTP/HTTPS JSON-RPC).
-
-| Field | Description |
-|-------|-------------|
-| Username | eAPI login username |
-| Password | eAPI login password |
-| Allow HTTP | Enable HTTP fallback (HTTPS preferred) |
-
-Used for: Arista EOS — richer BGP, IS-IS, LLDP, and interface data beyond what SNMP provides.
+Used for: Aruba CX REST API config collection, Arista eAPI (richer BGP, IS-IS, LLDP, and interface data beyond what SNMP provides).
 
 ---
 

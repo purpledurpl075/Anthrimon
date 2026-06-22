@@ -47,6 +47,7 @@ class DeviceCreate(BaseModel):
     credential_ids: Optional[list[uuid.UUID]] = None
     tags: list[str] = []
     notes: Optional[str] = None
+    skip_probe: bool = False
 
 
 class DeviceUpdate(BaseModel):

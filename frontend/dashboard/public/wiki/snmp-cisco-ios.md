@@ -33,7 +33,14 @@ snmp-server group MONITOR v3 priv access SNMP-ACL
 
 ## Enable SNMP traps (optional)
 
-Anthrimon does not currently process SNMP traps. Use syslog for event-driven alerting.
+Configure the device to send traps to the hub on UDP 162:
+
+```
+snmp-server enable traps
+snmp-server host <anthrimon-ip> version 2c <community-string>
+```
+
+For SNMPv3 traps, use `version 3 priv <username>` instead. The hub receives traps via `anthrimon-trap-receiver` and classifies them automatically. See the [Supported Vendor Matrix](vendor-matrix) for trap classification details.
 
 ## Verify
 
