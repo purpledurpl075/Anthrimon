@@ -209,9 +209,34 @@ fi
 hdr "Python — virtualenv + requirements"
 API_DIR="${REPO_DIR}/api"
 VENV_DIR="${API_DIR}/.venv"
+
+# pydantic-core requires Python ≤ 3.13.  If the system python3 is 3.14+,
+# install Python 3.12 from deadsnakes and use that for the venv.
+_PY_MAJOR=$(python3 -c 'import sys; print(sys.version_info.minor)' 2>/dev/null || echo 0)
+if (( _PY_MAJOR >= 14 )); then
+    info "System Python is 3.${_PY_MAJOR} — installing Python 3.12 for compatibility..."
+    if ! command -v python3.12 &>/dev/null; then
+        add-apt-repository -y ppa:deadsnakes/ppa >/dev/null 2>&1
+        apt-get update -qq
+        apt-get install -y -qq python3.12 python3.12-venv python3.12-dev
+    fi
+    _PYTHON=python3.12
+    ok "Using Python 3.12 for virtualenv"
+else
+    _PYTHON=python3
+fi
+
 if [[ ! -d "${VENV_DIR}" ]]; then
     info "Creating virtualenv..."
-    sudo -u "${REAL_USER}" python3 -m venv "${VENV_DIR}"
+    sudo -u "${REAL_USER}" "${_PYTHON}" -m venv "${VENV_DIR}"
+elif [[ -n "${_PYTHON}" && "${_PYTHON}" != "python3" ]]; then
+    # Recreate venv if we switched Python versions
+    _VENV_PY=$("${VENV_DIR}/bin/python3" -c 'import sys; print(sys.version_info.minor)' 2>/dev/null || echo 0)
+    if (( _VENV_PY >= 14 )); then
+        info "Recreating virtualenv with ${_PYTHON}..."
+        rm -rf "${VENV_DIR}"
+        sudo -u "${REAL_USER}" "${_PYTHON}" -m venv "${VENV_DIR}"
+    fi
 fi
 info "Installing Python requirements..."
 sudo -u "${REAL_USER}" "${VENV_DIR}/bin/pip" install --quiet --upgrade pip
