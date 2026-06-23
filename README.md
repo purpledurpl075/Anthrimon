@@ -49,7 +49,7 @@
 | 🔐 | **Security** | TOTP 2FA with backup codes · 3-tier RBAC (platform/tenant/site) · AES-256-GCM credential encryption · session revocation · API tokens with scopes · HMAC-signed webhooks |
 | 📦 | **Multi-tenancy** | Native tenant isolation · cross-tenant platform admin · site-scoped roles · per-tenant alerting overrides |
 | 📄 | **Export** | CSV export for devices and alerts · topology PNG · audit log CSV |
-| 🪪 | **Licensing** | Offline RS256 node-locked · module system · max_devices enforcement · hourly re-validation |
+
 
 **Vendor support** — Arista EOS · Cisco IOS/IOS-XE/IOS-XR/NX-OS · Juniper · Aruba CX · HP ProCurve · FortiGate · Ubiquiti · Aruba AP
 
