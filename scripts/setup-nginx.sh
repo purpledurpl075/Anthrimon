@@ -1,7 +1,11 @@
 #!/bin/bash
 set -euo pipefail
 
-DIST_DIR="/home/poly/Anthri-mon/frontend/dashboard/dist"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+REAL_USER="${SUDO_USER:-$USER}"
+REAL_HOME=$(getent passwd "${REAL_USER}" | cut -d: -f6)
+DIST_DIR="${REPO_DIR}/frontend/dashboard/dist"
 API_SERVICE="/etc/systemd/system/anthrimon-api.service"
 NGINX_CONF="/etc/nginx/sites-available/anthrimon"
 
@@ -28,7 +32,7 @@ server {
     add_header Referrer-Policy "strict-origin-when-cross-origin" always;
     add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ws:; font-src 'self'" always;
 
-    root /home/poly/Anthri-mon/frontend/dashboard/dist;
+    root DIST_DIR_PLACEHOLDER;
     index index.html;
 
     # SPA — all non-file routes serve index.html
@@ -67,15 +71,18 @@ server {
 }
 NGINX
 
+# Replace placeholder with actual dist directory
+sed -i "s|DIST_DIR_PLACEHOLDER|${DIST_DIR}|" "$NGINX_CONF"
+
 echo "==> Enabling site and removing default..."
 ln -sf "$NGINX_CONF" /etc/nginx/sites-enabled/anthrimon
 rm -f /etc/nginx/sites-enabled/default
 
 echo "==> Setting dist directory permissions for nginx..."
-chmod o+x /home/poly \
-           /home/poly/Anthri-mon \
-           /home/poly/Anthri-mon/frontend \
-           /home/poly/Anthri-mon/frontend/dashboard \
+chmod o+x "${REAL_HOME}" \
+           "${REPO_DIR}" \
+           "${REPO_DIR}/frontend" \
+           "${REPO_DIR}/frontend/dashboard" \
            "$DIST_DIR"
 
 echo "==> Testing nginx config..."

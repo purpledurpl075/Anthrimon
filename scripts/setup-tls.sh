@@ -103,7 +103,9 @@ ok "Server cert SHA-256: $FINGERPRINT"
 # ── 4. Update nginx ───────────────────────────────────────────────────────────
 info "Writing nginx HTTPS config..."
 
-FRONTEND_ROOT=$(grep -oP '(?<=root ).*(?=;)' /etc/nginx/sites-available/anthrimon 2>/dev/null || echo "/home/poly/Anthri-mon/frontend/dashboard/dist")
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+_REPO_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+FRONTEND_ROOT=$(grep -oP '(?<=root ).*(?=;)' /etc/nginx/sites-available/anthrimon 2>/dev/null || echo "${_REPO_DIR}/frontend/dashboard/dist")
 
 cat > /etc/nginx/sites-available/anthrimon <<NGINX
 map \$http_upgrade \$connection_upgrade {
@@ -189,7 +191,7 @@ echo -e "  CA cert      ${BOLD}$TLS_DIR/ca.crt${RESET}"
 echo -e "               (copy this to remote collectors)"
 echo ""
 echo -e "  Add CA to your browser/OS to remove the warning:"
-echo -e "    ${BOLD}scp poly@$HUB_IP:$TLS_DIR/ca.crt ~/anthrimon-ca.crt${RESET}"
+echo -e "    ${BOLD}scp $(whoami)@$HUB_IP:$TLS_DIR/ca.crt ~/anthrimon-ca.crt${RESET}"
 echo ""
 echo -e "  Renew server cert (run again in ~2 years):"
 echo -e "    ${BOLD}sudo bash scripts/setup-tls.sh${RESET}"

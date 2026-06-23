@@ -146,7 +146,7 @@ apt-get install -y -qq \
     curl wget gnupg2 ca-certificates lsb-release apt-transport-https \
     git build-essential openssl zstd \
     python3 python3-pip python3-venv python3-dev \
-    libpq-dev postgresql-client \
+    libpq-dev libssl-dev libffi-dev postgresql-client \
     nginx \
     wireguard wireguard-tools \
     snmptrapd \
