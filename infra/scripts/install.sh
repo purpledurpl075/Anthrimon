@@ -128,12 +128,51 @@ ask    NETFLOW_PORT "NetFlow / IPFIX UDP listen port"  "2055"
 ask    SFLOW_PORT   "sFlow UDP listen port"            "6343"
 
 echo ""
+echo -e "  ${BOLD}TLS Certificate Options:${RESET}"
+echo -e "    ${BOLD}1${RESET})  Self-signed CA  (default — generates a private CA + server cert)"
+echo -e "    ${BOLD}2${RESET})  Let's Encrypt   (free trusted cert — requires a public DNS name + port 80)"
+echo -e "    ${BOLD}3${RESET})  Bring your own  (provide your own cert + key files)"
+echo ""
+ask    TLS_MODE    "TLS mode (1/2/3)"                 "1"
+
+TLS_DOMAIN=""
+TLS_CERT_PATH=""
+TLS_KEY_PATH=""
+
+case "${TLS_MODE}" in
+    2)
+        ask TLS_DOMAIN "Domain name for Let's Encrypt (e.g. nms.acme.com)" ""
+        if [[ -z "${TLS_DOMAIN}" ]]; then
+            die "Let's Encrypt requires a domain name"
+        fi
+        ask TLS_EMAIL "Email for Let's Encrypt notifications" ""
+        ;;
+    3)
+        echo -e "  ${CYAN}→${RESET}  Provide paths to your certificate and private key (PEM format)."
+        echo -e "  ${CYAN}→${RESET}  If you have a chain/bundle, concatenate intermediate certs into the cert file."
+        ask TLS_CERT_PATH "Path to certificate file (.crt/.pem)" ""
+        ask TLS_KEY_PATH  "Path to private key file (.key/.pem)" ""
+        if [[ ! -f "${TLS_CERT_PATH}" ]]; then
+            die "Certificate file not found: ${TLS_CERT_PATH}"
+        fi
+        if [[ ! -f "${TLS_KEY_PATH}" ]]; then
+            die "Private key file not found: ${TLS_KEY_PATH}"
+        fi
+        ;;
+    *)
+        TLS_MODE="1"
+        ;;
+esac
+
+echo ""
 echo -e "  ${BOLD}Summary:${RESET}"
 echo -e "  DB role/database  : ${CYAN}${DB_USER}${RESET} / ${CYAN}${DB_NAME}${RESET}"
 echo -e "  DB password       : ${CYAN}(set)${RESET}"
 echo -e "  Public URL        : ${CYAN}${BASE_URL}${RESET}"
 echo -e "  NetFlow port      : ${CYAN}${NETFLOW_PORT}${RESET}"
 echo -e "  sFlow port        : ${CYAN}${SFLOW_PORT}${RESET}"
+_TLS_LABELS=("" "Self-signed CA" "Let's Encrypt (${TLS_DOMAIN})" "Custom certificate")
+echo -e "  TLS mode          : ${CYAN}${_TLS_LABELS[${TLS_MODE}]}${RESET}"
 echo ""
 ask_yn _CONFIRM "Proceed with installation?"
 [[ "${_CONFIRM}" == "y" ]] || die "Aborted."
@@ -799,7 +838,18 @@ ok "Frontend built to ${FRONTEND_DIR}/dist"
 # ── 14. TLS (self-signed CA + server certificate) ─────────────────────────────
 
 hdr "TLS certificates"
-bash "${REPO_DIR}/scripts/setup-tls.sh"
+
+case "${TLS_MODE}" in
+    1)
+        bash "${REPO_DIR}/scripts/setup-tls.sh" --mode self-signed
+        ;;
+    2)
+        bash "${REPO_DIR}/scripts/setup-tls.sh" --mode letsencrypt --domain "${TLS_DOMAIN}" --email "${TLS_EMAIL}"
+        ;;
+    3)
+        bash "${REPO_DIR}/scripts/setup-tls.sh" --mode custom --cert "${TLS_CERT_PATH}" --key "${TLS_KEY_PATH}"
+        ;;
+esac
 # The API process (REAL_USER) needs to read ca.crt to include it in collector
 # deployment packages.  Keep the private key root-only; only open the CA cert.
 chmod 755 "${TLS_DIR}"
