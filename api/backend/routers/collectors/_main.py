@@ -3332,6 +3332,7 @@ async def _push_trap_config(collector_id: str | None, tenant_id: str) -> None:
             try:
                 with open(_SNMPTRAPD_CONF_PATH, "w") as fh:
                     fh.write(conf)
+                os.chmod(_SNMPTRAPD_CONF_PATH, 0o600)
                 try:
                     os.remove(_SNMPTRAPD_PERSIST_PATH)
                 except FileNotFoundError:

@@ -1043,7 +1043,7 @@ func maskToPrefixLen(mask string) int {
 	bits := 0
 	for _, p := range parts {
 		v, err := strconv.Atoi(p)
-		if err != nil {
+		if err != nil || v < 0 || v > 255 {
 			break
 		}
 		b := uint8(v)

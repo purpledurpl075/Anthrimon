@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"time"
 
@@ -67,6 +68,10 @@ func (s *Server) handleAPIProbe(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.IP == "" || req.Method == "" {
 		http.Error(w, "ip and method are required", http.StatusBadRequest)
+		return
+	}
+	if net.ParseIP(req.IP) == nil {
+		http.Error(w, "invalid IP address", http.StatusBadRequest)
 		return
 	}
 

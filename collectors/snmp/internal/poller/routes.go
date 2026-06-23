@@ -262,7 +262,10 @@ func octetsToIPv6(octets []string) string {
 	}
 	raw := make(net.IP, 16)
 	for i, o := range octets {
-		v, _ := strconv.Atoi(o)
+		v, err := strconv.Atoi(o)
+		if err != nil || v < 0 || v > 255 {
+			return ""
+		}
 		raw[i] = byte(v)
 	}
 	return raw.String()

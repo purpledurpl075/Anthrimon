@@ -436,7 +436,7 @@ func splitISISLSPIndex(pduName, tableOID string) (col, level int, lspID string, 
 	b := make([]byte, 8)
 	for i := 0; i < 8; i++ {
 		v, e := strconv.Atoi(parts[2+skip+1+i])
-		if e != nil {
+		if e != nil || v < 0 || v > 255 {
 			return -1, 0, "", "", false
 		}
 		b[i] = byte(v)
@@ -468,7 +468,7 @@ func isisParseInstance(parts []string) (string, int) {
 	b := make([]byte, instLen)
 	for i := 0; i < instLen; i++ {
 		v, e := strconv.Atoi(parts[1+i])
-		if e != nil {
+		if e != nil || v < 0 || v > 255 {
 			return "", -1
 		}
 		b[i] = byte(v)
