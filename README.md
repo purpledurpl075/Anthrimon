@@ -7,9 +7,9 @@
 
 <div align="center">
 
-[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%20|%2024.04-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com)
-[![Python](https://img.shields.io/badge/Python-3.12-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
-[![Go](https://img.shields.io/badge/Go-1.22-00ADD8?style=flat-square&logo=go&logoColor=white)](https://go.dev)
+[![Ubuntu](https://img.shields.io/badge/Ubuntu-22.04%20|%2024.04%20|%2026.04-E95420?style=flat-square&logo=ubuntu&logoColor=white)](https://ubuntu.com)
+[![Python](https://img.shields.io/badge/Python-3.12+-3776AB?style=flat-square&logo=python&logoColor=white)](https://python.org)
+[![Go](https://img.shields.io/badge/Go-1.26-00ADD8?style=flat-square&logo=go&logoColor=white)](https://go.dev)
 [![React](https://img.shields.io/badge/React-19-61DAFB?style=flat-square&logo=react&logoColor=black)](https://react.dev)
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-14-4169E1?style=flat-square&logo=postgresql&logoColor=white)](https://postgresql.org)
 [![ClickHouse](https://img.shields.io/badge/ClickHouse-26.x-FFCC01?style=flat-square&logo=clickhouse&logoColor=black)](https://clickhouse.com)
@@ -21,8 +21,9 @@
 <br>
 
 <p align="center">
-  Self-hosted network monitoring — deep SNMP polling, NetFlow/sFlow analysis, syslog ingest,<br>
-  SNMP traps, config management, alerting, topology mapping, and distributed remote collectors.
+  Self-hosted network monitoring — deep SNMP polling, NetFlow/sFlow analytics, syslog ingest,<br>
+  SNMP traps, config management with rollback, alerting with anomaly detection, topology mapping,<br>
+  BGP/OSPF/IS-IS routing analysis, and distributed remote collectors over WireGuard.
 </p>
 
 ---
@@ -31,17 +32,22 @@
 
 | | Capability | Details |
 |:---:|:---|:---|
-| 📡 | **SNMP monitoring** | Interface counters · CPU/memory/temperature/uptime · DOM optical power · ARP/MAC · LLDP/CDP neighbors · OSPF · IS-IS · STP · VLANs · routing table · BGP |
-| 🌊 | **Flow monitoring** | NetFlow v5/v9, IPFIX, sFlow v5 — top talkers, protocol breakdown, per-interface analysis, flow alerts |
-| 📋 | **Syslog** | RFC 3164 + RFC 5424 · UDP/TCP :514 · severity breakdown · pattern-match alerts · alert correlation |
+| 📡 | **SNMP monitoring** | Interface counters (HC 64-bit) · CPU/memory/temperature/uptime · DOM optical power · TCAM/FIB utilisation · ARP/MAC tables · LLDP/CDP neighbors · OSPF/IS-IS/BGP · STP · VLANs · routing table · vendor-specific (Arista TCAM, Cisco CoPP, Aruba CX VSX/loop-protect) |
+| 🌊 | **Flow analytics** | NetFlow v5/v9, IPFIX, sFlow v5 — 15 analysis dimensions: top talkers, ASN, geo, threats (AbuseIPDB), applications, elephant flows, TCP flags, subnet breakdown |
+| 📋 | **Syslog** | RFC 3164 + RFC 5424 · UDP/TCP :514 · severity/facility breakdown · pattern-match alerts · alert correlation · rate heatmaps |
 | 🪤 | **SNMP traps** | v1/v2c/v3 authPriv · vendor-aware classification · hub and remote-site collection · automatic v3 key push |
-| ⚙️ | **Config management** | SSH backup · diff viewer · compliance policies · multi-device deploy with template variables |
-| 🔔 | **Alerting** | 15-second evaluation · 16 metric types · email/Slack/PagerDuty/Teams · maintenance windows · syslog correlation |
-| 🗺️ | **Topology** | Live L2/L3 map from LLDP/CDP · bandwidth sparklines · persistent layout |
-| 🛰️ | **Remote collectors** | WireGuard-tunnelled distributed polling — SNMP, flow, syslog, and trap collection at remote sites |
-| 🖥️ | **Dashboard** | Customizable overview · drag-to-reorder widgets · dark mode · mobile layout |
+| ⚙️ | **Config management** | SSH backup with git archive · unified diff viewer · compliance policies · golden config scoring · multi-device deploy with template variables · vendor-native rollback (7 platforms) · change approval workflow |
+| 🔔 | **Alerting** | 15-second evaluation · 23 metric types · adaptive baselines (14-day rolling) · topology-aware cascade suppression · escalation · email/Slack/PagerDuty/Teams/webhook · maintenance windows · bulk ack/resolve |
+| 🗺️ | **Topology** | Live L2/L3 map from LLDP/CDP · tier-band auto layout · link utilisation overlay · WAN cloud nodes · PNG export · OSPF area and IS-IS topology views |
+| 📊 | **Routing analysis** | BGP sessions with prefix history and flap detection · OSPF neighbor and area topology · IS-IS adjacencies, circuit-levels, LSP database · IPv4 + IPv6 route table |
+| 🛰️ | **Remote collectors** | WireGuard-tunnelled distributed polling — SNMP, flow, syslog, config backup/deploy/rollback, and trap collection at remote sites · self-update with SHA-256 verification |
+| 🖥️ | **Dashboards** | 24 widget types · drag-and-drop grid · templates · kiosk mode · clone and share |
+| 🔐 | **Security** | TOTP 2FA with backup codes · 3-tier RBAC (platform/tenant/site) · AES-256-GCM credential encryption · session revocation · API tokens with scopes · HMAC-signed webhooks |
+| 📦 | **Multi-tenancy** | Native tenant isolation · cross-tenant platform admin · site-scoped roles · per-tenant alerting overrides |
+| 📄 | **Export** | CSV export for devices and alerts · topology PNG · audit log CSV |
+| 🪪 | **Licensing** | Offline RS256 node-locked · module system · max_devices enforcement · hourly re-validation |
 
-**Vendor support** — Arista EOS · Cisco IOS/IOS-XE/IOS-XR/NX-OS · Juniper · Aruba CX · HP ProCurve · FortiGate · Ubiquiti UniFi · Aruba AP
+**Vendor support** — Arista EOS · Cisco IOS/IOS-XE/IOS-XR/NX-OS · Juniper · Aruba CX · HP ProCurve · FortiGate · Ubiquiti · Aruba AP
 
 ---
 
@@ -73,7 +79,7 @@
       <a href="https://github.com/user-attachments/assets/32711003-dc57-4f34-bfac-c9c929ae4803" target="_blank">
         <img src="https://github.com/user-attachments/assets/32711003-dc57-4f34-bfac-c9c929ae4803" alt="Flow monitoring" width="100%">
       </a>
-      <br><sub><b>Flow monitoring</b></sub>
+      <br><sub><b>Flow analytics</b></sub>
     </td>
   </tr>
   <tr>
@@ -104,9 +110,9 @@
 
 ## Requirements
 
-- Ubuntu 22.04 or 24.04 LTS (bare metal or VM)
+- Ubuntu 22.04, 24.04, or 26.04 LTS (bare metal or VM)
 - 2+ CPU cores · 4 GB RAM minimum (8 GB recommended)
-- Outbound internet access for the installer
+- Outbound internet access for the installer (Go, Node.js, Python packages)
 
 ---
 
@@ -129,7 +135,7 @@ The installer prompts for:
 | NetFlow/IPFIX port | `2055` | UDP |
 | sFlow port | `6343` | UDP |
 
-It installs all dependencies, creates the database, runs all migrations, builds all Go collectors and the React frontend, generates TLS certificates, configures nginx with HTTPS, sets up the WireGuard hub interface, and registers all systemd services.
+It installs all dependencies (including Python 3.12 on systems where the default is 3.14+), creates the database, runs all migrations, builds all Go collectors and the React frontend, generates TLS certificates, configures nginx with HTTPS + WebSocket support, sets up the WireGuard hub interface, and registers all systemd services.
 
 ### First login
 
@@ -144,6 +150,23 @@ Navigate to `https://<your-server-ip>/` and sign in with the default superadmin 
 
 ---
 
+## Updating
+
+```bash
+git pull
+sudo bash infra/scripts/update.sh
+```
+
+The update script:
+1. Stops all services (API, collectors, snmptrapd)
+2. Updates Python dependencies
+3. Applies any new database migrations (PostgreSQL + ClickHouse)
+4. Rebuilds all Go collectors (hub + remote amd64/arm64)
+5. Rebuilds the frontend (`npm install` + `npm run build`)
+6. Restarts all services — only if all builds succeeded
+
+---
+
 ## Architecture
 
 ```
@@ -154,7 +177,8 @@ Browser ────────────────────────
                               ┌─────────────────────┼─────────────────────┐
                               ▼                     ▼                     ▼
                         PostgreSQL          VictoriaMetrics           ClickHouse
-                      (alerts, cfg)          (SNMP metrics)     (flows, syslog, traps)
+                      (config, alerts,       (SNMP metrics)     (flows, syslog, traps)
+                       routing, topology)
 
 Network devices (hub site)
   SNMP polling  ◀────── snmp-collector (Go)
@@ -163,7 +187,7 @@ Network devices (hub site)
   SNMP traps    ───────▶ snmptrapd + anthrimon-traphandler  :162 UDP
 
 Remote sites (WireGuard tunnel 10.100.0.0/24)
-  wg0: 10.100.0.1 ◀──── anthrimon-collector (Go)          SNMP + flow + syslog + trap forwarding
+  wg0: 10.100.0.1 ◀──── anthrimon-collector (Go)          SNMP + flow + syslog + config + eAPI/REST
                    ◀──── snmptrapd + anthrimon-traphandler traps from local devices
 ```
 
@@ -173,19 +197,19 @@ Remote sites (WireGuard tunnel 10.100.0.0/24)
 
 | Component | Technology |
 |---|---|
-| API | Python 3.12 · FastAPI · SQLAlchemy · uvicorn |
-| Frontend | React 19 · Vite · Tailwind CSS v4 · React Query |
-| Time-series | VictoriaMetrics |
-| Flow/Syslog/Trap storage | ClickHouse |
+| API | Python 3.12 · FastAPI · SQLAlchemy 2.0 · uvicorn |
+| Frontend | React 19 · Vite 8 · Tailwind CSS v4 · TanStack Query |
+| Time-series | VictoriaMetrics (12-month retention) |
+| Flow/Syslog/Trap storage | ClickHouse (graded TTL: 90d raw → 3yr aggregated) |
 | Relational DB | PostgreSQL 14 |
-| SNMP collector | Go 1.22 |
-| Flow collector | Go 1.22 — NetFlow v5/v9, IPFIX, sFlow v5 |
-| Syslog collector | Go 1.22 — RFC 3164 + RFC 5424 |
+| SNMP collector | Go · gosnmp · LLDP/CDP/OSPF/IS-IS/BGP/STP/VLANs/routes |
+| Flow collector | Go — NetFlow v5/v9, IPFIX, sFlow v5 |
+| Syslog collector | Go — RFC 3164 + RFC 5424, UDP + TCP |
 | Hub trap receiver | net-snmp `snmptrapd` (:162) → `anthrimon-traphandler` (Go) |
-| Remote collector | Go 1.22 — SNMP + flow + syslog + trap forwarding |
-| Trap handler | Go 1.22 — snmptrapd exec handler (hub + remote sites) |
-| Reverse proxy | nginx — HTTPS with self-signed CA |
-| VPN | WireGuard — remote collector tunnels |
+| Remote collector | Go — SNMP + flow + syslog + config backup/deploy/rollback + eAPI + REST + ICMP probe |
+| Reverse proxy | nginx — TLS 1.2/1.3 with self-signed EC P-384 CA |
+| VPN | WireGuard — remote collector tunnels (10.100.0.0/24) |
+| Auth | JWT (HS256, 24h) · TOTP 2FA · bcrypt-12 · AES-256-GCM credentials |
 
 ---
 
@@ -227,7 +251,7 @@ For devices at remote sites that can't reach the hub directly, deploy a lightwei
 
 **Register a collector** — in the Anthrimon UI:
 
-1. Go to **Configuration → Collectors → New collector**
+1. Go to **Admin → Collectors → New collector**
 2. Complete the setup wizard and download the deployment package
 3. On the remote server:
 
@@ -238,11 +262,13 @@ sudo bash install.sh
 
 The install script installs `wireguard-tools` and `snmptrapd`, copies the binary, config, and hub CA cert, configures capability overrides for port 162 binding, and starts `anthrimon-collector.service`. The collector self-registers over HTTPS, establishes the WireGuard tunnel, downloads the trap handler binary, and appears **online** in the UI within seconds.
 
+The collector supports hot-patch self-updates — when you rebuild collector binaries on the hub, connected collectors download and apply the update automatically.
+
 ---
 
 ## TLS
 
-The installer generates a self-signed CA and server certificate. The CA cert lives at `/etc/anthrimon/tls/ca.crt`.
+The installer generates a self-signed EC P-384 CA (10-year) and server certificate (2-year). The CA cert lives at `/etc/anthrimon/tls/ca.crt`.
 
 **Add to your browser** (removes the security warning):
 
@@ -261,20 +287,9 @@ sudo bash scripts/setup-tls.sh
 
 ---
 
-## Upgrading
-
-```bash
-git pull
-sudo bash infra/scripts/install.sh
-```
-
-The installer is idempotent — it skips steps already complete (existing CA, existing WireGuard config, already-applied migrations).
-
----
-
 ## Disk Space
 
-Rough estimates for 90-day retention defaults:
+Rough estimates for default retention:
 
 | Data type | Per device/day | 10 devices, 90 days |
 |---|---|---|
@@ -283,7 +298,7 @@ Rough estimates for 90-day retention defaults:
 | Syslog (ClickHouse) | ~10 MB | ~9 GB |
 | Config backups (PostgreSQL) | ~100 KB/backup | negligible |
 
-Flow data dominates. A quiet network exporting at 1,000 flows/second averages ~4 GB/day in ClickHouse. Reduce the ClickHouse TTL from the default 90 days in **Administration → Data** if disk is constrained.
+Flow data dominates. A quiet network exporting at 1,000 flows/second averages ~4 GB/day in ClickHouse. Adjust retention in **Administration → Data**.
 
 VictoriaMetrics compresses time-series data aggressively — real usage is typically 30–50% lower than the estimate above.
 
@@ -299,27 +314,34 @@ collectors/
   syslog/         Go syslog collector
   remote/
     cmd/
-      remote-collector/   Remote collector agent (WireGuard + SNMP + flow + syslog + trap forwarding)
+      remote-collector/   Remote collector agent (WireGuard + SNMP + flow + syslog + config + eAPI/REST)
       trap-handler/       snmptrapd exec handler (deployed to remote sites)
       trap-receiver/      Standalone UDP trap receiver (legacy — hub now uses snmptrapd)
 api/
   backend/
-    routers/      FastAPI endpoints
-    models/       SQLAlchemy models
-    alerting/     Alert engine + evaluators
-    configmgmt/   Config backup/deploy engine
+    routers/      FastAPI endpoints (~280 endpoints across 31 routers)
+    models/       SQLAlchemy ORM models
+    schemas/      Pydantic request/response schemas
+    alerting/     Alert engine + 23 evaluators + baselines + suppression
+    configmgmt/   Config backup/deploy/rollback engine
+    licensing/    Offline RS256 license verification + module loader
+    intel/        GeoIP + AbuseIPDB threat intelligence
+    services/     State writers (BGP, OSPF, IS-IS, routes)
 frontend/
-  dashboard/      React 19 + Vite frontend
+  dashboard/      React 19 + Vite 8 frontend (33 pages, 24 widget types)
 storage/
   migrations/
-    postgres/     PostgreSQL schema migrations
-    clickhouse/   ClickHouse schema migrations
+    postgres/     PostgreSQL schema migrations (57 + seed)
+    clickhouse/   ClickHouse schema migrations (5)
 logos/            Branding assets (SVG)
 infra/
   scripts/
-    install.sh         Full installer — prompts for config, installs everything
-    setup-tls.sh       Generate self-signed CA + server cert, configure nginx HTTPS
-    setup-wireguard.sh Set up WireGuard hub interface (wg0, 10.100.0.1/24)
+    install.sh    Full installer — prompts for config, installs everything
+    update.sh     Update script — stops services, rebuilds, restarts
+scripts/
+  setup-tls.sh       Generate self-signed CA + server cert, configure nginx HTTPS
+  setup-wireguard.sh Set up WireGuard hub interface (wg0, 10.100.0.1/24)
+  setup-nginx.sh     HTTP-only nginx config (standalone, not used by installer)
 ```
 
 </details>
@@ -328,8 +350,7 @@ infra/
 
 ## Documentation
 
-- **[API Reference](https://purpledurpl075.github.io/Anthri-mon/)** — interactive endpoint browser with request/response schemas, generated from the running API's OpenAPI 3.1 spec (190 endpoints)
-- **[Wiki](WIKI.md)** — operator guide for SNMP, flow, syslog, alerts, config management, topology
+- **[API Reference](https://purpledurpl075.github.io/Anthri-mon/)** — interactive endpoint browser with request/response schemas, generated from the running API's OpenAPI 3.1 spec
 
 ## Contributing
 
