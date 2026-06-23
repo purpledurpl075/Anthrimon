@@ -26,6 +26,10 @@
   BGP/OSPF/IS-IS routing analysis, and distributed remote collectors over WireGuard.
 </p>
 
+<p align="center">
+  <a href="https://demo.anthrimon.com"><strong>Live Demo</strong></a> — explore a fully populated instance with 28 devices, real topology, flow analytics, and alerting
+</p>
+
 ---
 
 ## Features
