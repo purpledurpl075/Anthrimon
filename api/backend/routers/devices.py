@@ -485,7 +485,7 @@ async def export_devices_csv(
 
 @router.get("/sites", summary="List sites for this tenant (id + name only)")
 async def list_device_sites(
-    current_user: User = Depends(require_role("admin", "superadmin", "operator")),
+    current_user: User = Depends(require_role("admin", "superadmin", "operator", "readonly")),
     db: AsyncSession = Depends(get_db),
 ) -> list[dict]:
     from ..models.site import Site
