@@ -53,8 +53,12 @@ const SEVERITY_ORDER = ['critical', 'major', 'minor', 'warning', 'info']
 const CIRCLE_SIZE = 68       // px — diameter of the node circle
 const CIRCLE_R    = CIRCLE_SIZE / 2
 const NODE_W      = 100      // total node width including text label
-const H_STEP      = 180
-const V_STEP      = 150
+const H_STEP      = 200
+const V_STEP      = 170
+
+// Gap between site groups when doing site-aware layout
+const SITE_GAP_X  = 540     // px between site columns
+const SITE_GAP_Y  = 300     // px between site rows
 
 // Cloud node dimensions
 const CLOUD_W     = 96       // px — width of the cloud SVG
@@ -212,6 +216,74 @@ function hierLayout(
   }
 
   return { pos, layer }
+}
+
+// ── Site-aware layout ──────────────────────────────────────────────────────
+// Groups nodes by site, runs hierLayout per-site (intra-site edges only),
+// then tiles the resulting blocks in a 2-column grid with generous gaps.
+// Falls back to flat hierLayout when there is only one site.
+function siteAwareLayout(
+  nodes: TopologyNode[],
+  rawEdges: Pick<ApiEdge, 'source' | 'target'>[],
+): ReturnType<typeof hierLayout> {
+  if (!nodes.length) return { pos: {}, layer: {} }
+
+  const bySite = new Map<string, TopologyNode[]>()
+  nodes.forEach(n => {
+    const key = n.site_id ?? UNASSIGNED_SITE
+    if (!bySite.has(key)) bySite.set(key, [])
+    bySite.get(key)!.push(n)
+  })
+
+  const realSites = [...bySite.keys()].filter(k => k !== UNASSIGNED_SITE)
+  if (realSites.length <= 1) return hierLayout(nodes, rawEdges)
+
+  const allPos:   Record<string, { x: number; y: number }> = {}
+  const allLayer: Record<string, number> = {}
+
+  type Block = { pos: Record<string, { x: number; y: number }>; w: number; h: number }
+
+  // Sort: larger sites first, unassigned last
+  const sorted = [...bySite.entries()].sort(([ka, a], [kb, b]) => {
+    if (ka === UNASSIGNED_SITE) return 1
+    if (kb === UNASSIGNED_SITE) return -1
+    return b.length - a.length
+  })
+
+  const blocks: Block[] = sorted.map(([, siteNodes]) => {
+    const siteIds       = new Set(siteNodes.map(n => n.id))
+    const intraSiteEdges = rawEdges.filter(e => siteIds.has(e.source) && siteIds.has(e.target))
+    const { pos: sp, layer: sl } = hierLayout(siteNodes, intraSiteEdges)
+
+    const xs   = Object.values(sp).map(p => p.x)
+    const ys   = Object.values(sp).map(p => p.y)
+    const minX = xs.length ? Math.min(...xs) : 0
+    const minY = ys.length ? Math.min(...ys) : 0
+    const maxX = xs.length ? Math.max(...xs) : 0
+    const maxY = ys.length ? Math.max(...ys) : 0
+
+    const normPos: Record<string, { x: number; y: number }> = {}
+    for (const [id, p] of Object.entries(sp)) normPos[id] = { x: p.x - minX, y: p.y - minY }
+    for (const [id, l] of Object.entries(sl)) allLayer[id] = l
+
+    return { pos: normPos, w: maxX - minX + NODE_W, h: maxY - minY + CIRCLE_SIZE + 80 }
+  })
+
+  // Tile in 2-column grid
+  const COLS = Math.min(blocks.length, 2)
+  let yOff = 0
+  for (let row = 0; row * COLS < blocks.length; row++) {
+    const rowBlocks = blocks.slice(row * COLS, row * COLS + COLS)
+    const rowH = Math.max(...rowBlocks.map(b => b.h))
+    let xOff = 0
+    for (const block of rowBlocks) {
+      for (const [id, p] of Object.entries(block.pos)) allPos[id] = { x: xOff + p.x, y: yOff + p.y }
+      xOff += block.w + SITE_GAP_X
+    }
+    yOff += rowH + SITE_GAP_Y
+  }
+
+  return { pos: allPos, layer: allLayer }
 }
 
 // ── Node ───────────────────────────────────────────────────────────────────
@@ -875,7 +947,7 @@ function UtilLegend() {
 
 // ── Layout persistence ────────────────────────────────────────────────────
 
-const LAYOUT_KEY = 'topology_layout_v1'
+const LAYOUT_KEY = 'topology_layout_v2'
 
 function loadSavedLayout(): Record<string, { x: number; y: number }> {
   try { return JSON.parse(localStorage.getItem(LAYOUT_KEY) ?? '{}') }
@@ -1128,7 +1200,7 @@ function TopologyPageInner() {
       (!hiddenTypes.has(n.device_type) && !hiddenSites.has(n.site_id ?? UNASSIGNED_SITE) &&
        !hiddenNodeIds.has(n.id) && (showIsolated || n.connected))
     )
-    const { pos, layer } = hierLayout(visible, data.edges)
+    const { pos, layer } = siteAwareLayout(visible, data.edges)
     const nodeIds = new Set(visible.map(n => n.id))
 
     // Issues-only: collect alerting node IDs + their direct neighbours
@@ -1207,7 +1279,8 @@ function TopologyPageInner() {
         const exitsToCloud = pathExitGatewayId === gw.id
         const isCloudDimmed = isPathMode
           ? !exitsToCloud
-          : (searchMatchIds !== null && searchMatchIds.size > 0) || showIssuesOnly
+          : (searchMatchIds !== null && searchMatchIds.size > 0) ||
+            (showIssuesOnly && !alertingIds.has(gw.id) && !issuesNeighbourIds.has(gw.id))
 
         return {
           id,
@@ -1258,7 +1331,10 @@ function TopologyPageInner() {
         const edgeDimmed = isPathMode
           ? !isPathEdge
           : (!!selectedId && !isAdj) ||
-            (searchMatchIds !== null && !searchMatchIds.has(e.source) && !searchMatchIds.has(e.target))
+            (searchMatchIds !== null && !searchMatchIds.has(e.source) && !searchMatchIds.has(e.target)) ||
+            (showIssuesOnly &&
+              !alertingIds.has(e.source) && !alertingIds.has(e.target) &&
+              !issuesNeighbourIds.has(e.source) && !issuesNeighbourIds.has(e.target))
 
         return {
           id: e.id, source: e.source, target: e.target,
@@ -1291,7 +1367,8 @@ function TopologyPageInner() {
       const exitsToCloud = pathExitGatewayId === gw.id
       const wanDimmed = isPathMode
         ? !exitsToCloud
-        : (searchMatchIds !== null && searchMatchIds.size > 0) || showIssuesOnly
+        : (searchMatchIds !== null && searchMatchIds.size > 0) ||
+          (showIssuesOnly && !alertingIds.has(gw.id) && !issuesNeighbourIds.has(gw.id))
       return {
         id:     `wan-edge-${gw.id}`,
         source: cloudNodeId(gw.id),
@@ -1568,7 +1645,7 @@ function TopologyPageInner() {
               try { localStorage.removeItem(LAYOUT_KEY) } catch { /* ignore */ }
               if (data) {
                 const visible = data.nodes.filter(n => !hiddenTypes.has(n.device_type) && !hiddenSites.has(n.site_id ?? UNASSIGNED_SITE) && !hiddenNodeIds.has(n.id) && (showIsolated || n.connected))
-                const { pos } = hierLayout(visible, data.edges)
+                const { pos } = siteAwareLayout(visible, data.edges)
                 setRfNodes(prev => prev.map(n => ({ ...n, position: pos[n.id] ?? n.position })))
               }
             }}

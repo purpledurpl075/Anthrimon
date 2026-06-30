@@ -8,6 +8,6 @@ The full implementation lives in _main.py.  Future incremental splits:
   _auth.py      — WireGuard + API-key auth helpers
   _shared.py    — shared constants, state, and utility functions
 """
-from ._main import router
+from ._main import router, _discover_engine_id, _push_trap_config
 
-__all__ = ["router"]
+__all__ = ["router", "_discover_engine_id", "_push_trap_config"]
