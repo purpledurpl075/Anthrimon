@@ -1173,6 +1173,14 @@ function TopologyPageInner() {
     return () => clearTimeout(timer)
   }, [pathNodeIdSet])  // eslint-disable-line react-hooks/exhaustive-deps
 
+  // ── Fit view when Issues Only is toggled ──────────────────────────────
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      fitView({ padding: 0.28, duration: 400 })
+    }, 80)
+    return () => clearTimeout(timer)
+  }, [showIssuesOnly])  // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Build ReactFlow nodes + edges ─────────────────────────────────────
   const nodesById = Object.fromEntries((data?.nodes ?? []).map(n => [n.id, n]))
   const deviceTypes = [...new Set((data?.nodes ?? []).map(n => n.device_type))].filter(Boolean)
@@ -1195,23 +1203,29 @@ function TopologyPageInner() {
   useEffect(() => {
     if (!data) return
 
-    const visible = data.nodes.filter(n =>
-      pathNodeIdSet.has(n.id) ||
-      (!hiddenTypes.has(n.device_type) && !hiddenSites.has(n.site_id ?? UNASSIGNED_SITE) &&
-       !hiddenNodeIds.has(n.id) && (showIsolated || n.connected))
-    )
-    const { pos, layer } = siteAwareLayout(visible, data.edges)
-    const nodeIds = new Set(visible.map(n => n.id))
-
-    // Issues-only: collect alerting node IDs + their direct neighbours
+    // Compute alerting sets first — used in the visible filter below
     const alertingIds = new Set(Object.keys(alertsByDevice))
     const issuesNeighbourIds = new Set<string>()
-    if (showIssuesOnly) {
+    if (showIssuesOnly && alertingIds.size > 0) {
       data.edges.forEach(e => {
         if (alertingIds.has(e.source)) issuesNeighbourIds.add(e.target)
         if (alertingIds.has(e.target)) issuesNeighbourIds.add(e.source)
       })
     }
+
+    const visible = data.nodes.filter(n => {
+      if (pathNodeIdSet.has(n.id)) return true
+      if (hiddenTypes.has(n.device_type)) return false
+      if (hiddenSites.has(n.site_id ?? UNASSIGNED_SITE)) return false
+      if (hiddenNodeIds.has(n.id)) return false
+      if (!showIsolated && !n.connected) return false
+      // Issues Only: only keep alerting devices and their direct neighbours
+      if (showIssuesOnly && alertingIds.size > 0 &&
+          !alertingIds.has(n.id) && !issuesNeighbourIds.has(n.id)) return false
+      return true
+    })
+    const { pos, layer } = siteAwareLayout(visible, data.edges)
+    const nodeIds = new Set(visible.map(n => n.id))
 
     // ── Cloud / WAN node synthesis ─────────────────────────────────────────
     // Pick one WAN gateway PER SITE: the border device (router/firewall/LB)
@@ -1248,7 +1262,6 @@ function TopologyPageInner() {
       const deviceRfNodes = visible.map(n => {
         const isSearchDimmed  = searchMatchIds !== null && !searchMatchIds.has(n.id)
         const isSearchHit     = searchMatchIds !== null && searchMatchIds.has(n.id)
-        const isIssuesDimmed  = showIssuesOnly && !alertingIds.has(n.id) && !issuesNeighbourIds.has(n.id)
         const isPathHit       = isPathMode && pathNodeIdSet.has(n.id)
         return {
           id:       n.id,
@@ -1258,7 +1271,7 @@ function TopologyPageInner() {
           data: {
             ...n,
             alerts:    alertsByDevice[n.id] ?? null,
-            dimmed:    isPathMode ? !isPathHit : (isSearchDimmed || isIssuesDimmed),
+            dimmed:    isPathMode ? !isPathHit : isSearchDimmed,
             searchHit: isPathMode ? false : isSearchHit,
             pathOrder: isPathHit ? (pathOrderMap.get(n.id) ?? null) : null,
             _layer:    layer[n.id] ?? 0,
@@ -1331,10 +1344,7 @@ function TopologyPageInner() {
         const edgeDimmed = isPathMode
           ? !isPathEdge
           : (!!selectedId && !isAdj) ||
-            (searchMatchIds !== null && !searchMatchIds.has(e.source) && !searchMatchIds.has(e.target)) ||
-            (showIssuesOnly &&
-              !alertingIds.has(e.source) && !alertingIds.has(e.target) &&
-              !issuesNeighbourIds.has(e.source) && !issuesNeighbourIds.has(e.target))
+            (searchMatchIds !== null && !searchMatchIds.has(e.source) && !searchMatchIds.has(e.target))
 
         return {
           id: e.id, source: e.source, target: e.target,
