@@ -35,6 +35,18 @@ PLATFORM_DEFAULTS: dict = {
     "abuseipdb_api_key": "",
     # Remote collectors
     "wg_public_endpoint": "",
+    # Postgres housekeeping (api/backend/housekeeping.py) — pruning windows for
+    # otherwise-unbounded operational tables
+    "interface_status_log_days":        90,
+    "bgp_session_events_days":          90,
+    "notification_send_log_days":       90,
+    "trap_events_days":                 30,
+    "config_backups_keep_per_device":   50,
+    "compliance_results_keep_per_pair": 20,
+    # Host-level storage — applied via privileged helper scripts, see
+    # scripts/apply-vm-retention.sh and scripts/apply-journald-limit.sh
+    "vm_retention_months":  12,
+    "journald_max_use_mb":  1024,
 }
 
 # Of the keys above, these may be overridden per-tenant in

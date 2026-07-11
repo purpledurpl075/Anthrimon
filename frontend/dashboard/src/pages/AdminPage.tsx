@@ -1759,10 +1759,23 @@ export default function AdminPage() {
 // ── Data management tab ────────────────────────────────────────────────────────
 
 interface DataStats {
-  alerts:  { count: number; size: string; oldest: string|null; retention_days: number }
-  flow:    { rows: number;  size: string; oldest: string|null; retention_days: number }
-  syslog:  { rows: number;  size: string; oldest: string|null; retention_days: number }
-  config:  { backup_count: number; size: string }
+  alerts:         { count: number; size: string; oldest: string|null; retention_days: number }
+  flow:           { rows: number;  size: string; oldest: string|null; retention_days: number }
+  syslog:         { rows: number;  size: string; oldest: string|null; retention_days: number }
+  system_logs:    { rows: number;  size: string; oldest: string|null; retention_days: number }
+  collector_logs: { rows: number;  size: string; oldest: string|null; retention_days: number }
+  config:         { backup_count: number; size: string }
+  housekeeping: {
+    interface_status_log:  { rows: number; size: string; retention_days: number }
+    bgp_session_events:    { rows: number; size: string; retention_days: number }
+    notification_send_log: { rows: number; size: string; retention_days: number }
+    trap_events:           { rows: number; size: string; retention_days: number }
+    config_backups_keep_per_device: number
+    compliance_results_keep_per_pair: number
+  }
+  metrics: { size: string; retention_months: number }
+  journal: { size: string; max_size_mb: number }
+  disk:    { total: number; used: number; free: number; pct_used: number }
 }
 
 function fmtNum(n: number): string {
@@ -1778,21 +1791,26 @@ function fmtAge(iso: string|null): string {
   return d === 0 ? 'today' : `${d}d ago`
 }
 
-function RetentionCard({ title, description, icon, stats, onSave, saving }: {
+function RetentionCard({ title, description, icon, stats, onSave, saving, unit = 'days', min = 1, max = 3650, note }: {
   title: string
   description: string
   icon: React.ReactNode
   stats: { label: string; value: string }[]
-  onSave: (days: number) => void
+  onSave: (value: number) => void
   saving: boolean
+  unit?: string
+  min?: number
+  max?: number
+  note?: string
 }) {
-  const currentDays = stats.find(s => s.label === 'Retention')?.value.replace(' days', '') ?? '90'
-  const [days, setDays] = React.useState(currentDays)
+  const parseCurrent = () => stats.find(s => s.label === 'Retention')?.value.replace(` ${unit}`, '') ?? String(min)
+  const [value, setValue] = React.useState(parseCurrent)
 
   // sync if stats update
   React.useEffect(() => {
-    setDays(stats.find(s => s.label === 'Retention')?.value.replace(' days', '') ?? '90')
-  }, [stats])
+    setValue(parseCurrent())
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stats, unit])
 
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-6">
@@ -1821,20 +1839,118 @@ function RetentionCard({ title, description, icon, stats, onSave, saving }: {
         <label className="text-xs font-medium text-slate-600 shrink-0">Retention</label>
         <div className="flex items-center gap-2 flex-1">
           <input
-            type="number" min={1} max={3650}
-            value={days}
-            onChange={e => setDays(e.target.value)}
+            type="number" min={min} max={max}
+            value={value}
+            onChange={e => setValue(e.target.value)}
             className="w-20 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
-          <span className="text-sm text-slate-500">days</span>
+          <span className="text-sm text-slate-500">{unit}</span>
         </div>
         <button
-          onClick={() => onSave(Number(days))}
-          disabled={saving || Number(days) < 1}
+          onClick={() => onSave(Number(value))}
+          disabled={saving || Number(value) < min}
           className="px-4 py-1.5 text-xs font-medium bg-slate-800 text-white rounded-xl hover:bg-slate-700 transition-colors disabled:opacity-50 shrink-0"
         >
           {saving ? 'Saving…' : 'Save'}
         </button>
+      </div>
+      {note && <p className="text-[10px] text-amber-600 mt-3">{note}</p>}
+    </div>
+  )
+}
+
+function HousekeepingCard({ stats, onSave, saving }: {
+  stats: DataStats['housekeeping']
+  onSave: (body: {
+    interface_status_log_days: number
+    bgp_session_events_days: number
+    notification_send_log_days: number
+    trap_events_days: number
+    config_backups_keep_per_device: number
+    compliance_results_keep_per_pair: number
+  }) => void
+  saving: boolean
+}) {
+  const [f, setF] = React.useState({
+    interface_status_log_days:  stats.interface_status_log.retention_days,
+    bgp_session_events_days:    stats.bgp_session_events.retention_days,
+    notification_send_log_days: stats.notification_send_log.retention_days,
+    trap_events_days:           stats.trap_events.retention_days,
+    config_backups_keep_per_device:   stats.config_backups_keep_per_device,
+    compliance_results_keep_per_pair: stats.compliance_results_keep_per_pair,
+  })
+
+  const num = (k: keyof typeof f) => (
+    <input type="number" min={1} max={3650} value={f[k]}
+      onChange={e => setF(p => ({ ...p, [k]: Number(e.target.value) }))}
+      className="w-24 border border-slate-200 rounded-lg px-3 py-1.5 text-sm text-center focus:outline-none focus:ring-2 focus:ring-blue-500" />
+  )
+
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-6">
+      <div className="flex items-start justify-between gap-4 mb-2">
+        <div>
+          <h3 className="text-sm font-semibold text-slate-800">Housekeeping</h3>
+          <p className="text-xs text-slate-400 mt-0.5">
+            Operational tables pruned automatically every 6 hours, stored in PostgreSQL
+          </p>
+        </div>
+        <button
+          onClick={() => onSave(f)}
+          disabled={saving}
+          className="px-4 py-1.5 text-xs font-medium bg-slate-800 text-white rounded-xl hover:bg-slate-700 transition-colors disabled:opacity-50 shrink-0"
+        >
+          {saving ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+
+      <SettingRow label="Interface status log"
+        description={`${fmtNum(stats.interface_status_log.rows)} rows · ${stats.interface_status_log.size}`}>
+        <div className="flex items-center gap-2 justify-end">{num('interface_status_log_days')}<span className="text-sm text-slate-500">days</span></div>
+      </SettingRow>
+      <SettingRow label="BGP session events"
+        description={`${fmtNum(stats.bgp_session_events.rows)} rows · ${stats.bgp_session_events.size}`}>
+        <div className="flex items-center gap-2 justify-end">{num('bgp_session_events_days')}<span className="text-sm text-slate-500">days</span></div>
+      </SettingRow>
+      <SettingRow label="Notification send log"
+        description={`${fmtNum(stats.notification_send_log.rows)} rows · ${stats.notification_send_log.size}`}>
+        <div className="flex items-center gap-2 justify-end">{num('notification_send_log_days')}<span className="text-sm text-slate-500">days</span></div>
+      </SettingRow>
+      <SettingRow label="Trap events"
+        description={`${fmtNum(stats.trap_events.rows)} rows · ${stats.trap_events.size}`}>
+        <div className="flex items-center gap-2 justify-end">{num('trap_events_days')}<span className="text-sm text-slate-500">days</span></div>
+      </SettingRow>
+      <SettingRow label="Config backups"
+        description="Keep this many most-recent backups per device">
+        <div className="flex items-center gap-2 justify-end">{num('config_backups_keep_per_device')}<span className="text-sm text-slate-500">per device</span></div>
+      </SettingRow>
+      <SettingRow label="Compliance results"
+        description="Keep this many most-recent results per device+policy pair">
+        <div className="flex items-center gap-2 justify-end">{num('compliance_results_keep_per_pair')}<span className="text-sm text-slate-500">per pair</span></div>
+      </SettingRow>
+    </div>
+  )
+}
+
+function DiskUsageStrip({ disk }: { disk: DataStats['disk'] }) {
+  const color = disk.pct_used >= 90 ? '#dc2626' : disk.pct_used >= 70 ? '#f59e0b' : '#16a34a'
+  const fmtBytes = (b: number) => {
+    if (b >= 1e12) return `${(b/1e12).toFixed(1)} TB`
+    if (b >= 1e9)  return `${(b/1e9).toFixed(1)} GB`
+    if (b >= 1e6)  return `${(b/1e6).toFixed(1)} MB`
+    return `${b} B`
+  }
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5">
+      <div className="flex items-center justify-between mb-2">
+        <p className="text-sm font-semibold text-slate-800">Disk usage</p>
+        <p className="text-sm font-bold tabular-nums" style={{ color }}>
+          {disk.pct_used}% used · {fmtBytes(disk.free)} free of {fmtBytes(disk.total)}
+        </p>
+      </div>
+      <div className="w-full h-2 bg-slate-100 rounded-full overflow-hidden">
+        <div className="h-full rounded-full transition-all"
+          style={{ width: `${Math.min(disk.pct_used, 100)}%`, backgroundColor: color }} />
       </div>
     </div>
   )
@@ -1854,9 +1970,25 @@ function DataTab() {
     onSuccess:  () => qc.invalidateQueries({ queryKey: ['data-stats'] }),
   })
 
-  const alertMut  = makeMut('/admin/data/retention/alerts')
-  const flowMut   = makeMut('/admin/data/retention/flow')
-  const syslogMut = makeMut('/admin/data/retention/syslog')
+  const alertMut         = makeMut('/admin/data/retention/alerts')
+  const flowMut          = makeMut('/admin/data/retention/flow')
+  const syslogMut        = makeMut('/admin/data/retention/syslog')
+  const systemLogsMut    = makeMut('/admin/data/retention/system-logs')
+  const collectorLogsMut = makeMut('/admin/data/retention/collector-logs')
+
+  const metricsMut = useMutation({
+    mutationFn: (months: number) => api.put('/admin/data/retention/metrics', { retention_months: months }),
+    onSuccess:  () => qc.invalidateQueries({ queryKey: ['data-stats'] }),
+  })
+  const journalMut = useMutation({
+    mutationFn: (mb: number) => api.put('/admin/data/retention/journal', { max_size_mb: mb }),
+    onSuccess:  () => qc.invalidateQueries({ queryKey: ['data-stats'] }),
+  })
+  const housekeepingMut = useMutation({
+    mutationFn: (body: Parameters<React.ComponentProps<typeof HousekeepingCard>['onSave']>[0]) =>
+      api.put('/admin/data/retention/housekeeping', body),
+    onSuccess:  () => qc.invalidateQueries({ queryKey: ['data-stats'] }),
+  })
 
   if (isLoading || !stats) {
     return <div className="p-8 text-slate-400 text-sm">Loading…</div>
@@ -1903,6 +2035,58 @@ function DataTab() {
       saving: syslogMut.isPending,
     },
     {
+      title: 'ClickHouse system logs',
+      description: "ClickHouse's own internal diagnostic logs (query/trace/text/etc) — safe to keep short",
+      icon: <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></svg>,
+      stats: [
+        { label: 'Records',   value: fmtNum(stats.system_logs.rows) },
+        { label: 'Size',      value: stats.system_logs.size },
+        { label: 'Retention', value: `${stats.system_logs.retention_days} days` },
+      ],
+      onSave: (d: number) => systemLogsMut.mutate(d),
+      saving: systemLogsMut.isPending,
+      min: 1, max: 90,
+    },
+    {
+      title: 'Collector logs',
+      description: 'Operational/debug logs forwarded from remote collectors, stored in ClickHouse',
+      icon: <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 8h10M7 12h10M7 16h6"/></svg>,
+      stats: [
+        { label: 'Records',   value: fmtNum(stats.collector_logs.rows) },
+        { label: 'Size',      value: stats.collector_logs.size },
+        { label: 'Oldest',    value: fmtAge(stats.collector_logs.oldest) },
+        { label: 'Retention', value: `${stats.collector_logs.retention_days} days` },
+      ],
+      onSave: (d: number) => collectorLogsMut.mutate(d),
+      saving: collectorLogsMut.isPending,
+    },
+    {
+      title: 'Metrics (VictoriaMetrics)',
+      description: 'Device SNMP/telemetry time-series data',
+      icon: <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M3 3v18h18"/><path d="M18 17V9M13 17V5M8 17v-4"/></svg>,
+      stats: [
+        { label: 'Size',      value: stats.metrics.size },
+        { label: 'Retention', value: `${stats.metrics.retention_months} months` },
+      ],
+      onSave: (m: number) => metricsMut.mutate(m),
+      saving: metricsMut.isPending,
+      unit: 'months', min: 1, max: 120,
+      note: 'Saving briefly restarts the VictoriaMetrics service (~1-2s gap in metric ingestion).',
+    },
+    {
+      title: 'System journal (journald)',
+      description: 'OS-level systemd journal on the hub',
+      icon: <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>,
+      stats: [
+        { label: 'Size',      value: stats.journal.size },
+        { label: 'Cap',       value: `${stats.journal.max_size_mb} MB` },
+      ],
+      onSave: (mb: number) => journalMut.mutate(mb),
+      saving: journalMut.isPending,
+      unit: 'MB', min: 64, max: 16384,
+      note: 'Saving briefly restarts systemd-journald.',
+    },
+    {
       title: 'Config backups',
       description: 'Device running-config snapshots stored in PostgreSQL',
       icon: <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M9 17H7A5 5 0 0 1 7 7h2"/><path d="M15 7h2a5 5 0 0 1 0 10h-2"/><line x1="8" y1="12" x2="16" y2="12"/></svg>,
@@ -1922,6 +2106,8 @@ function DataTab() {
         </p>
       </div>
 
+      <DiskUsageStrip disk={stats.disk} />
+
       {sections.map(s => (
         <RetentionCard
           key={s.title}
@@ -1931,8 +2117,18 @@ function DataTab() {
           stats={s.stats}
           onSave={s.onSave ?? (() => {})}
           saving={s.saving ?? false}
+          unit={s.unit}
+          min={s.min}
+          max={s.max}
+          note={s.note}
         />
       ))}
+
+      <HousekeepingCard
+        stats={stats.housekeeping}
+        onSave={body => housekeepingMut.mutate(body)}
+        saving={housekeepingMut.isPending}
+      />
     </div>
   )
 }

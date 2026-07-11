@@ -406,6 +406,23 @@ for f in "${CH_MIGRATIONS}"/*.sql; do
         || warn "${fname} returned errors (tables may already exist)"
 done
 
+# ClickHouse's own internal diagnostic logs (system.text_log, trace_log, etc)
+# have no TTL by default and grow unbounded — left unmanaged this fills the
+# disk in weeks (seen: 37G accumulated in ~2 months on one deployment).
+# Discovered live (not hardcoded) since the exact set of tables varies by
+# ClickHouse version. Idempotent — safe to re-run on every install/upgrade.
+# Tunable afterwards via Admin > Data > Storage (PUT /admin/data/retention/system-logs).
+info "Applying ClickHouse system-log TTL (14 days default)..."
+CH_SYSTEM_LOG_TABLES=$(clickhouse-client --query "
+    SELECT name FROM system.tables
+    WHERE database = 'system' AND engine LIKE '%MergeTree%' AND name LIKE '%\_log'
+" 2>/dev/null)
+for t in ${CH_SYSTEM_LOG_TABLES}; do
+    clickhouse-client --query "ALTER TABLE system.${t} MODIFY TTL event_date + toIntervalDay(14)" 2>/dev/null \
+        || warn "could not set TTL on system.${t}"
+done
+ok "ClickHouse system-log TTL applied to $(echo "${CH_SYSTEM_LOG_TABLES}" | wc -w) table(s)"
+
 # ── 8. VictoriaMetrics ────────────────────────────────────────────────────────
 
 hdr "VictoriaMetrics ${VM_VERSION}"
@@ -909,6 +926,40 @@ sed "s/__API_USER__/${REAL_USER}/g" \
 chmod 440 "${BACKUP_SUDOERS_DST}"
 visudo -cf "${BACKUP_SUDOERS_DST}" && ok "sudoers rule written: ${BACKUP_SUDOERS_DST}" \
     || { rm -f "${BACKUP_SUDOERS_DST}"; warn "sudoers syntax check failed — skipping"; }
+
+# ── 16b2. Storage retention (journald cap, VM/journald sudoers) ──────────────
+
+hdr "Storage retention"
+
+# journald has no cap by default and relies on systemd's implicit default —
+# bound it from day one so it can't silently fill the disk. Tunable
+# afterwards via Admin > Data > Storage (PUT /admin/data/retention/journal).
+mkdir -p /etc/systemd/journald.conf.d
+cat > /etc/systemd/journald.conf.d/99-anthrimon.conf <<EOF
+# Managed by Anthrimon — Admin > Data > Storage. Do not edit by hand;
+# changes will be overwritten on next save.
+[Journal]
+SystemMaxUse=1024M
+EOF
+systemctl restart systemd-journald
+ok "journald capped at 1024M (SystemMaxUse)"
+
+# Helper scripts the API shells out to (via sudo) to apply VM/journald
+# retention changes made in Admin > Data > Storage — both need root to
+# rewrite a systemd unit/drop-in and restart a service.
+install -m 0755 "${REPO_DIR}/scripts/apply-vm-retention.sh"    /usr/local/bin/apply-vm-retention.sh
+install -m 0755 "${REPO_DIR}/scripts/apply-journald-limit.sh"  /usr/local/bin/apply-journald-limit.sh
+ok "apply-vm-retention.sh / apply-journald-limit.sh installed to /usr/local/bin"
+
+# Sudoers grant so the API user (running non-interactively) can invoke just
+# these two scripts as root — narrow, exact-command grants (not a blanket
+# alias like the backup tool's), since these are purpose-built helpers.
+STORAGE_SUDOERS_DST="/etc/sudoers.d/anthrimon-storage"
+sed "s/__API_USER__/${REAL_USER}/g" \
+    "${REPO_DIR}/infra/sudoers.d/anthrimon-storage" > "${STORAGE_SUDOERS_DST}"
+chmod 440 "${STORAGE_SUDOERS_DST}"
+visudo -cf "${STORAGE_SUDOERS_DST}" && ok "sudoers rule written: ${STORAGE_SUDOERS_DST}" \
+    || { rm -f "${STORAGE_SUDOERS_DST}"; warn "sudoers syntax check failed — skipping"; }
 
 # ── 16c. Config rollback firewall (device-pulls-from-HTTP) ───────────────────
 

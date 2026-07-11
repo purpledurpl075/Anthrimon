@@ -1,0 +1,13 @@
+# Anthrimon — allow the API service user to apply storage retention changes
+# made in Admin > Data > Storage without a password.
+#
+# Both scripts are narrow, purpose-built helpers (see scripts/apply-vm-retention.sh
+# and scripts/apply-journald-limit.sh) that validate their own arguments —
+# these grants intentionally use exact command paths (not a blanket alias
+# like anthrimon-backup's), since each script does exactly one thing.
+#
+# Installed to /etc/sudoers.d/anthrimon-storage by infra/scripts/install.sh
+# Syntax checked with: visudo -cf /etc/sudoers.d/anthrimon-storage
+
+__API_USER__ ALL=(root) NOPASSWD: /usr/local/bin/apply-vm-retention.sh *
+__API_USER__ ALL=(root) NOPASSWD: /usr/local/bin/apply-journald-limit.sh *

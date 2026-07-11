@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import shutil
+import subprocess
 from datetime import datetime, timezone
 from textwrap import dedent
 
@@ -844,6 +847,39 @@ async def data_stats(
         "SELECT pg_size_pretty(pg_total_relation_size('config_backups'))"
     ))).scalar_one()
 
+    housekeeping_tables = [
+        ("interface_status_log", "interface_status_log_days"),
+        ("bgp_session_events",   "bgp_session_events_days"),
+        ("notification_send_log", "notification_send_log_days"),
+        ("trap_events",          "trap_events_days"),
+    ]
+    housekeeping_stats: dict = {}
+    for table, _ in housekeeping_tables:
+        count = (await db.execute(text(f"SELECT count(*) FROM {table}"))).scalar_one()
+        size = (await db.execute(text(
+            f"SELECT pg_size_pretty(pg_total_relation_size('{table}'))"
+        ))).scalar_one()
+        housekeeping_stats[table] = {"rows": count, "size": size}
+
+    def _du_human(path: str) -> str:
+        try:
+            result = subprocess.run(["du", "-sh", path], capture_output=True, text=True, timeout=10)
+            return result.stdout.split()[0] if result.returncode == 0 and result.stdout else "unknown"
+        except Exception:
+            return "unknown"
+
+    vm_size = _du_human("/var/lib/victoria-metrics")
+
+    journal_size = "unknown"
+    try:
+        result = subprocess.run(["journalctl", "--disk-usage"], capture_output=True, text=True, timeout=10)
+        m = re.search(r'([\d.]+[KMGT]?)\s+in the file system', result.stdout)
+        journal_size = m.group(1) if m else _du_human("/var/log/journal")
+    except Exception:
+        journal_size = _du_human("/var/log/journal")
+
+    disk_total, disk_used, disk_free = shutil.disk_usage("/")
+
     platform = await load_platform_defaults(db)
 
     # ClickHouse queries — degrade gracefully if unavailable
@@ -852,6 +888,10 @@ async def data_stats(
     ch_syslog: list[dict] = []
     ch_syslog_oldest: list[dict] = []
     ch_ttls: list[dict] = []
+    ch_system_logs_size: list[dict] = []
+    ch_system_log_ttls: list[dict] = []
+    ch_collector_logs: list[dict] = []
+    ch_collector_logs_oldest: list[dict] = []
     try:
         ch_flow = await _ch_admin(
             "SELECT count() AS rows, formatReadableSize(sum(bytes_on_disk)) AS size "
@@ -869,14 +909,32 @@ async def data_stats(
         )
         ch_ttls = await _ch_admin(
             "SELECT name, engine_full FROM system.tables "
-            "WHERE database='default' AND name IN ('flow_records','syslog_messages')"
+            "WHERE database='default' AND name IN ('flow_records','syslog_messages','collector_logs')"
+        )
+        system_log_tables = await _ch_system_log_tables()
+        if system_log_tables:
+            names = ",".join(f"'{t}'" for t in system_log_tables)
+            ch_system_logs_size = await _ch_admin(
+                "SELECT count() AS rows, formatReadableSize(sum(bytes_on_disk)) AS size "
+                f"FROM system.parts WHERE database='system' AND table IN ({names}) AND active=1"
+            )
+            ch_system_log_ttls = await _ch_admin(
+                "SELECT name, engine_full FROM system.tables "
+                f"WHERE database='system' AND name IN ({names})"
+            )
+        ch_collector_logs = await _ch_admin(
+            "SELECT count() AS rows, formatReadableSize(sum(bytes_on_disk)) AS size "
+            "FROM system.parts WHERE database='default' AND table='collector_logs' AND active=1"
+        )
+        ch_collector_logs_oldest = await _ch_admin(
+            "SELECT min(ts) AS oldest FROM collector_logs"
         )
     except Exception as exc:
         logger.warning("data_stats_clickhouse_unavailable", error=str(exc))
 
-    def _ttl(engine_full: str) -> int:
+    def _ttl(engine_full: str, default: int = 90) -> int:
         m = _re.search(r'toIntervalDay\((\d+)\)', engine_full)
-        return int(m.group(1)) if m else 90
+        return int(m.group(1)) if m else default
 
     def _oldest(rows: list[dict], key: str) -> Optional[str]:
         """Return ISO timestamp or None; treats epoch/zero as absent."""
@@ -889,6 +947,8 @@ async def data_stats(
         return s
 
     ttl_map = {r["name"]: _ttl(r["engine_full"]) for r in ch_ttls}
+    system_log_ttl_days = [_ttl(r["engine_full"], default=14) for r in ch_system_log_ttls]
+    system_log_retention = min(system_log_ttl_days) if system_log_ttl_days else 14
 
     return {
         "alerts": {
@@ -909,9 +969,47 @@ async def data_stats(
             "oldest":         _oldest(ch_syslog_oldest, "oldest"),
             "retention_days": ttl_map.get("syslog_messages", 90),
         },
+        "system_logs": {
+            "rows":           int(ch_system_logs_size[0]["rows"]) if ch_system_logs_size else 0,
+            "size":           ch_system_logs_size[0].get("size", "0 B") if ch_system_logs_size else "0 B",
+            "oldest":         None,
+            "retention_days": system_log_retention,
+        },
+        "collector_logs": {
+            "rows":           int(ch_collector_logs[0]["rows"]) if ch_collector_logs else 0,
+            "size":           ch_collector_logs[0].get("size", "0 B") if ch_collector_logs else "0 B",
+            "oldest":         _oldest(ch_collector_logs_oldest, "oldest"),
+            "retention_days": ttl_map.get("collector_logs", 30),
+        },
         "config": {
             "backup_count": cb_count,
             "size":         cb_size,
+        },
+        "housekeeping": {
+            "interface_status_log":  {**housekeeping_stats["interface_status_log"],
+                                       "retention_days": platform.get("interface_status_log_days", 90)},
+            "bgp_session_events":    {**housekeeping_stats["bgp_session_events"],
+                                       "retention_days": platform.get("bgp_session_events_days", 90)},
+            "notification_send_log": {**housekeeping_stats["notification_send_log"],
+                                       "retention_days": platform.get("notification_send_log_days", 90)},
+            "trap_events":           {**housekeeping_stats["trap_events"],
+                                       "retention_days": platform.get("trap_events_days", 30)},
+            "config_backups_keep_per_device":   platform.get("config_backups_keep_per_device", 50),
+            "compliance_results_keep_per_pair": platform.get("compliance_results_keep_per_pair", 20),
+        },
+        "metrics": {
+            "size":             vm_size,
+            "retention_months": platform.get("vm_retention_months", 12),
+        },
+        "journal": {
+            "size":       journal_size,
+            "max_size_mb": platform.get("journald_max_use_mb", 1024),
+        },
+        "disk": {
+            "total": disk_total,
+            "used":  disk_used,
+            "free":  disk_free,
+            "pct_used": round(disk_used / disk_total * 100, 1) if disk_total else 0,
         },
     }
 
@@ -938,6 +1036,37 @@ async def set_alert_retention(
         db.add(PlatformSetting(key="alert_retention_days", value=body.retention_days))
     await db.commit()
     return {"retention_days": body.retention_days}
+
+
+class HousekeepingRetentionUpdate(BaseModel):
+    interface_status_log_days: int
+    bgp_session_events_days: int
+    notification_send_log_days: int
+    trap_events_days: int
+    config_backups_keep_per_device: int
+    compliance_results_keep_per_pair: int
+
+
+@router.put("/data/retention/housekeeping", summary="Set Postgres housekeeping retention windows")
+async def set_housekeeping_retention(
+    body: HousekeepingRetentionUpdate,
+    _: Principal = Depends(require_platform()),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    values = body.model_dump()
+    for key, value in values.items():
+        if not 1 <= value <= 3650:
+            raise HTTPException(status_code=400, detail=f"{key} must be 1–3650")
+        row = (await db.execute(
+            select(PlatformSetting).where(PlatformSetting.key == key)
+        )).scalar_one_or_none()
+        if row:
+            row.value = value
+            row.updated_at = datetime.utcnow()
+        else:
+            db.add(PlatformSetting(key=key, value=value))
+    await db.commit()
+    return values
 
 
 @router.put("/data/retention/flow", summary="Set flow data TTL in ClickHouse")
@@ -976,3 +1105,112 @@ async def set_syslog_retention(body: RetentionUpdate, _: Principal = Depends(req
         raise HTTPException(status_code=502,
                             detail=f"{len(errors)} TTL update(s) failed — check server logs")
     return {"retention_days": d}
+
+
+async def _ch_system_log_tables() -> list[str]:
+    """ClickHouse's own internal diagnostic log tables (system.text_log, trace_log, etc).
+
+    Discovered live rather than hardcoded — the exact set varies by ClickHouse version.
+    Left unmanaged these grow unbounded (no TTL by default) and can fill the disk."""
+    rows = await _ch_admin(
+        "SELECT name FROM system.tables "
+        "WHERE database = 'system' AND engine LIKE '%MergeTree%' AND name LIKE '%\\_log'"
+    )
+    return [r["name"] for r in rows]
+
+
+@router.put("/data/retention/system-logs", summary="Set TTL on ClickHouse's own internal diagnostic logs")
+async def set_system_log_retention(body: RetentionUpdate, _: Principal = Depends(require_platform())) -> dict:
+    if not 1 <= body.retention_days <= 90:
+        raise HTTPException(status_code=400, detail="retention_days must be 1–90")
+    d = body.retention_days
+    tables = await _ch_system_log_tables()
+    errors: list[str] = []
+    for table in tables:
+        try:
+            await _ch_admin(f"ALTER TABLE system.{table} MODIFY TTL event_date + toIntervalDay({d})")
+        except Exception as exc:
+            errors.append(str(exc))
+            logger.error("clickhouse_ttl_update_failed", table=f"system.{table}", error=str(exc))
+    if errors:
+        raise HTTPException(status_code=502,
+                            detail=f"{len(errors)} TTL update(s) failed — check server logs")
+    return {"retention_days": d}
+
+
+@router.put("/data/retention/collector-logs", summary="Set collector operational log TTL in ClickHouse")
+async def set_collector_log_retention(body: RetentionUpdate, _: Principal = Depends(require_platform())) -> dict:
+    if not 1 <= body.retention_days <= 3650:
+        raise HTTPException(status_code=400, detail="retention_days must be 1–3650")
+    d = body.retention_days
+    try:
+        await _ch_admin(f"ALTER TABLE collector_logs MODIFY TTL toDateTime(ts) + toIntervalDay({d})")
+    except Exception as exc:
+        logger.error("clickhouse_ttl_update_failed", table="collector_logs", error=str(exc))
+        raise HTTPException(status_code=502, detail="TTL update failed — check server logs")
+    return {"retention_days": d}
+
+
+def _run_storage_script(script: str, arg: str) -> None:
+    """Run one of the narrow, sudoers-scoped helper scripts in scripts/
+    (installed to /usr/local/bin/), e.g. apply-vm-retention.sh, which need
+    root to rewrite a systemd unit/drop-in and restart a service."""
+    result = subprocess.run(
+        ["sudo", f"/usr/local/bin/{script}", arg],
+        capture_output=True, text=True, timeout=30,
+    )
+    if result.returncode != 0:
+        logger.error("storage_script_failed", script=script, arg=arg, stderr=result.stderr)
+        raise HTTPException(status_code=502, detail=f"{script} failed: {result.stderr.strip() or 'unknown error'}")
+
+
+class MonthsRetentionUpdate(BaseModel):
+    retention_months: int
+
+
+@router.put("/data/retention/metrics", summary="Set VictoriaMetrics retention period")
+async def set_metrics_retention(
+    body: MonthsRetentionUpdate,
+    _: Principal = Depends(require_platform()),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    if not 1 <= body.retention_months <= 120:
+        raise HTTPException(status_code=400, detail="retention_months must be 1–120")
+    m = body.retention_months
+    _run_storage_script("apply-vm-retention.sh", str(m))
+    row = (await db.execute(
+        select(PlatformSetting).where(PlatformSetting.key == "vm_retention_months")
+    )).scalar_one_or_none()
+    if row:
+        row.value = m
+        row.updated_at = datetime.utcnow()
+    else:
+        db.add(PlatformSetting(key="vm_retention_months", value=m))
+    await db.commit()
+    return {"retention_months": m}
+
+
+class JournalRetentionUpdate(BaseModel):
+    max_size_mb: int
+
+
+@router.put("/data/retention/journal", summary="Set journald max disk usage cap")
+async def set_journal_retention(
+    body: JournalRetentionUpdate,
+    _: Principal = Depends(require_platform()),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    if not 64 <= body.max_size_mb <= 16384:
+        raise HTTPException(status_code=400, detail="max_size_mb must be 64–16384")
+    mb = body.max_size_mb
+    _run_storage_script("apply-journald-limit.sh", str(mb))
+    row = (await db.execute(
+        select(PlatformSetting).where(PlatformSetting.key == "journald_max_use_mb")
+    )).scalar_one_or_none()
+    if row:
+        row.value = mb
+        row.updated_at = datetime.utcnow()
+    else:
+        db.add(PlatformSetting(key="journald_max_use_mb", value=mb))
+    await db.commit()
+    return {"max_size_mb": mb}
