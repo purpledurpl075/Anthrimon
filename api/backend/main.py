@@ -14,6 +14,11 @@ from fastapi.encoders import ENCODERS_BY_TYPE
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+# Default-deny "other" access to every file/dir this process creates (config
+# archive commits, uploaded backups, etc.) — the previous default umask (022)
+# left device credential backups world-readable on disk.
+os.umask(0o027)
+
 # All datetimes in this app are stored/returned as UTC.  Naive datetimes come
 # from PostgreSQL TIMESTAMP WITHOUT TIME ZONE columns.  Append 'Z' so that
 # JavaScript's Date constructor treats them as UTC and toLocaleString() etc.

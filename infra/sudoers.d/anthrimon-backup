@@ -1,17 +1,29 @@
 # /etc/sudoers.d/anthrimon-backup
 #
 # Grants the Anthrimon API user passwordless sudo for the specific commands
-# the backup tool needs to read root-owned files (TLS keys, .env files,
-# WireGuard keys, systemd unit files).
+# the backup/restore tools need: reading root-owned files (TLS keys, .env
+# files, WireGuard keys, systemd unit files) via tar, and stopping/starting
+# services during a restore.
 #
 # Install:
 #     sudo install -m 0440 infra/sudoers.d/anthrimon-backup /etc/sudoers.d/anthrimon-backup
 #     sudo visudo -c   # verify
 #
-# Security model: tar arguments aren't restricted by sudoers (would be brittle
-# and easy to bypass).  Treat the API service account as having read access to
-# the entire filesystem — which is consistent with the fact that it can
-# already dump every secret stored in /etc/anthrimon by configuration.
+# Security model:
+#   - tar arguments aren't restricted (would be brittle and easy to bypass).
+#     Treat the API service account as having read access to the entire
+#     filesystem — consistent with it already being able to dump every secret
+#     stored in /etc/anthrimon by configuration. The API itself never invokes
+#     `sudo tar` directly — only scripts/anthrimon-backup does, for the paths
+#     listed above.
+#   - systemctl is NOT given a blanket grant (an unrestricted `sudo systemctl`
+#     is a documented root-escape primitive — pager escape on `systemctl
+#     status`, `SYSTEMD_EDITOR=/bin/sh systemctl edit --force`, `systemctl
+#     link` a malicious unit). The API process itself never calls `sudo
+#     systemctl` at all — every line below exists solely for the manual,
+#     operator-run `scripts/anthrimon-restore` CLI (never invoked by the API),
+#     and is scoped to exactly the subcommand+unit combinations that script
+#     uses (its `SERVICES` list — see scripts/anthrimon-restore).
 #
 # Adjust the `Cmnd_Alias ANTHRIMON_BACKUP_USER` line if your install runs the
 # API as a different user (default: poly).
@@ -20,7 +32,27 @@
 
 Cmnd_Alias ANTHRIMON_BACKUP_CMDS = \
     /usr/bin/tar, \
-    /bin/tar, \
-    /usr/bin/systemctl
+    /bin/tar
 
 __API_USER__ ALL=(root) NOPASSWD: ANTHRIMON_BACKUP_CMDS
+
+# scripts/anthrimon-restore — exact commands only, no blanket systemctl grant
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl daemon-reload
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop anthrimon-api
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop snmp-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop flow-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop syslog-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop anthrimon-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl stop anthrimon-trap-receiver
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start anthrimon-api
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start snmp-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start flow-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start syslog-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start anthrimon-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl start anthrimon-trap-receiver
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl is-enabled anthrimon-api
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl is-enabled snmp-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl is-enabled flow-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl is-enabled syslog-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl is-enabled anthrimon-collector
+__API_USER__ ALL=(root) NOPASSWD: /usr/bin/systemctl is-enabled anthrimon-trap-receiver

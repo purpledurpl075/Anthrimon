@@ -32,6 +32,7 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _BLOCKED_NETS = [
+    ipaddress.ip_network("0.0.0.0/8"),
     ipaddress.ip_network("127.0.0.0/8"),
     ipaddress.ip_network("10.0.0.0/8"),
     ipaddress.ip_network("172.16.0.0/12"),
@@ -43,23 +44,56 @@ _BLOCKED_NETS = [
 ]
 
 
-def _is_url_safe(url: str) -> bool:
-    """Return False if the URL resolves to a private/loopback/link-local IP."""
+def _is_blocked(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress._BaseNetwork | None:
+    """Return the matching blocked network, or None if ip is externally routable.
+    Also checks the unwrapped IPv4 address for IPv4-mapped IPv6 (::ffff:a.b.c.d),
+    which would otherwise slip past the IPv6-only entries above."""
+    candidates = [ip]
+    if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+        candidates.append(ip.ipv4_mapped)
+    for candidate in candidates:
+        for net in _BLOCKED_NETS:
+            if candidate.version == net.version and candidate in net:
+                return net
+    return None
+
+
+def _pin_safe_target(url: str) -> tuple[str, str, bool] | None:
+    """Resolve url's hostname once, reject it if any resolved address is
+    private/loopback/link-local, and rewrite the URL to connect directly to
+    the validated IP. Returns (pinned_url, original_host, is_https), or None
+    if unsafe/unresolvable.
+
+    Resolving once for validation and then requesting the original hostname
+    lets httpx re-resolve independently at connect time — a DNS-rebinding
+    attacker can return a public IP for the check and a private one moments
+    later for the real connection. Pinning the request itself to the
+    validated IP (with Host/SNI overridden back to the real hostname so TLS
+    and virtual-hosting still work) closes that gap."""
     try:
         parsed = urlparse(url)
         host = parsed.hostname
         if not host:
-            return False
+            return None
         addrs = socket.getaddrinfo(host, parsed.port or 443, proto=socket.IPPROTO_TCP)
+        if not addrs:
+            return None
         for family, _type, _proto, _canon, sockaddr in addrs:
             ip = ipaddress.ip_address(sockaddr[0])
-            for net in _BLOCKED_NETS:
-                if ip in net:
-                    logger.warning("webhook_url_blocked", url=url, resolved_ip=str(ip), blocked_by=str(net))
-                    return False
+            blocked_by = _is_blocked(ip)
+            if blocked_by:
+                logger.warning("webhook_url_blocked", url=url, resolved_ip=str(ip), blocked_by=str(blocked_by))
+                return None
     except (socket.gaierror, ValueError, OSError):
         logger.warning("webhook_url_resolve_failed", url=url)
-        return False
+        return None
+
+    pinned_ip = ipaddress.ip_address(addrs[0][4][0])
+    netloc_host = f"[{pinned_ip}]" if pinned_ip.version == 6 else str(pinned_ip)
+    port_part = f":{parsed.port}" if parsed.port else ""
+    pinned_netloc = f"{netloc_host}{port_part}"
+    pinned_url = parsed._replace(netloc=pinned_netloc).geturl()
+    return pinned_url, host, parsed.scheme == "https"
     return True
 
 
@@ -359,8 +393,10 @@ async def dispatch(alert: Alert, rule: AlertRule, *, resolved: bool = False) -> 
 # ── Slack ──────────────────────────────────────────────────────────────────────
 
 async def _send_slack(webhook_url: str, ctx: dict) -> None:
-    if not _is_url_safe(webhook_url):
+    pinned = _pin_safe_target(webhook_url)
+    if pinned is None:
         raise ValueError(f"Webhook URL resolves to a blocked private/internal address")
+    pinned_url, host, is_https = pinned
     tag   = ctx["tag"]
     color = "#16a34a" if ctx["tag"] == "RESOLVED" else ctx["severity_color"]
 
@@ -395,14 +431,18 @@ async def _send_slack(webhook_url: str, ctx: dict) -> None:
         })
 
     payload = {"blocks": blocks, "text": f"[{tag}] {ctx['title']}"}
+    headers = {"Host": host}
+    extensions = {"sni_hostname": host} if is_https else {}
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(webhook_url, json=payload)
+        resp = await client.post(pinned_url, json=payload, headers=headers, extensions=extensions)
         resp.raise_for_status()
 
 
 async def _test_slack(webhook_url: str, platform_name: str = "Anthrimon") -> None:
-    if not _is_url_safe(webhook_url):
+    pinned = _pin_safe_target(webhook_url)
+    if pinned is None:
         raise ValueError("Webhook URL resolves to a blocked private/internal address")
+    pinned_url, host, is_https = pinned
     payload = {
         "text": f"[TEST] {platform_name} notification test",
         "blocks": [{"type": "section", "text": {
@@ -410,16 +450,20 @@ async def _test_slack(webhook_url: str, platform_name: str = "Anthrimon") -> Non
             "text": f"*[TEST]* _{platform_name}_ — if you see this, the Slack channel is configured correctly.",
         }}],
     }
+    headers = {"Host": host}
+    extensions = {"sni_hostname": host} if is_https else {}
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(webhook_url, json=payload)
+        resp = await client.post(pinned_url, json=payload, headers=headers, extensions=extensions)
         resp.raise_for_status()
 
 
 # ── Generic webhook ────────────────────────────────────────────────────────────
 
 async def _send_webhook(url: str, secret: Optional[str], ctx: dict) -> None:
-    if not _is_url_safe(url):
+    pinned = _pin_safe_target(url)
+    if pinned is None:
         raise ValueError(f"Webhook URL resolves to a blocked private/internal address")
+    pinned_url, host, is_https = pinned
     payload: dict = {
         "event":        "alert.resolved" if ctx["tag"] == "RESOLVED" else "alert.fired",
         "alert_id":     ctx["alert_id"],
@@ -446,28 +490,32 @@ async def _send_webhook(url: str, secret: Optional[str], ctx: dict) -> None:
         payload["alert_url"] = ctx["alert_url"]
 
     body_bytes = json.dumps(payload, separators=(",", ":")).encode()
-    headers: dict[str, str] = {"Content-Type": "application/json"}
+    headers: dict[str, str] = {"Content-Type": "application/json", "Host": host}
     if secret:
         sig = _hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
         headers["X-Anthrimon-Signature"] = f"sha256={sig}"
+    extensions = {"sni_hostname": host} if is_https else {}
 
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(url, content=body_bytes, headers=headers)
+        resp = await client.post(pinned_url, content=body_bytes, headers=headers, extensions=extensions)
         resp.raise_for_status()
 
 
 async def _test_webhook(url: str, secret: Optional[str], platform_name: str = "Anthrimon") -> None:
-    if not _is_url_safe(url):
+    pinned = _pin_safe_target(url)
+    if pinned is None:
         raise ValueError("Webhook URL resolves to a blocked private/internal address")
+    pinned_url, host, is_https = pinned
     payload = {"event": "test", "source": platform_name,
                "message": "Webhook test — if you receive this, the endpoint is reachable."}
     body_bytes = json.dumps(payload, separators=(",", ":")).encode()
-    headers: dict[str, str] = {"Content-Type": "application/json"}
+    headers: dict[str, str] = {"Content-Type": "application/json", "Host": host}
     if secret:
         sig = _hmac.new(secret.encode(), body_bytes, hashlib.sha256).hexdigest()
         headers["X-Anthrimon-Signature"] = f"sha256={sig}"
+    extensions = {"sni_hostname": host} if is_https else {}
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(url, content=body_bytes, headers=headers)
+        resp = await client.post(pinned_url, content=body_bytes, headers=headers, extensions=extensions)
         resp.raise_for_status()
 
 
@@ -538,8 +586,10 @@ async def _test_pagerduty(integration_key: str, platform_name: str = "Anthrimon"
 # ── Microsoft Teams ────────────────────────────────────────────────────────────
 
 async def _send_teams(webhook_url: str, ctx: dict) -> None:
-    if not _is_url_safe(webhook_url):
+    pinned = _pin_safe_target(webhook_url)
+    if pinned is None:
         raise ValueError(f"Webhook URL resolves to a blocked private/internal address")
+    pinned_url, host, is_https = pinned
     resolved   = ctx["tag"] == "RESOLVED"
     hex_color  = ("#16a34a" if resolved else ctx["severity_color"]).lstrip("#")
 
@@ -577,14 +627,18 @@ async def _send_teams(webhook_url: str, ctx: dict) -> None:
             "targets": [{"os": "default", "uri": ctx["alert_url"]}],
         }]
 
+    headers = {"Host": host}
+    extensions = {"sni_hostname": host} if is_https else {}
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(webhook_url, json=card)
+        resp = await client.post(pinned_url, json=card, headers=headers, extensions=extensions)
         resp.raise_for_status()
 
 
 async def _test_teams(webhook_url: str, platform_name: str = "Anthrimon") -> None:
-    if not _is_url_safe(webhook_url):
+    pinned = _pin_safe_target(webhook_url)
+    if pinned is None:
         raise ValueError("Webhook URL resolves to a blocked private/internal address")
+    pinned_url, host, is_https = pinned
     card = {
         "@type":      "MessageCard",
         "@context":   "https://schema.org/extensions",
@@ -593,8 +647,10 @@ async def _test_teams(webhook_url: str, platform_name: str = "Anthrimon") -> Non
         "sections": [{"activityTitle": f"[TEST] {platform_name}",
                       "activitySubtitle": "If you see this, the Teams channel is configured correctly."}],
     }
+    headers = {"Host": host}
+    extensions = {"sni_hostname": host} if is_https else {}
     async with httpx.AsyncClient(timeout=10.0) as client:
-        resp = await client.post(webhook_url, json=card)
+        resp = await client.post(pinned_url, json=card, headers=headers, extensions=extensions)
         resp.raise_for_status()
 
 

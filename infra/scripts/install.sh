@@ -30,7 +30,12 @@ set -euo pipefail
 
 # ── Fixed constants ───────────────────────────────────────────────────────────
 
-GO_VERSION="1.26.4"
+# Collector go.mod files pin `toolchain go1.26.5` (all four modules) — keep
+# this at or above that. See WIKI.md "Dependency patches" for the 2026-07-11
+# security bump that raised it from 1.22.0, and the 2026-07-11 security review
+# that found go1.25.0/1.26.4 missing stdlib CVE fixes (crypto/tls, x509,
+# net/url, encoding/pem — go1.25.2/1.25.3/1.26.5).
+GO_VERSION="1.26.5"
 GO_ARCHIVE="go${GO_VERSION}.linux-amd64.tar.gz"
 GO_URL="https://go.dev/dl/${GO_ARCHIVE}"
 GO_INSTALL_DIR="/usr/local"
@@ -457,7 +462,7 @@ After=network.target
 User=${REAL_USER}
 ExecStart=${VM_INSTALL} \\
     -storageDataPath=${VM_DATA} \\
-    -httpListenAddr=:8428 \\
+    -httpListenAddr=127.0.0.1:8428 \\
     -retentionPeriod=12
 Restart=on-failure
 RestartSec=5

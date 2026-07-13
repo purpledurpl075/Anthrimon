@@ -2,6 +2,8 @@ module github.com/purpledurpl075/anthri-mon/collectors/remote
 
 go 1.25.0
 
+toolchain go1.26.5
+
 require (
 	github.com/gosnmp/gosnmp v1.38.0
 	github.com/pkg/sftp v1.13.10

@@ -87,8 +87,37 @@ Remote sites (WireGuard 10.100.0.0/24):
 | PostgreSQL | 14 |
 | VictoriaMetrics | 1.96 |
 | ClickHouse | 26.x |
-| Go collectors | 1.22 |
+| Go collectors | 1.26.5 (toolchain-pinned) |
 | nginx | system |
+
+### Security review remediation
+
+**2026-07-11** — first pass of fixes from a platform-wide security review (auth/secrets, injection/input-validation, infrastructure/network, frontend — full report not kept in-repo). Fixed:
+
+- **`fastapi` 0.115.5 → 0.139.0** (`api/backend/requirements.txt`), pulling `starlette` 0.41.3 → 1.3.1 — closes 9 advisories (`pip-audit`), including a Host-header URL-reconstruction auth-bypass risk (PYSEC-2026-161) and an unbounded urlencoded-form DoS (PYSEC-2026-249). Verified: 249 OpenAPI routes unchanged, live endpoints re-tested through nginx post-restart.
+- **Go toolchain pinned** (`toolchain go1.26.5` added to all four `collectors/*/go.mod`) — the `go 1.25.0` directive alone didn't pin the actual build toolchain, so binaries were built with `go1.25.0`/`go1.26.4`, missing stdlib fixes in `crypto/tls`, `crypto/x509`, `net/url`, `encoding/pem`. `govulncheck` now reports zero vulnerabilities across all four modules (was 22 stdlib + assorted transitive). `GO_VERSION` in `install.sh` bumped to match.
+- **Process umask tightened to 0027** (`api/backend/main.py`) — device config backups (git-archived credentials, `configmgmt/git_archive.py`) were being written world-readable (644/755) by default; an unrelated service account on the same host could read every stored device password hash. Existing archive tree also chmod'd down.
+- **`paramiko` left at 4.0.0** — the CVE fix (5.0.0) violates `netmiko`'s own declared ceiling (`paramiko<5.0`); no netmiko release yet supports it. Bumping would risk breaking live SSH device connectivity. Tracked, not forced through.
+
+Not yet applied (needs a live host + a scoped change, tracked separately): unrestricted `sudo systemctl` in `anthrimon-backup`'s sudoers grant, SSRF DNS-rebinding in the webhook notifier, JWT-in-localStorage architecture, durable rate limiting, systemd sandboxing across services.
+
+### Dependency patches
+
+**2026-07-11** — resolved a batch of Dependabot alerts (mostly `golang.org/x/crypto` SSH CVEs duplicated across all three Go collectors, plus a `pgx`/`ch-go` memory-safety issue):
+
+| Package | Ecosystem | Old → New |
+|---|---|---|
+| `golang.org/x/crypto` | Go (flow, snmp, syslog collectors) | 0.31–0.51 → 0.52.0 |
+| `github.com/jackc/pgx/v5` | Go (flow, snmp, syslog collectors) | 5.7.4 → 5.9.2 |
+| `github.com/ClickHouse/clickhouse-go/v2` + `ch-go` | Go (flow, syslog collectors) | 2.30.0/0.63.1 → 2.47.0/0.73.0 (pgx bump required a compatible ch-go; clickhouse-go/v2 pulls it up further) |
+| `PyJWT` | pip (`api/backend`) | 2.10.1 → 2.13.0 |
+| `python-multipart` | pip (`api/backend`) | 0.0.19 → 0.0.31 |
+| `vite` | npm (`frontend/dashboard`) | 8.0.10 → 8.0.16 |
+| `react-router-dom` | npm (`frontend/dashboard`) | 7.14.2 → 7.18.0 |
+
+The Go bumps also raised each collector's `go.mod` `go` directive to 1.25.0 (from 1.22.0) — already covered by the installer's pinned toolchain (`GO_VERSION=1.26.4` in `infra/scripts/install.sh`), so no action needed on fresh installs. Existing installs need their collector binaries rebuilt and redeployed (`go build` + stop/replace/start — see "Systemd services" below) since the installer only builds a collector binary if one doesn't already exist.
+
+**2026-07-11 (same day, security review)** — a platform-wide security review found that `go.mod`'s `go` directive alone doesn't pin the actual build toolchain: without an explicit `toolchain` line, `go build` on this host used exactly `go1.25.0`/`go1.26.4` — missing stdlib fixes for `crypto/tls` (ALPN info leak, ECH privacy leak), `crypto/x509` (two quadratic-complexity DoS issues), `net/url` (IPv6 hostname validation), and `encoding/pem`/`encoding/asn1`, none of which show up in a dependency scan since they're stdlib, not a module. All four Go modules (flow, snmp, syslog, remote — including the `anthrimon-traphandler` binary) now pin `toolchain go1.26.5` explicitly; `govulncheck` confirms zero vulnerabilities post-rebuild. `GO_VERSION` in `install.sh` bumped to match.
 
 ### Database schema
 

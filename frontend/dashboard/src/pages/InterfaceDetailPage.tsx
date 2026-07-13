@@ -137,24 +137,44 @@ export default function InterfaceDetailPage() {
   const [liveStatus, setLiveStatus] = useState<'idle' | 'connecting' | 'live' | 'error'>('idle')
   const [liveError,  setLiveError]  = useState<string | null>(null)
   const esRef = useRef<EventSource | null>(null)
+  // Guards startLive's async gap (token mint) against a stop/unmount that
+  // happens before the EventSource is even created.
+  const cancelledRef = useRef(false)
 
   const stopLive = useCallback(() => {
+    cancelledRef.current = true
     esRef.current?.close()
     esRef.current = null
     setLiveMode(false)
     setLiveStatus('idle')
   }, [])
 
-  const startLive = useCallback(() => {
+  const startLive = useCallback(async () => {
     if (esRef.current) { esRef.current.close(); esRef.current = null }
+    cancelledRef.current = false
     setLiveMode(true)
     setLivePoints([])
     setLiveStatus('connecting')
     setLiveError(null)
 
-    const token = localStorage.getItem('token') ?? ''
-    const url   = `/api/v1/interfaces/${ifaceId}/live?token=${encodeURIComponent(token)}`
-    const es    = new EventSource(url)
+    // Mint a short-lived token via /auth/ws-token (same pattern as
+    // subscribeAlerts in api/alerts.ts) instead of putting the long-lived
+    // session JWT in the URL, where it could appear in server logs and
+    // browser history — EventSource can't set an Authorization header.
+    let token: string
+    try {
+      const { data } = await api.post<{ token: string }>('/auth/ws-token')
+      token = data.token
+    } catch {
+      if (cancelledRef.current) return
+      setLiveStatus('error')
+      setLiveError('Failed to start live stream')
+      return
+    }
+    if (cancelledRef.current) return
+
+    const url = `/api/v1/interfaces/${ifaceId}/live?token=${encodeURIComponent(token)}`
+    const es  = new EventSource(url)
 
     es.onopen = () => setLiveStatus('live')
 

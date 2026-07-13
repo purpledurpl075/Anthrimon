@@ -30,7 +30,7 @@ import (
 	"github.com/purpledurpl075/anthri-mon/collectors/syslog/internal/writer"
 )
 
-const version = "0.1.0"
+const version = "0.1.2"
 
 func main() {
 	cfgPath := flag.String("config", "", "path to config file (default: /etc/anthrimon/syslog-collector.yaml)")

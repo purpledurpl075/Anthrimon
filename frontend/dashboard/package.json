@@ -24,7 +24,7 @@
     "react-dom": "^19.2.5",
     "react-grid-layout": "^2.2.3",
     "react-qr-code": "^2.2.0",
-    "react-router-dom": "^7.14.2"
+    "react-router-dom": "^7.18.0"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
@@ -42,6 +42,6 @@
     "tailwindcss": "^4.2.4",
     "typescript": "~6.0.2",
     "typescript-eslint": "^8.58.2",
-    "vite": "^8.0.10"
+    "vite": "^8.0.16"
   }
 }

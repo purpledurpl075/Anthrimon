@@ -10,6 +10,7 @@ import { useTheme, type Theme } from '../hooks/useTheme'
 import { fetchSearch, type SearchResult, type ResultType } from '../api/search'
 import { fetchDashboards } from '../api/dashboards'
 import { licensedFeaturesIn } from '../features'
+import { NAV_SECTIONS, visibleItems } from '../navConfig'
 
 // ── Wiki index (loaded once) ───────────────────────────────────────────────
 interface WikiEntry { slug: string; title: string; category: string; description: string }
@@ -833,59 +834,19 @@ export default function Sidebar() {
           {/* Dashboards — home item with quick-access dropdown */}
           <DashboardsNavItem />
 
-          {/* Network — inventory & topology */}
-          <Section label="Network" icon={I.topology}>
-            <Item to="/devices"    label="Devices"    icon={I.monitor} />
-            <Item to="/topology"   label="Topology"   icon={I.topology} />
-            <Item to="/addresses"  label="Addresses"  icon={I.list} />
-          </Section>
-
-          {/* Operations — live telemetry, alerting, and diagnostics */}
-          <Section label="Operations" icon={I.observability}>
-            <Item to="/alerts"       label="Alerts"       icon={I.bell}      badge={openAlerts} />
-            <Item to="/alert-rules"  label="Alert Rules"  icon={I.rules} />
-            <Item to="/maintenance"  label="Maintenance"  icon={I.calendar} />
-            <Item to="/flow"         label="Flow"         icon={I.flow} />
-            <Item to="/syslog"       label="Logging"      icon={I.syslog} />
-            <Item to="/path-trace"   label="Path Trace"   icon={I.pathTrace} />
-            {licensedFeaturesIn('Monitoring', isLicensed).map(f => (
-              <Item key={f.key} to={f.to} label={f.label} icon={I.observability} />
-            ))}
-          </Section>
-
-          {/* Analysis — investigation & compliance */}
-          <Section label="Analysis" icon={I.analysis}>
-            <Item to="/routing"   label="Routing"    icon={I.bgp} />
-            <Item to="/config"    label="Config"     icon={I.config} />
-            <Item to="/policies"  label="Policies"   icon={I.policies} />
-            <Item to="/changes"  label="Changes"    icon={I.changes} />
-            {licensedFeaturesIn('Analysis', isLicensed).map(f => (
-              <Item key={f.key} to={f.to} label={f.label} icon={I.analysis} />
-            ))}
-          </Section>
-
-          {/* Admin — setup, governance, system */}
-          <Section label="Admin" icon={I.settings} defaultOpen={false}>
-            <Item to="/credentials" label="Credentials" icon={I.key} />
-            <Item to="/collectors"  label="Collectors"  icon={I.collectors} />
-            <Item to="/probes"      label="Probes"      icon={I.probes} />
-            <Item to="/discover"    label="Discover"    icon={I.discover} />
-            {isAdmin && (
-              <Item to="/users" label="Users" icon={I.users} />
-            )}
-            {hasRole(me?.role ?? 'readonly', 'admin') && (
-              <Item to="/audit" label="Audit Log" icon={I.auditLog} />
-            )}
-            {hasRole(me?.role ?? 'readonly', 'admin') && (
-              <Item to="/platform-health" label="Platform Health" icon={I.health} />
-            )}
-            {hasRole(me?.role ?? 'readonly', 'admin') && (
-              <Item to="/admin" label="Administration" icon={I.settings} />
-            )}
-            {me?.is_platform_admin && (
-              <Item to="/platform" label="Platform Admin" icon={I.platform} />
-            )}
-          </Section>
+          {/* Nav sections — shared manifest (navConfig.tsx) keeps this in sync with MobileNav */}
+          {NAV_SECTIONS.map(section => (
+            <Section key={section.key} label={section.label} icon={I[section.icon]}
+              defaultOpen={section.key !== 'admin'}>
+              {visibleItems(section.items, { isAdmin: !!isAdmin, isPlatformAdmin: !!me?.is_platform_admin }).map(item => (
+                <Item key={item.to} to={item.to} label={item.label} icon={I[item.icon]}
+                  badge={item.badgeKey === 'openAlerts' ? openAlerts : undefined} />
+              ))}
+              {section.licenseCategory && licensedFeaturesIn(section.licenseCategory, isLicensed).map(f => (
+                <Item key={f.key} to={f.to} label={f.label} icon={I[section.icon]} />
+              ))}
+            </Section>
+          ))}
 
         </nav>
 
