@@ -12,6 +12,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import crypto as _crypto
 from ..dependencies import (
     get_current_principal, get_current_principal_sse, get_db, Principal,
     assert_device_access,
@@ -234,6 +235,7 @@ async def interface_live_stream(
 
     _, cred = cred_row
     cred_data = cred.data if isinstance(cred.data, dict) else json.loads(cred.data)
+    cred_data = _crypto.decrypt_credential_data(cred_data)
 
     host       = device.mgmt_ip_str
     port       = device.snmp_port or 161

@@ -19,11 +19,6 @@ router = APIRouter(prefix="/credentials", tags=["credentials"])
 _SNMP_TYPES = ("snmp_v2c", "snmp_v3")
 _ALL_TYPES   = ("snmp_v2c", "snmp_v3", "gnmi_tls", "ssh", "api_token", "netconf")
 
-# Fields that are encrypted at rest.  All other fields (username, port, …)
-# are stored and returned as-is.
-_SENSITIVE = ("password", "passphrase", "private_key")
-_REDACTED  = "***"
-
 
 def _encrypt_data(data: dict) -> dict:
     """Return a copy of data with sensitive fields encrypted."""
@@ -33,21 +28,12 @@ def _encrypt_data(data: dict) -> dict:
             reason="ANTHRIMON_ENCRYPTION_KEY is not set; secrets will be stored unencrypted",
         )
         return data
-    out = dict(data)
-    for field in _SENSITIVE:
-        val = out.get(field)
-        if val and val != _REDACTED:
-            out[field] = _crypto.encrypt(str(val))
-    return out
+    return _crypto.encrypt_credential_data(data)
 
 
 def _redact_data(data: dict) -> dict:
     """Return a copy of data with sensitive fields replaced by '***'."""
-    out = dict(data)
-    for field in _SENSITIVE:
-        if out.get(field):
-            out[field] = _REDACTED
-    return out
+    return _crypto.redact_credential_data(data)
 
 
 def _cred_read(cred: Credential) -> CredentialRead:
@@ -142,8 +128,8 @@ async def update_credential(
         existing = cred.data if isinstance(cred.data, dict) else {}
         # If a sensitive field is the redacted placeholder "***", the user
         # didn't change it — preserve the currently stored (encrypted) value.
-        for field in _SENSITIVE:
-            if new_data.get(field) == _REDACTED:
+        for field in _crypto.SENSITIVE_CREDENTIAL_FIELDS:
+            if new_data.get(field) == _crypto.REDACTED_PLACEHOLDER:
                 if existing.get(field):
                     new_data[field] = existing[field]  # keep encrypted blob
                 else:

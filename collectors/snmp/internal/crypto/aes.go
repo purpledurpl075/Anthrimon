@@ -94,12 +94,3 @@ func (c *AESCodec) Decrypt(ciphertextB64 string) ([]byte, error) {
 	}
 	return plaintext, nil
 }
-
-// DecodeCredential decrypts a credential data blob from the database.
-// If the codec is nil (plaintext mode) the raw bytes are returned unchanged.
-func DecodeCredential(codec *AESCodec, raw []byte) ([]byte, error) {
-	if codec == nil {
-		return raw, nil
-	}
-	return codec.Decrypt(string(raw))
-}

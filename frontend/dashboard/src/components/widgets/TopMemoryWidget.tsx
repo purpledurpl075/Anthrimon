@@ -1,13 +1,14 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchTopResources } from '../../api/overview'
+import { apiErrorMessage } from './shared'
 
 // 3. Top Memory devices
 export function TopMemoryWidget() {
-  const { data, isLoading } = useQuery({ queryKey: ['top-resources'], queryFn: () => fetchTopResources(5), refetchInterval: 60_000, staleTime: 30_000 })
+  const { data, isLoading, isError, error } = useQuery({ queryKey: ['top-resources'], queryFn: () => fetchTopResources(5), refetchInterval: 60_000, staleTime: 30_000 })
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full">
       <h3 className="text-sm font-semibold text-slate-800 mb-4">Top memory</h3>
-      {isLoading ? <p className="text-xs text-slate-400">Loading…</p> : !data?.memory.length ? <p className="text-xs text-slate-400">No memory data</p> : (
+      {isLoading ? <p className="text-xs text-slate-400">Loading…</p> : isError ? <p className="text-xs text-red-500">{apiErrorMessage(error)}</p> : !data?.memory.length ? <p className="text-xs text-slate-400">No memory data</p> : (
         <div className="space-y-2.5">
           {data.memory.map(d => (
             <div key={d.device_id}>

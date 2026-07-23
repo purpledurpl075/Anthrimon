@@ -1,11 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchSyslogMessages } from '../../api/overview'
-import { SEV_LABEL, SEV_FEED_COLOR } from './shared'
+import { SEV_LABEL, SEV_FEED_COLOR, apiErrorMessage } from './shared'
 
 // ── Syslog live feed ──────────────────────────────────────────────────────────
 
 export function SyslogFeedWidget() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey:        ['syslog-feed'],
     queryFn:         () => fetchSyslogMessages(3, 10),
     refetchInterval: 15_000,
@@ -24,6 +24,8 @@ export function SyslogFeedWidget() {
       </div>
       {isLoading ? (
         <div className="flex-1 flex items-center justify-center text-xs text-slate-400">Loading…</div>
+      ) : isError ? (
+        <div className="flex-1 flex items-center justify-center text-xs text-red-500 text-center px-3">{apiErrorMessage(error)}</div>
       ) : messages.length === 0 ? (
         <div className="flex-1 flex items-center justify-center">
           <p className="text-xs text-green-600 font-medium">✓ No critical messages</p>

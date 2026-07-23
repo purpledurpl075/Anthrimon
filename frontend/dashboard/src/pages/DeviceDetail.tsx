@@ -3467,19 +3467,19 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
   const [collecting, setCollecting] = useState(false)
   const [rollbackTarget, setRollbackTarget] = useState<ConfigBackupMeta | null>(null)
 
-  const { data: status } = useQuery({
+  const { data: status, isError: statusError } = useQuery({
     queryKey: ['config-status', deviceId],
     queryFn:  () => fetchConfigStatus(deviceId),
     refetchInterval: 30_000,
   })
 
-  const { data: backups = [] } = useQuery({
+  const { data: backups = [], isError: backupsError, refetch: refetchBackups } = useQuery({
     queryKey: ['config-backups', deviceId],
     queryFn:  () => fetchBackups(deviceId),
     enabled:  view === 'history',
   })
 
-  const { data: diffs = [] } = useQuery({
+  const { data: diffs = [], isError: diffsError, refetch: refetchDiffs } = useQuery({
     queryKey: ['config-diffs', deviceId],
     queryFn:  () => fetchDiffs(deviceId),
     enabled:  view === 'history',
@@ -3497,19 +3497,19 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
     enabled:  !!selectedBackupId,
   })
 
-  const { data: compliance = [] } = useQuery({
+  const { data: compliance = [], isError: complianceError, refetch: refetchCompliance } = useQuery({
     queryKey: ['compliance-results', deviceId],
     queryFn:  () => fetchComplianceResults(deviceId),
     enabled:  view === 'compliance',
   })
 
-  const { data: goldenResults = [] } = useQuery({
+  const { data: goldenResults = [], isError: goldenError, refetch: refetchGolden } = useQuery({
     queryKey: ['golden-config-results', deviceId],
     queryFn:  () => fetchGoldenConfigResults(deviceId),
     enabled:  view === 'compliance',
   })
 
-  const { data: gitLog = [] } = useQuery({
+  const { data: gitLog = [], isError: gitLogError, refetch: refetchGitLog } = useQuery({
     queryKey: ['git-log', deviceId],
     queryFn:  () => fetchGitLog(deviceId),
     enabled:  view === 'history',
@@ -3545,7 +3545,9 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
       {/* Status bar */}
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div className="flex items-center gap-4 text-sm">
-          {status?.has_backup ? (
+          {statusError ? (
+            <span className="text-red-500">Couldn't load config status</span>
+          ) : status?.has_backup ? (
             <>
               <span className="text-slate-600" title="Config is polled hourly — only changes are stored as snapshots">
                 Last change: <span className="font-medium">{status.last_collected ? fmtTime(status.last_collected) : '—'}</span>
@@ -3596,7 +3598,9 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
               <h3 className="text-sm font-semibold text-slate-800">Snapshots</h3>
               <span className="text-xs text-slate-400">{backups.length} total</span>
             </div>
-            {backups.length === 0 ? (
+            {backupsError ? (
+              <ErrorState message="Failed to load snapshots." onRetry={() => refetchBackups()} inline />
+            ) : backups.length === 0 ? (
               <div className="px-5 py-8 text-center text-sm text-slate-400">No snapshots yet</div>
             ) : (
               <div className="divide-y divide-slate-50 max-h-96 overflow-y-auto">
@@ -3642,7 +3646,9 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
                 <h3 className="text-sm font-semibold text-slate-800">Changes</h3>
                 <span className="text-xs text-slate-400">{diffs.length} recorded</span>
               </div>
-              {diffs.length === 0 ? (
+              {diffsError ? (
+                <ErrorState message="Failed to load changes." onRetry={() => refetchDiffs()} inline />
+              ) : diffs.length === 0 ? (
                 <div className="px-5 py-6 text-center text-sm text-slate-400">No changes detected yet</div>
               ) : (
                 <div className="divide-y divide-slate-50 max-h-48 overflow-y-auto">
@@ -3666,7 +3672,9 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
                 <h3 className="text-sm font-semibold text-slate-800">Git history</h3>
                 <span className="text-xs text-slate-400">{gitLog.length} commit{gitLog.length !== 1 ? 's' : ''}</span>
               </div>
-              {gitLog.length === 0 ? (
+              {gitLogError ? (
+                <ErrorState message="Failed to load git history." onRetry={() => refetchGitLog()} inline />
+              ) : gitLog.length === 0 ? (
                 <div className="px-5 py-6 text-center text-sm text-slate-400">No git history yet</div>
               ) : (
                 <div className="divide-y divide-slate-50 max-h-48 overflow-y-auto">
@@ -3742,7 +3750,9 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
               <h3 className="text-sm font-semibold text-slate-800">Compliance</h3>
               <Link to="/config" className="text-xs text-blue-600 hover:underline">Manage policies →</Link>
             </div>
-            {compliance.length === 0 ? (
+            {complianceError ? (
+              <ErrorState message="Failed to load compliance results." onRetry={() => refetchCompliance()} inline />
+            ) : compliance.length === 0 ? (
               <div className="px-5 py-8 text-center text-sm text-slate-400">
                 No compliance results — <Link to="/config" className="text-blue-600 hover:underline">create a policy</Link> to get started
               </div>
@@ -3770,7 +3780,9 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
               <h3 className="text-sm font-semibold text-slate-800">Golden config drift</h3>
               <Link to="/config" className="text-xs text-blue-600 hover:underline">Manage golden configs →</Link>
             </div>
-            {goldenResults.length === 0 ? (
+            {goldenError ? (
+              <ErrorState message="Failed to load golden config results." onRetry={() => refetchGolden()} inline />
+            ) : goldenResults.length === 0 ? (
               <div className="px-5 py-8 text-center text-sm text-slate-400">
                 No golden config results — <Link to="/config" className="text-blue-600 hover:underline">create a golden config</Link> to get started
               </div>

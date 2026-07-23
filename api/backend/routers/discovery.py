@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import crypto as _crypto
 from ..dependencies import get_current_user, get_db, require_role
 from ..models.tenant import User
 from ..schemas.discovery import DiscoveredDevice, SweepJob, SweepRequest
@@ -285,7 +286,7 @@ async def start_sweep(
     # Preserve the order requested by the caller
     cred_map = {c.id: c for c in cred_rows}
     creds = [
-        (cid, cred_map[cid].data, cred_map[cid].type)
+        (cid, _crypto.decrypt_credential_data(cred_map[cid].data), cred_map[cid].type)
         for cid in req.credential_ids
         if cid in cred_map
     ]

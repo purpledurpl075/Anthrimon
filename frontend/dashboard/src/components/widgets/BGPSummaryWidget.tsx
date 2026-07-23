@@ -1,11 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchBGPSummary } from '../../api/bgp'
-import { STATE_COLOR } from './shared'
+import { STATE_COLOR, apiErrorMessage } from './shared'
 
 // ── BGP Summary Widget ────────────────────────────────────────────────────────
 
 export function BGPSummaryWidget() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey:        ['bgp-summary'],
     queryFn:         fetchBGPSummary,
     refetchInterval: 30_000,
@@ -27,6 +27,8 @@ export function BGPSummaryWidget() {
 
       {isLoading ? (
         <p className="text-sm text-slate-400">Loading…</p>
+      ) : isError ? (
+        <p className="text-sm text-red-500 text-center py-4">{apiErrorMessage(error)}</p>
       ) : !data || data.total === 0 ? (
         <p className="text-sm text-slate-400 text-center py-4">No BGP sessions</p>
       ) : (

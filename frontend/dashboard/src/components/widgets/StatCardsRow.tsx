@@ -1,10 +1,8 @@
 import type { ReactNode } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { fetchOverview } from '../../api/overview'
 import { Icons } from './icons'
 import { AlertTrendSparkline } from './sparklines'
-import { formatAge } from './shared'
+import { formatAge, useOverviewData, WidgetStatus } from './shared'
 
 // ── Stat card ──────────────────────────────────────────────────────────────────
 
@@ -36,8 +34,8 @@ function StatCard({ label, value, sub, accentColor, icon, to, footer }: {
 // ── Stat cards row ────────────────────────────────────────────────────────────
 
 export function StatCardsRow() {
-  const { data } = useQuery({ queryKey: ['overview'], queryFn: fetchOverview, refetchInterval: 30_000, staleTime: 25_000 })
-  if (!data) return <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex items-center justify-center text-xs text-slate-400">Loading…</div>
+  const { data, isLoading, isError, error } = useOverviewData()
+  if (!data) return <WidgetStatus isLoading={isLoading} isError={isError} error={error} />
 
   const pollPct = data.poll_health.total_active > 0
     ? Math.round((data.poll_health.polled_recently / data.poll_health.total_active) * 100)

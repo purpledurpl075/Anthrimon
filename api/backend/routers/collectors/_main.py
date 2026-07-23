@@ -37,6 +37,7 @@ from sqlalchemy import cast, select, text, update
 from sqlalchemy.dialects.postgresql import INET as PG_INET
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ... import crypto as _crypto
 from ...database import AsyncSessionLocal
 
 from ...dependencies import get_current_user, get_db, require_tenant_user
@@ -630,7 +631,7 @@ async def add_trap_v3_user(
                 from ...configmgmt.collector import _vendor_key
                 vendor_key = _vendor_key(device)
                 engine_id = await _discover_engine_id(
-                    str(device.ip_address), vendor_key, ssh_row.data
+                    str(device.ip_address), vendor_key, _crypto.decrypt_credential_data(ssh_row.data)
                 )
                 if engine_id:
                     logger.info("engine_id_discovered", device=str(device.id),
@@ -659,6 +660,7 @@ async def add_trap_v3_user(
     }
     if engine_id:
         data["engine_id"] = engine_id
+    data = _crypto.encrypt_credential_data(data)
 
     if existing:
         existing.data = data
@@ -805,8 +807,6 @@ async def collector_config(
     request: Request,
     db:      AsyncSession = Depends(get_db),
 ) -> dict:
-    from ... import crypto as _crypto
-
     collector = await _require_collector(request, db)
 
     # Devices assigned to this collector
@@ -848,18 +848,8 @@ async def collector_config(
         cred_list = []
         for dc, cred in creds:
             cred_data = cred.data if isinstance(cred.data, dict) else json.loads(cred.data)
-            # Decrypt passwords before sending — collector doesn't have the encryption key
-            if cred_data.get("password") and _crypto.is_configured():
-                try:
-                    cred_data = {**cred_data, "password": _crypto.decrypt(cred_data["password"])}
-                except Exception as _dec_exc:
-                    logger.error(
-                        "credential_decrypt_failed",
-                        device_id=str(dev.id),
-                        credential_type=cred.type,
-                        error=str(_dec_exc),
-                    )
-                    continue  # skip this credential — sending ciphertext would break the collector
+            # Decrypt sensitive fields before sending — the collector never has the encryption key.
+            cred_data = _crypto.decrypt_credential_data(cred_data)
             cred_list.append({
                 "type":     cred.type,
                 "priority": dc.priority,
@@ -1275,18 +1265,19 @@ class CollectorSweepRequest(BaseModel):
 
 def _cred_to_spec(cred) -> dict:
     """Translate a Credential row to the CredSpec JSON expected by the collector."""
+    data = _crypto.decrypt_credential_data(cred.data)
     if cred.type == "snmp_v3":
         return {
             "version":    "snmp_v3",
-            "username":   cred.data.get("username", ""),
-            "auth_key":   cred.data.get("auth_key", ""),
-            "priv_key":   cred.data.get("priv_key", ""),
-            "auth_proto": cred.data.get("auth_protocol", "sha256"),
-            "priv_proto": cred.data.get("priv_protocol", "aes"),
+            "username":   data.get("username", ""),
+            "auth_key":   data.get("auth_key", ""),
+            "priv_key":   data.get("priv_key", ""),
+            "auth_proto": data.get("auth_protocol", "sha256"),
+            "priv_proto": data.get("priv_protocol", "aes"),
         }
     return {
         "version":   "snmp_v2c",
-        "community": cred.data.get("community", "public"),
+        "community": data.get("community", "public"),
     }
 
 
@@ -3295,6 +3286,7 @@ async def _collect_v3_users_for_collector(collector_id: str | None, tenant_id: s
     users: list[dict] = []
     for cred, device_engine_id in rows:
         cd = cred.data if isinstance(cred.data, dict) else {}
+        cd = _crypto.decrypt_credential_data(cd)
         username = cd.get("username", "")
         if not username or username in seen:
             continue

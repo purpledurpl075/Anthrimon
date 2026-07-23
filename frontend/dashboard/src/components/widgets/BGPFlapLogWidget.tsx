@@ -1,11 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchBGPFlapLog } from '../../api/bgp'
-import { BGP_STATE_COLOR } from './shared'
+import { BGP_STATE_COLOR, apiErrorMessage } from './shared'
 
 // ── BGP flap log ──────────────────────────────────────────────────────────────
 
 export function BGPFlapLogWidget() {
-  const { data = [], isLoading } = useQuery({
+  const { data = [], isLoading, isError, error } = useQuery({
     queryKey:        ['bgp-flap-log'],
     queryFn:         () => fetchBGPFlapLog(15),
     refetchInterval: 30_000,
@@ -20,6 +20,8 @@ export function BGPFlapLogWidget() {
       </div>
       {isLoading ? (
         <div className="flex-1 flex items-center justify-center text-xs text-slate-400">Loading…</div>
+      ) : isError ? (
+        <div className="flex-1 flex items-center justify-center text-xs text-red-500 text-center px-3">{apiErrorMessage(error)}</div>
       ) : data.length === 0 ? (
         <div className="flex-1 flex items-center justify-center">
           <p className="text-xs text-green-600 font-medium">✓ No transitions recorded</p>

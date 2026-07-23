@@ -1,8 +1,9 @@
-import { useWidgetData } from './shared'
+import { apiErrorMessage, useWidgetData } from './shared'
 
 // 5. Config changes (last 24h)
 export function ConfigChangesWidget() {
-  const { data } = useWidgetData()
+  const { data, isLoading, isError, error } = useWidgetData()
+  const sectionFailed = data?.errors?.includes('config_changes')
   const changes = data?.config_changes ?? []
   return (
     <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden h-full flex flex-col">
@@ -10,7 +11,11 @@ export function ConfigChangesWidget() {
         <h3 className="text-sm font-semibold text-slate-800">Config changes</h3>
         <span className="text-[10px] text-slate-400">last 24 h</span>
       </div>
-      {changes.length === 0 ? (
+      {isLoading ? (
+        <div className="flex-1 flex items-center justify-center text-xs text-slate-400">Loading…</div>
+      ) : isError || sectionFailed ? (
+        <div className="flex-1 flex items-center justify-center text-xs text-red-500 text-center px-3">{apiErrorMessage(error)}</div>
+      ) : changes.length === 0 ? (
         <div className="flex-1 flex items-center justify-center text-xs text-slate-400">No changes in last 24h</div>
       ) : (
         <div className="overflow-y-auto flex-1 divide-y divide-slate-50">

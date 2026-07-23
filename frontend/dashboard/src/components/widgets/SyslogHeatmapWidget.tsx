@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchSyslogHeatmap } from '../../api/overview'
+import { apiErrorMessage } from './shared'
 
 // ── Syslog heatmap ────────────────────────────────────────────────────────────
 
 export function SyslogHeatmapWidget() {
-  const { data = [], isLoading } = useQuery({
+  const { data = [], isLoading, isError, error } = useQuery({
     queryKey:        ['syslog-heatmap'],
     queryFn:         fetchSyslogHeatmap,
     refetchInterval: 300_000,
@@ -26,7 +27,7 @@ export function SyslogHeatmapWidget() {
     <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full">
       <h3 className="text-sm font-semibold text-slate-800 mb-1">Syslog heatmap</h3>
       <p className="text-[10px] text-slate-400 mb-4">Messages per hour — last 7 days</p>
-      {isLoading ? <p className="text-xs text-slate-400">Loading…</p> : (
+      {isLoading ? <p className="text-xs text-slate-400">Loading…</p> : isError ? <p className="text-xs text-red-500">{apiErrorMessage(error)}</p> : (
         <div className="overflow-x-auto">
           <div className="flex gap-0.5 min-w-max">
             {/* Day labels */}

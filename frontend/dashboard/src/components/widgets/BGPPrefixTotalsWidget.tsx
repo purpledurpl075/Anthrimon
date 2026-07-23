@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchBGPPrefixTotals } from '../../api/bgp'
+import { apiErrorMessage } from './shared'
 
 // ── BGP prefix totals ─────────────────────────────────────────────────────────
 
 export function BGPPrefixTotalsWidget() {
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey:        ['bgp-prefix-totals'],
     queryFn:         fetchBGPPrefixTotals,
     refetchInterval: 60_000,
@@ -14,7 +15,7 @@ export function BGPPrefixTotalsWidget() {
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full">
       <h3 className="text-sm font-semibold text-slate-800 mb-4">BGP prefix totals</h3>
-      {isLoading ? <p className="text-xs text-slate-400">Loading…</p> : !data ? null : (
+      {isLoading ? <p className="text-xs text-slate-400">Loading…</p> : isError ? <p className="text-xs text-red-500">{apiErrorMessage(error)}</p> : !data ? null : (
         <div className="space-y-4">
           <div className="grid grid-cols-2 gap-3">
             <div className="rounded-xl bg-indigo-50 border border-indigo-100 px-4 py-3 text-center">

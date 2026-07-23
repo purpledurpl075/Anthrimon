@@ -5,7 +5,7 @@ import { fetchTopBandwidth } from '../../api/overview'
 import { DeviceTypeIcon, DEVICE_TYPE_COLOR } from '../DeviceTypeIcon'
 import { Icons } from './icons'
 import { MiniSparkline } from './sparklines'
-import { fmtBps, utilColor } from './shared'
+import { fmtBps, utilColor, apiErrorMessage } from './shared'
 
 // ── Top bandwidth ─────────────────────────────────────────────────────────────
 
@@ -19,7 +19,7 @@ export function TopBandwidthSection() {
   const [tab, setTab]              = useState<'interfaces' | 'devices'>('interfaces')
   const [windowMinutes, setWindow] = useState<5 | 30 | 360>(30)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey:        ['top-bandwidth', windowMinutes],
     queryFn:         () => fetchTopBandwidth(8, windowMinutes),
     staleTime:       25_000,
@@ -54,6 +54,8 @@ export function TopBandwidthSection() {
       </div>
       {isLoading ? (
         <div className="px-5 py-8 text-center text-xs text-slate-400">Loading…</div>
+      ) : isError ? (
+        <div className="px-5 py-8 text-center text-xs text-red-500">{apiErrorMessage(error)}</div>
       ) : tab === 'interfaces' ? (
         !data?.top_interfaces.length ? (
           <div className="px-5 py-8 text-center text-xs text-slate-400">No bandwidth data yet — metrics appear after the first poll cycle.</div>

@@ -1,12 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import TimeSeriesChart from '../TimeSeriesChart'
 import { fetchMetricCatalog, fetchMetricSeries } from '../../api/metrics'
-import { formatMetricValue } from './shared'
+import { apiErrorMessage, formatMetricValue } from './shared'
 import type { MetricWidgetProps } from './metricWidgetConfig'
 
 export function MetricGraph({ config, refreshIntervalS = 60, rangeMinutes = 60 }: MetricWidgetProps) {
   const { device_id, metric_id, interface_name } = config
-  const configured = !!device_id && !!metric_id
 
   const { data: catalog } = useQuery({
     queryKey: ['metric-catalog'],
@@ -15,8 +14,10 @@ export function MetricGraph({ config, refreshIntervalS = 60, rangeMinutes = 60 }
   })
   const def = catalog?.find(m => m.id === metric_id)
   const title = config.title || def?.label || 'Metric'
+  const needsInterface = def?.category === 'interface'
+  const configured = !!device_id && !!metric_id && (!needsInterface || !!interface_name)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['metric-series', metric_id, device_id, interface_name, rangeMinutes],
     queryFn:  () => fetchMetricSeries({ metric_id: metric_id!, device_id: device_id!, interface_name, range_minutes: rangeMinutes }),
     enabled:  configured,
@@ -28,7 +29,11 @@ export function MetricGraph({ config, refreshIntervalS = 60, rangeMinutes = 60 }
     return (
       <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex flex-col items-center justify-center text-center gap-1">
         <h3 className="text-sm font-semibold text-slate-800">{title}</h3>
-        <p className="text-xs text-slate-400">Click configure to pick a device and metric</p>
+        <p className="text-xs text-slate-400">
+          {!!device_id && !!metric_id && needsInterface && !interface_name
+            ? 'This metric needs an interface selected — click configure.'
+            : 'Click configure to pick a device and metric'}
+        </p>
       </div>
     )
   }
@@ -43,6 +48,8 @@ export function MetricGraph({ config, refreshIntervalS = 60, rangeMinutes = 60 }
       <div className="flex-1 min-h-0">
         {isLoading ? (
           <div className="h-full flex items-center justify-center text-xs text-slate-400">Loading…</div>
+        ) : isError ? (
+          <div className="h-full flex items-center justify-center text-xs text-red-500 text-center px-2">{apiErrorMessage(error)}</div>
         ) : (
           <TimeSeriesChart
             series={[{ name: title, color: '#3b82f6', data: series }]}

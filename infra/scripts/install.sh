@@ -486,6 +486,32 @@ SNMP_BIN="/usr/local/bin/anthrimon-snmp-collector"
 FLOW_BIN="/usr/local/bin/anthrimon-flow-collector"
 SYSLOG_BIN="/usr/local/bin/anthrimon-syslog-collector"
 
+# Preserve or generate secrets shared by the API and the SNMP collector (both
+# need ANTHRIMON_ENCRYPTION_KEY to encrypt/decrypt Credential.data fields).
+# Resolved here, before either service unit is written, so both embed the
+# same value. The service file stores them as:  Environment="KEY=value"
+# Strip everything up to and including the = sign, then strip any surrounding quotes.
+_extract_env() { grep -oP "(?<=${1}=)[^\"]+" /etc/systemd/system/anthrimon-api.service 2>/dev/null || true; }
+
+if grep -q "ANTHRIMON_ENCRYPTION_KEY" /etc/systemd/system/anthrimon-api.service 2>/dev/null; then
+    ENCRYPTION_KEY=$(_extract_env ANTHRIMON_ENCRYPTION_KEY)
+    JWT_SECRET=$(_extract_env JWT_SECRET_KEY)
+    # Fall back to fresh generation if either value is empty or wrong length
+    if [[ ${#ENCRYPTION_KEY} -ne 64 ]]; then
+        ENCRYPTION_KEY=$(openssl rand -hex 32)
+        warn "Encryption key was missing or malformed — regenerated (existing credentials will need re-saving)"
+    fi
+    if [[ ${#JWT_SECRET} -lt 32 ]]; then
+        JWT_SECRET=$(openssl rand -hex 32)
+        warn "JWT secret was missing or too short — regenerated (all sessions will be invalidated)"
+    fi
+    ok "Secrets preserved (or regenerated where invalid)"
+else
+    ENCRYPTION_KEY=$(openssl rand -hex 32)
+    JWT_SECRET=$(openssl rand -hex 32)
+    ok "Generated new encryption and JWT secrets"
+fi
+
 # ── 9. SNMP collector ─────────────────────────────────────────────────────────
 
 hdr "SNMP collector"
@@ -535,6 +561,7 @@ After=network.target postgresql.service victoria-metrics.service
 
 [Service]
 User=${REAL_USER}
+Environment="ANTHRIMON_ENCRYPTION_KEY=${ENCRYPTION_KEY}"
 ExecStartPre=/bin/bash -c 'test -x ${SNMP_BIN} || (cd ${SNMP_DIR} && /usr/local/go/bin/go build -o ${SNMP_BIN} ./cmd/snmp-collector/)'
 ExecStart=${SNMP_BIN} --config ${SNMP_YAML}
 Restart=on-failure
@@ -545,6 +572,9 @@ StandardError=journal
 [Install]
 WantedBy=multi-user.target
 EOF
+
+# Embeds ANTHRIMON_ENCRYPTION_KEY — see the matching chmod for anthrimon-api.service.
+chmod 600 /etc/systemd/system/snmp-collector.service
 
 systemctl daemon-reload
 systemctl enable snmp-collector
@@ -1016,29 +1046,8 @@ ok "rollback port range written to ${ROLLBACK_ENV_DROPIN}"
 
 hdr "Anthrimon API"
 
-# Preserve or generate secrets.
-# The service file stores them as:  Environment="KEY=value"
-# Strip everything up to and including the = sign, then strip any surrounding quotes.
-_extract_env() { grep -oP "(?<=${1}=)[^\"]+" /etc/systemd/system/anthrimon-api.service 2>/dev/null || true; }
-
-if grep -q "ANTHRIMON_ENCRYPTION_KEY" /etc/systemd/system/anthrimon-api.service 2>/dev/null; then
-    ENCRYPTION_KEY=$(_extract_env ANTHRIMON_ENCRYPTION_KEY)
-    JWT_SECRET=$(_extract_env JWT_SECRET_KEY)
-    # Fall back to fresh generation if either value is empty or wrong length
-    if [[ ${#ENCRYPTION_KEY} -ne 64 ]]; then
-        ENCRYPTION_KEY=$(openssl rand -hex 32)
-        warn "Encryption key was missing or malformed — regenerated (existing credentials will need re-saving)"
-    fi
-    if [[ ${#JWT_SECRET} -lt 32 ]]; then
-        JWT_SECRET=$(openssl rand -hex 32)
-        warn "JWT secret was missing or too short — regenerated (all sessions will be invalidated)"
-    fi
-    ok "Secrets preserved (or regenerated where invalid)"
-else
-    ENCRYPTION_KEY=$(openssl rand -hex 32)
-    JWT_SECRET=$(openssl rand -hex 32)
-    ok "Generated new encryption and JWT secrets"
-fi
+# ENCRYPTION_KEY / JWT_SECRET were already resolved earlier (see the SNMP
+# collector section above) so both services embed the same encryption key.
 
 cat > /etc/systemd/system/anthrimon-api.service <<EOF
 [Unit]

@@ -1,17 +1,15 @@
-import { useQuery } from '@tanstack/react-query'
 import { Link } from 'react-router-dom'
-import { fetchOverview } from '../../api/overview'
 import StatusBadge from '../StatusBadge'
 import VendorBadge from '../VendorBadge'
 import { DeviceTypeIcon, DEVICE_TYPE_COLOR } from '../DeviceTypeIcon'
 import { Icons } from './icons'
-import { formatAge } from './shared'
+import { formatAge, useOverviewData, WidgetStatus } from './shared'
 
 // ── Problem devices panel ─────────────────────────────────────────────────────
 
 export function ProblemDevices() {
-  const { data } = useQuery({ queryKey: ['overview'], queryFn: fetchOverview, refetchInterval: 30_000, staleTime: 25_000 })
-  if (!data) return <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex items-center justify-center text-xs text-slate-400">Loading…</div>
+  const { data, isLoading, isError, error } = useOverviewData()
+  if (!data) return <WidgetStatus isLoading={isLoading} isError={isError} error={error} />
 
   const devices = data.problem_devices
   return (

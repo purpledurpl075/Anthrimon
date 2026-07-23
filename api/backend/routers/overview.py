@@ -430,6 +430,7 @@ async def top_resources(
                 )
             return resp.json().get("data", {}).get("result", [])
         except Exception:
+            logger.exception("top_resources_vm_query_failed", metric=metric)
             return []
 
     cpu_raw, mem_raw = await asyncio.gather(
@@ -543,9 +544,20 @@ async def widget_data(
         return_exceptions=True,
     )
 
+    sections = {
+        "interface_health": iface,
+        "routing_health":   routing,
+        "config_changes":   changes,
+        "collector_status": collectors,
+    }
+    errors = [name for name, result in sections.items() if isinstance(result, Exception)]
+    for name in errors:
+        logger.error("widget_data_section_failed", section=name, error=str(sections[name]))
+
     return {
         "interface_health": iface     if not isinstance(iface,      Exception) else {},
         "routing_health":   routing   if not isinstance(routing,    Exception) else {},
         "config_changes":   changes   if not isinstance(changes,    Exception) else [],
         "collector_status": collectors if not isinstance(collectors, Exception) else [],
+        "errors":           errors,
     }

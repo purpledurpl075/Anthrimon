@@ -1,9 +1,10 @@
-import { useWidgetData } from './shared'
+import { useWidgetData, WidgetStatus } from './shared'
 
 // 4. Routing health (BGP + OSPF combined)
 export function RoutingHealthWidget() {
-  const { data } = useWidgetData()
-  if (!data) return <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex items-center justify-center text-xs text-slate-400">Loading…</div>
+  const { data, isLoading, isError, error } = useWidgetData()
+  const sectionFailed = data?.errors?.includes('routing_health')
+  if (!data || sectionFailed) return <WidgetStatus isLoading={isLoading} isError={isError || !!sectionFailed} error={error} />
   const r = data.routing_health
   if (!r?.bgp || !r?.ospf) return <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex items-center justify-center text-xs text-slate-400">No routing protocols</div>
   const bgpDown  = r.bgp.total  - r.bgp.established

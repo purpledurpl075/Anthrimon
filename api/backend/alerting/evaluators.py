@@ -13,6 +13,8 @@ import structlog
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from .. import crypto as _crypto
+
 from ..services.urls import ch_url, vm_url
 
 logger = structlog.get_logger(__name__)
@@ -493,7 +495,7 @@ async def eval_custom_oid(db: AsyncSession, device: dict, oid: str,
         return None
 
     import json as _json
-    cred_data = _json.loads(cred_row["data"])
+    cred_data = _crypto.decrypt_credential_data(_json.loads(cred_row["data"]))
     cred_type = cred_row["type"]
     host = device.get("mgmt_ip") or str(device["id"])
 

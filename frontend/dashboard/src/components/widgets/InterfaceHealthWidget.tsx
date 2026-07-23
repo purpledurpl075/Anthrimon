@@ -1,11 +1,12 @@
 import type { ReactNode } from 'react'
-import { useWidgetData } from './shared'
+import { useWidgetData, WidgetStatus } from './shared'
 
 // 1. Interface health ring
 export function InterfaceHealthWidget() {
-  const { data } = useWidgetData()
+  const { data, isLoading, isError, error } = useWidgetData()
+  const sectionFailed = data?.errors?.includes('interface_health')
   const d = data?.interface_health
-  if (!d) return <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex items-center justify-center text-xs text-slate-400">Loading…</div>
+  if (!d || sectionFailed) return <WidgetStatus isLoading={isLoading} isError={isError || !!sectionFailed} error={error} />
   const total = d.total || 1
   const segments = [
     { label: 'Up',         value: d.up,         color: '#16a34a' },

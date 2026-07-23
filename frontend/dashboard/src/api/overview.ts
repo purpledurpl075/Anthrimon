@@ -99,6 +99,9 @@ export interface WidgetData {
   }
   config_changes: { device_id: string; hostname: string; vendor: string; collected_at: string; lines_added: number; lines_removed: number }[]
   collector_status: { name: string; status: string; last_seen: string | null }[]
+  // Names of sections that failed to load server-side (query error) — that
+  // section's field above is a fallback empty value, not a real zero/empty state.
+  errors: string[]
 }
 
 export const fetchTopResources = (limit = 5) =>

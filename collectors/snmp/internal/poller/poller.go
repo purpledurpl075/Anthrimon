@@ -468,18 +468,42 @@ func (m *Manager) emit(ctx context.Context, log zerolog.Logger, result *PollResu
 	}
 }
 
-// decodeCred decrypts and unmarshals the device credential into the right type.
-func (m *Manager) decodeCred(dev model.DeviceRow) (interface{}, error) {
-	raw, err := crypto.DecodeCredential(m.codec, dev.CredentialData)
-	if err != nil {
-		return nil, fmt.Errorf("decrypt credential: %w", err)
+// decryptField decrypts a single credential field value in place. Fields that
+// fail to decrypt are left unchanged — this covers legacy rows stored as
+// plaintext before per-field encryption was enabled, and empty fields (e.g.
+// PrivKey on an authNoPriv user).
+func (m *Manager) decryptField(val string) string {
+	if m.codec == nil || val == "" {
+		return val
 	}
+	dec, err := m.codec.Decrypt(val)
+	if err != nil {
+		return val
+	}
+	return string(dec)
+}
 
+// decodeCred unmarshals the device credential JSON, then decrypts whichever
+// individual sensitive fields (community / auth_key / priv_key) are ciphertext.
+// The row's data is a plain JSON object with some field VALUES encrypted —
+// not a single encrypted blob — so it must be parsed before decrypting.
+func (m *Manager) decodeCred(dev model.DeviceRow) (interface{}, error) {
 	switch dev.CredentialType {
 	case "snmp_v2c":
-		return client.UnmarshalV2c(raw)
+		cred, err := client.UnmarshalV2c(dev.CredentialData)
+		if err != nil {
+			return nil, err
+		}
+		cred.Community = m.decryptField(cred.Community)
+		return cred, nil
 	case "snmp_v3":
-		return client.UnmarshalV3(raw)
+		cred, err := client.UnmarshalV3(dev.CredentialData)
+		if err != nil {
+			return nil, err
+		}
+		cred.AuthKey = m.decryptField(cred.AuthKey)
+		cred.PrivKey = m.decryptField(cred.PrivKey)
+		return cred, nil
 	default:
 		return nil, fmt.Errorf("unsupported credential type %q", dev.CredentialType)
 	}

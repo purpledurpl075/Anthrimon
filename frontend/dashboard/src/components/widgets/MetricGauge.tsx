@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchMetricCatalog, fetchMetricValue } from '../../api/metrics'
-import { formatMetricValue } from './shared'
+import { apiErrorMessage, formatMetricValue } from './shared'
 import type { MetricWidgetProps } from './metricWidgetConfig'
 
 // ── 270° arc gauge geometry ──────────────────────────────────────────────────
@@ -33,7 +33,6 @@ const ZONE_COLORS = { ok: '#16a34a', warn: '#d97706', crit: '#dc2626', track: '#
 
 export function MetricGauge({ config, refreshIntervalS = 60 }: MetricWidgetProps) {
   const { device_id, metric_id, interface_name } = config
-  const configured = !!device_id && !!metric_id
 
   const { data: catalog } = useQuery({
     queryKey: ['metric-catalog'],
@@ -42,8 +41,10 @@ export function MetricGauge({ config, refreshIntervalS = 60 }: MetricWidgetProps
   })
   const def = catalog?.find(m => m.id === metric_id)
   const title = config.title || def?.label || 'Metric'
+  const needsInterface = def?.category === 'interface'
+  const configured = !!device_id && !!metric_id && (!needsInterface || !!interface_name)
 
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, error } = useQuery({
     queryKey: ['metric-value', metric_id, device_id, interface_name],
     queryFn:  () => fetchMetricValue({ metric_id: metric_id!, device_id: device_id!, interface_name }),
     enabled:  configured,
@@ -55,7 +56,20 @@ export function MetricGauge({ config, refreshIntervalS = 60 }: MetricWidgetProps
     return (
       <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex flex-col items-center justify-center text-center gap-1">
         <h3 className="text-sm font-semibold text-slate-800">{title}</h3>
-        <p className="text-xs text-slate-400">Click configure to pick a device and metric</p>
+        <p className="text-xs text-slate-400">
+          {!!device_id && !!metric_id && needsInterface && !interface_name
+            ? 'This metric needs an interface selected — click configure.'
+            : 'Click configure to pick a device and metric'}
+        </p>
+      </div>
+    )
+  }
+
+  if (isError) {
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex flex-col items-center justify-center text-center gap-1">
+        <h3 className="text-sm font-semibold text-slate-800">{title}</h3>
+        <p className="text-xs text-red-500">{apiErrorMessage(error)}</p>
       </div>
     )
   }

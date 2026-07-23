@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { fetchOSPFAreas } from '../../api/bgp'
+import { apiErrorMessage } from './shared'
 
 // ── OSPF area breakdown ───────────────────────────────────────────────────────
 
 export function OSPFAreasWidget() {
-  const { data = [], isLoading } = useQuery({
+  const { data = [], isLoading, isError, error } = useQuery({
     queryKey:        ['ospf-areas'],
     queryFn:         fetchOSPFAreas,
     refetchInterval: 60_000,
@@ -15,6 +16,7 @@ export function OSPFAreasWidget() {
     <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full">
       <h3 className="text-sm font-semibold text-slate-800 mb-4">OSPF areas</h3>
       {isLoading ? <p className="text-xs text-slate-400">Loading…</p>
+        : isError ? <p className="text-xs text-red-500">{apiErrorMessage(error)}</p>
         : data.length === 0 ? <p className="text-xs text-slate-400">No OSPF neighbors</p>
         : (
           <div className="space-y-2.5">

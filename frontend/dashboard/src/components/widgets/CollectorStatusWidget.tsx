@@ -1,14 +1,19 @@
-import { useWidgetData } from './shared'
+import { apiErrorMessage, useWidgetData } from './shared'
 
 // 6. Collector status
 export function CollectorStatusWidget() {
-  const { data } = useWidgetData()
+  const { data, isLoading, isError, error } = useWidgetData()
+  const sectionFailed = data?.errors?.includes('collector_status')
   const collectors = data?.collector_status ?? []
   const DOT: Record<string, string> = { online: '#16a34a', offline: '#dc2626', pending: '#f59e0b' }
   return (
     <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full">
       <h3 className="text-sm font-semibold text-slate-800 mb-4">Collector status</h3>
-      {collectors.length === 0 ? (
+      {isLoading ? (
+        <p className="text-xs text-slate-400">Loading…</p>
+      ) : isError || sectionFailed ? (
+        <p className="text-xs text-red-500">{apiErrorMessage(error)}</p>
+      ) : collectors.length === 0 ? (
         <p className="text-xs text-slate-400">No remote collectors</p>
       ) : (
         <div className="space-y-2">

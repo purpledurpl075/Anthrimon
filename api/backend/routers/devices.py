@@ -15,6 +15,7 @@ from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from .. import crypto as _crypto
 from ..dependencies import get_current_user, get_db, require_role, get_current_principal, accessible_device_ids_subquery, Principal
 from ..models.alert import Alert
 from ..models.credential import Credential, DeviceCredential
@@ -37,16 +38,17 @@ router = APIRouter(prefix="/devices", tags=["devices"])
 
 def _cred_to_spec(cred) -> dict:
     """Translate a Credential row to the CredSpec JSON expected by the collector /probe endpoint."""
+    data = _crypto.decrypt_credential_data(cred.data)
     if cred.type == "snmp_v3":
         return {
             "version":    "snmp_v3",
-            "username":   cred.data.get("username", ""),
-            "auth_key":   cred.data.get("auth_key", ""),
-            "priv_key":   cred.data.get("priv_key", ""),
-            "auth_proto": cred.data.get("auth_protocol", "sha256"),
-            "priv_proto": cred.data.get("priv_protocol", "aes"),
+            "username":   data.get("username", ""),
+            "auth_key":   data.get("auth_key", ""),
+            "priv_key":   data.get("priv_key", ""),
+            "auth_proto": data.get("auth_protocol", "sha256"),
+            "priv_proto": data.get("priv_protocol", "aes"),
         }
-    return {"version": "snmp_v2c", "community": cred.data.get("community", "public")}
+    return {"version": "snmp_v2c", "community": data.get("community", "public")}
 
 
 def _collector_token(api_key_hash: str) -> str:
@@ -325,10 +327,11 @@ async def create_device(
         probe_list = snmp_creds if snmp_creds else [None]
         for c in probe_list:
             result = None
+            cred_data = _crypto.decrypt_credential_data(c.data) if c is not None else {}
             if c is not None and c.type == "snmp_v3":
-                result = await probe_v3(ip, c.data, port, timeout=3)
+                result = await probe_v3(ip, cred_data, port, timeout=3)
             elif c is not None and c.type == "snmp_v2c":
-                result = await probe_v2c(ip, c.data.get("community", "public"), port, timeout=3)
+                result = await probe_v2c(ip, cred_data.get("community", "public"), port, timeout=3)
             else:
                 result = await probe_v2c(ip, "public", port, timeout=3)
             if result:
@@ -595,7 +598,7 @@ async def discover_snmp_engine_id(
         raise HTTPException(status_code=422, detail="Device has no SSH credential")
 
     vendor_key = _vendor_key(device)
-    engine_id = await _discover_engine_id(str(device.mgmt_ip), vendor_key, ssh_cred.data)
+    engine_id = await _discover_engine_id(str(device.mgmt_ip), vendor_key, _crypto.decrypt_credential_data(ssh_cred.data))
     if not engine_id:
         raise HTTPException(status_code=422,
                             detail="Could not discover engine ID — check SSH credentials and vendor support")
@@ -1708,6 +1711,7 @@ async def snmp_diag(
 
     dc, cred = cred_row
     cred_data = cred.data if isinstance(cred.data, dict) else _json.loads(cred.data)
+    cred_data = _crypto.decrypt_credential_data(cred_data)
     host = device.mgmt_ip_str
 
     try:

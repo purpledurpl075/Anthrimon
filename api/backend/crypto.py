@@ -47,3 +47,60 @@ def decrypt(blob: str) -> str:
         raise ValueError("Ciphertext too short")
     plaintext = AESGCM(key).decrypt(data[:12], data[12:], None)
     return plaintext.decode()
+
+
+# ── Credential.data field-level helpers ──────────────────────────────────────
+# Every place that stores or reads a Credential.data JSONB dict (SNMP
+# community/auth/priv secrets, SSH passwords, etc.) must route through these
+# three functions so the set of encrypted-at-rest fields has one definition.
+
+SENSITIVE_CREDENTIAL_FIELDS = (
+    "password", "passphrase", "private_key",  # ssh / netconf / gnmi
+    "auth_key", "priv_key",                   # snmp_v3
+    "community",                              # snmp_v2c
+)
+REDACTED_PLACEHOLDER = "***"
+
+
+def encrypt_credential_data(data: dict) -> dict:
+    """Return a copy of a Credential.data dict with sensitive fields encrypted."""
+    if not is_configured():
+        return data
+    out = dict(data)
+    for field in SENSITIVE_CREDENTIAL_FIELDS:
+        val = out.get(field)
+        if val and val != REDACTED_PLACEHOLDER:
+            out[field] = encrypt(str(val))
+    return out
+
+
+def decrypt_credential_data(data: dict) -> dict:
+    """Return a copy of a Credential.data dict with sensitive fields decrypted
+    back to plaintext for actual use (SNMP auth, SSH login, snmptrapd config, …).
+
+    A field that fails to decrypt is left as-is rather than raising — this
+    covers legacy rows stored before encryption was enabled/fixed for that
+    field, which are already plaintext.
+    """
+    if not is_configured():
+        return data
+    out = dict(data)
+    for field in SENSITIVE_CREDENTIAL_FIELDS:
+        val = out.get(field)
+        if not val:
+            continue
+        try:
+            out[field] = decrypt(val)
+        except Exception:
+            pass
+    return out
+
+
+def redact_credential_data(data: dict) -> dict:
+    """Return a copy of a Credential.data dict with sensitive fields replaced
+    by a fixed placeholder, for display in API responses."""
+    out = dict(data)
+    for field in SENSITIVE_CREDENTIAL_FIELDS:
+        if out.get(field):
+            out[field] = REDACTED_PLACEHOLDER
+    return out

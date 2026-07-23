@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query'
-import { fetchWidgetData } from '../../api/overview'
+import { fetchWidgetData, fetchOverview } from '../../api/overview'
 export { formatAge } from '../../utils/time'
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
@@ -39,6 +39,17 @@ export const SEV_BG: Record<string, string> = {
   info:     'bg-slate-100 text-slate-600 border-slate-200',
 }
 
+// Pulls a human-readable message out of a rejected api/client.ts request
+// (shape: { response: { status, data: { detail } } }) for display in widgets
+// that otherwise render indistinguishable "No data" on any failure.
+export function apiErrorMessage(error: unknown): string {
+  const err = error as { response?: { status?: number; data?: { detail?: string } } } | undefined
+  const detail = err?.response?.data?.detail
+  if (detail) return detail
+  if (err?.response?.status) return `Request failed (${err.response.status})`
+  return 'Failed to load data'
+}
+
 export function utilColor(pct: number | null): string {
   if (pct === null) return '#94a3b8'
   if (pct < 30)  return '#16a34a'
@@ -73,4 +84,21 @@ export const SEV_FEED_COLOR: Record<number, string> = { 0: '#7f1d1d', 1: '#991b1
 
 export function useWidgetData() {
   return useQuery({ queryKey: ['widget-data'], queryFn: fetchWidgetData, refetchInterval: 60_000, staleTime: 30_000 })
+}
+
+export function useOverviewData() {
+  return useQuery({ queryKey: ['overview'], queryFn: fetchOverview, refetchInterval: 30_000, staleTime: 25_000 })
+}
+
+// Small shared fallback for widgets that can't render meaningfully without data
+// — distinguishes "still loading" from "request failed" instead of getting
+// stuck on a permanent Loading/empty state on error.
+export function WidgetStatus({ isLoading, isError, error }: { isLoading: boolean; isError: boolean; error?: unknown }) {
+  return (
+    <div className="bg-white rounded-2xl border border-slate-200 p-5 h-full flex items-center justify-center text-xs text-center px-4">
+      {isLoading ? <span className="text-slate-400">Loading…</span>
+        : isError ? <span className="text-red-500">{apiErrorMessage(error)}</span>
+        : null}
+    </div>
+  )
 }
