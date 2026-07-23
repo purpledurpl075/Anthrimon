@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..audit import audit
 from ..database import AsyncSessionLocal, engine
-from ..dependencies import get_db, require_role
+from ..dependencies import get_db, require_platform_user
 from ..models.tenant import User
 from ..platform_health import registry
 
@@ -142,7 +142,7 @@ async def _collector_stats(db: AsyncSession, tenant_id: str) -> list[dict]:
 
 @router.get("/health", summary="Anthrimon self-observability snapshot (JSON)")
 async def get_platform_health(
-    current_user: User = Depends(require_role("admin", "superadmin")),
+    current_user: User = Depends(require_platform_user()),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     snap = registry.snapshot()
@@ -227,7 +227,7 @@ async def create_backup_download(
     no_flow_history: bool = Query(default=True,
                                   description="Skip flow_records + syslog_messages data (smaller, faster)"),
     compression:   int = Query(default=3, ge=1, le=19),
-    current_user:  User = Depends(require_role("admin", "superadmin")),
+    current_user:  User = Depends(require_platform_user()),
     db:            AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     """Runs the anthrimon-backup CLI to a temp file, then streams the file as
@@ -330,7 +330,7 @@ def _ensure_upload_dir() -> Path:
 async def upload_backup(
     request:      Request,
     file:         UploadFile = File(...),
-    current_user: User       = Depends(require_role("admin", "superadmin")),
+    current_user: User       = Depends(require_platform_user()),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
     """Streams an uploaded `anthrimon-backup-*.tar.zst` to the server's
@@ -400,7 +400,7 @@ async def upload_backup(
 @router.get("/backups",
             summary="List backup archives sitting in the server's restore-staging dir")
 async def list_uploaded_backups(
-    current_user: User = Depends(require_role("admin", "superadmin")),
+    current_user: User = Depends(require_platform_user()),
 ) -> list[dict]:
     """List files currently staged for restore.  Operator deletes them via
     SSH after restoring (or via the corresponding DELETE endpoint below)."""
@@ -427,7 +427,7 @@ async def list_uploaded_backups(
 async def delete_uploaded_backup(
     filename:     str,
     request:      Request,
-    current_user: User         = Depends(require_role("admin", "superadmin")),
+    current_user: User         = Depends(require_platform_user()),
     db:           AsyncSession = Depends(get_db),
 ) -> Response:
     safe = os.path.basename(filename)

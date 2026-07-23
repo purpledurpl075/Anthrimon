@@ -342,6 +342,22 @@ def require_tenant_user(min_role: str = "tenant_admin"):
     return _check
 
 
+def require_platform_user(min_role: str = "platform_admin"):
+    """Like require_platform but returns the User instead of the Principal.
+    Drop-in replacement for require_role() on endpoints whose data/actions are
+    platform-wide (not scoped to the caller's own tenant) — require_role()
+    only checks the caller's *tenant* role, so it wrongly lets a tenant admin
+    through on endpoints like backup/restore that touch every tenant's data."""
+    async def _check(principal: Principal = Depends(get_current_principal)) -> User:
+        if not _has_platform_role(principal, min_role):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=f"Requires platform role '{min_role}' or higher",
+            )
+        return principal.user
+    return _check
+
+
 # ── Licensing gate ────────────────────────────────────────────────────────────
 
 def require_license(module: str):

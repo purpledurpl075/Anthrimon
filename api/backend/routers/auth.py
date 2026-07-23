@@ -31,10 +31,28 @@ _rate_windows: dict[str, list[float]] = {}
 _cleanup_counter = 0
 
 
+def _real_client_ip(request: Request) -> str:
+    """Return the real client IP, looking through X-Real-IP/X-Forwarded-For
+    when the direct connection is from the trusted local nginx proxy.
+    uvicorn binds to 127.0.0.1 only, so a direct connection is always nginx —
+    without this, every request's client.host is nginx's own loopback
+    address, collapsing the "per-IP" rate limit into one shared bucket for
+    the whole site."""
+    client = request.client.host if request.client else "unknown"
+    if client in ("127.0.0.1", "::1"):
+        real_ip = request.headers.get("X-Real-IP", "")
+        if real_ip:
+            return real_ip.strip()
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        if forwarded:
+            return forwarded.split(",")[0].strip()
+    return client
+
+
 def _check_rate_limit(request: Request, max_calls: int, window_seconds: int) -> None:
     """Raise 429 if the request IP has exceeded max_calls in window_seconds."""
     global _cleanup_counter
-    ip = request.client.host if request.client else "unknown"
+    ip = _real_client_ip(request)
     now = time.monotonic()
     window_start = now - window_seconds
     calls = [t for t in _rate_windows.get(ip, []) if t > window_start]
@@ -354,7 +372,7 @@ async def login(
     password_ok = _verify_password(body.password, candidate_hash)
 
     if user is None or not password_ok:
-        logger.warning("login_failed", username=body.username, ip=request.client.host if request.client else "unknown")
+        logger.warning("login_failed", username=body.username, ip=_real_client_ip(request))
         # Record failed login attempt for audit.  No user FK because the
         # username may not match any account.
         from ..audit import audit as _audit
