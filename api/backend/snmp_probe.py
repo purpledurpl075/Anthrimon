@@ -17,6 +17,41 @@ VENDOR_DEVICE_TYPE: dict[str, str] = {
     "fortios":      "firewall",
 }
 
+# Juniper spans switches (EX), routers (MX/M/T/PTX/ACX), and firewalls (SRX)
+# under one vendor string — VENDOR_DEVICE_TYPE's flat per-vendor default can't
+# tell them apart, so refine from sysDescr for this vendor only.
+_JUNIPER_DEVICE_TYPE_PATTERNS: list[tuple[str, str]] = [
+    (r"\bSRX\b", "firewall"),
+    (r"Ethernet Switch|\bEX\d", "switch"),
+]
+
+
+def detect_device_type(vendor: str, sys_descr: str) -> str:
+    """Return the device_type for a probed device, refining VENDOR_DEVICE_TYPE's
+    flat per-vendor default using sysDescr where one vendor spans hardware
+    classes (currently just Juniper)."""
+    if vendor == "juniper":
+        for pattern, device_type in _JUNIPER_DEVICE_TYPE_PATTERNS:
+            if re.search(pattern, sys_descr, re.IGNORECASE):
+                return device_type
+    return VENDOR_DEVICE_TYPE.get(vendor, "unknown")
+
+
+# Extracts the model token from a vendor's sysDescr, e.g. "ex3300-48p" from
+# "Juniper Networks, Inc. ex3300-48p Ethernet Switch, kernel JUNOS ...".
+_PLATFORM_PATTERNS: dict[str, str] = {
+    "juniper": r"Juniper Networks,\s*Inc\.\s+(\S+)",
+}
+
+
+def detect_platform(vendor: str, sys_descr: str) -> str:
+    """Return the hardware model string extracted from sysDescr, or ''."""
+    pattern = _PLATFORM_PATTERNS.get(vendor)
+    if not pattern:
+        return ""
+    m = re.search(pattern, sys_descr)
+    return m.group(1) if m else ""
+
 from .schemas.discovery import DiscoveredDevice
 
 _VENDOR_PREFIXES: list[tuple[str, str]] = [

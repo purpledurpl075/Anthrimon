@@ -25,12 +25,6 @@ const STATUS_COLOR: Record<string, string> = {
   unreachable: '#f97316',
   unknown:     '#94a3b8',
 }
-const STATUS_BORDER: Record<string, string> = {
-  up:          'border-green-400',
-  down:        'border-red-400',
-  unreachable: 'border-orange-400',
-  unknown:     'border-slate-300',
-}
 const STATUS_LABEL: Record<string, string> = {
   up: 'Up', down: 'Down', unreachable: 'Unreachable', unknown: 'Unknown',
 }
@@ -69,13 +63,11 @@ function DeviceCard({ device, inMaintenance, selectable, selected, onToggle }: {
   const navigate = useNavigate()
   const color   = DEVICE_TYPE_COLOR[device.device_type] ?? '#475569'
   const sc      = STATUS_COLOR[device.status]  ?? '#94a3b8'
-  const border  = STATUS_BORDER[device.status] ?? 'border-slate-200'
 
   return (
     <div
       onClick={() => navigate(`/devices/${device.id}`)}
-      className={`group relative bg-white border-l-4 ${border} rounded-xl border border-l-[4px] border-slate-200 px-5 py-4 cursor-pointer hover:shadow-md hover:-translate-y-px transition-all duration-150 flex items-center gap-4`}
-      style={{ borderLeftColor: sc }}
+      className="group relative bg-white rounded-xl border border-slate-200 px-5 py-4 cursor-pointer hover:shadow-md hover:-translate-y-px transition-all duration-150 flex items-center gap-4"
     >
       {/* Select checkbox */}
       {selectable && (

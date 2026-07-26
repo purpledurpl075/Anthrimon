@@ -36,7 +36,7 @@ import (
 	"github.com/purpledurpl075/anthri-mon/collectors/remote/internal/tunnel"
 )
 
-const version = "0.3.45"
+const version = "0.3.52"
 
 // capabilities lists every feature this binary supports.  Sent on bootstrap
 // and on every heartbeat so the hub always reflects the running binary.
@@ -47,6 +47,7 @@ var capabilities = []string{
 	"config_backup",
 	"arista_eapi",
 	"aruba_rest",
+	"junos_netconf",
 	"config_exec",
 	"api_probe",
 }
@@ -154,25 +155,26 @@ func run(cfgPath string) error {
 
 	// ── Collectors ────────────────────────────────────────────────────────────
 
-	snmpCol    := collector.NewSNMPCollector(hubClient, cfg.SNMP, logger)
-	sshCfgCol  := collector.NewSSHConfigCollector(hubClient, logger)
-	restCol    := collector.NewArubaRESTCollector(hubClient, logger)
-	eapiCol    := collector.NewAristaEAPICollector(hubClient, logger)
-	probeCol   := collector.NewProbeCollector(hubClient, logger)
+	snmpCol := collector.NewSNMPCollector(hubClient, cfg.SNMP, logger)
+	sshCfgCol := collector.NewSSHConfigCollector(hubClient, logger)
+	restCol := collector.NewArubaRESTCollector(hubClient, logger)
+	eapiCol := collector.NewAristaEAPICollector(hubClient, logger)
+	netconfCol := collector.NewNetconfJuniperCollector(hubClient, logger)
+	probeCol := collector.NewProbeCollector(hubClient, logger)
 
 	devicesByIP := make(map[string]string)
-	flowCol    := collector.NewFlowCollector(hubClient, cfg.Flow, cfg.Forward, devicesByIP, logger)
-	syslogCol  := collector.NewSyslogCollector(hubClient, cfg.Syslog, cfg.Forward, devicesByIP, logger)
+	flowCol := collector.NewFlowCollector(hubClient, cfg.Flow, cfg.Forward, devicesByIP, logger)
+	syslogCol := collector.NewSyslogCollector(hubClient, cfg.Syslog, cfg.Forward, devicesByIP, logger)
 
 	// Initial config fetch.
-	if err := refreshDevices(ctx, hubClient, snmpCol, sshCfgCol, restCol, eapiCol, probeCol, flowCol, syslogCol, logger); err != nil {
+	if err := refreshDevices(ctx, hubClient, snmpCol, sshCfgCol, restCol, eapiCol, netconfCol, probeCol, flowCol, syslogCol, logger); err != nil {
 		logger.Warn().Err(err).Msg("initial config fetch failed — will retry")
 	}
 
 	// ── Control server callbacks ──────────────────────────────────────────────
 
 	onRefresh := func() {
-		if err := refreshDevices(ctx, hubClient, snmpCol, sshCfgCol, restCol, eapiCol, probeCol, flowCol, syslogCol, logger); err != nil {
+		if err := refreshDevices(ctx, hubClient, snmpCol, sshCfgCol, restCol, eapiCol, netconfCol, probeCol, flowCol, syslogCol, logger); err != nil {
 			logger.Warn().Err(err).Msg("on-demand config refresh failed")
 		}
 	}
@@ -210,7 +212,7 @@ func run(cfgPath string) error {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		configRefreshLoop(ctx, hubClient, snmpCol, sshCfgCol, restCol, eapiCol, probeCol, flowCol, syslogCol, logger)
+		configRefreshLoop(ctx, hubClient, snmpCol, sshCfgCol, restCol, eapiCol, netconfCol, probeCol, flowCol, syslogCol, logger)
 	}()
 
 	wg.Add(1)
@@ -235,6 +237,12 @@ func run(cfgPath string) error {
 	go func() {
 		defer wg.Done()
 		eapiCol.Run(ctx)
+	}()
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		netconfCol.Run(ctx)
 	}()
 
 	wg.Add(1)
@@ -346,9 +354,9 @@ func installTrapHandler(ctx context.Context, hubClient *hub.Client, logger zerol
 // The trap-handler binary is also updated before the restart.
 func selfUpdate(
 	hubClient *hub.Client,
-	cancel    context.CancelFunc,
+	cancel context.CancelFunc,
 	restartCh chan<- string,
-	logger    zerolog.Logger,
+	logger zerolog.Logger,
 ) {
 	log := logger.With().Str("op", "self_update").Logger()
 
@@ -500,14 +508,15 @@ func heartbeatLoop(ctx context.Context, hubClient *hub.Client, ver string, start
 func configRefreshLoop(
 	ctx context.Context,
 	hubClient *hub.Client,
-	snmpCol   *collector.SNMPCollector,
+	snmpCol *collector.SNMPCollector,
 	sshCfgCol *collector.SSHConfigCollector,
-	restCol   *collector.ArubaRESTCollector,
-	eapiCol   *collector.AristaEAPICollector,
-	probeCol  *collector.ProbeCollector,
-	flowCol   *collector.FlowCollector,
+	restCol *collector.ArubaRESTCollector,
+	eapiCol *collector.AristaEAPICollector,
+	netconfCol *collector.NetconfJuniperCollector,
+	probeCol *collector.ProbeCollector,
+	flowCol *collector.FlowCollector,
 	syslogCol *collector.SyslogCollector,
-	logger    zerolog.Logger,
+	logger zerolog.Logger,
 ) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
@@ -517,7 +526,7 @@ func configRefreshLoop(
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := refreshDevices(ctx, hubClient, snmpCol, sshCfgCol, restCol, eapiCol, probeCol, flowCol, syslogCol, logger); err != nil {
+			if err := refreshDevices(ctx, hubClient, snmpCol, sshCfgCol, restCol, eapiCol, netconfCol, probeCol, flowCol, syslogCol, logger); err != nil {
 				logger.Warn().Err(err).Msg("periodic config refresh failed")
 			}
 		}
@@ -528,14 +537,15 @@ func configRefreshLoop(
 func refreshDevices(
 	ctx context.Context,
 	hubClient *hub.Client,
-	snmpCol   *collector.SNMPCollector,
+	snmpCol *collector.SNMPCollector,
 	sshCfgCol *collector.SSHConfigCollector,
-	restCol   *collector.ArubaRESTCollector,
-	eapiCol   *collector.AristaEAPICollector,
-	probeCol  *collector.ProbeCollector,
-	flowCol   *collector.FlowCollector,
+	restCol *collector.ArubaRESTCollector,
+	eapiCol *collector.AristaEAPICollector,
+	netconfCol *collector.NetconfJuniperCollector,
+	probeCol *collector.ProbeCollector,
+	flowCol *collector.FlowCollector,
 	syslogCol *collector.SyslogCollector,
-	logger    zerolog.Logger,
+	logger zerolog.Logger,
 ) error {
 	devCfg, err := hubClient.FetchConfig(ctx)
 	if err != nil {
@@ -551,12 +561,14 @@ func refreshDevices(
 	sshCfgCol.SetDevices(devCfg.Devices)
 	restCol.SetDevices(devCfg.Devices)
 	eapiCol.SetDevices(devCfg.Devices)
+	netconfCol.SetDevices(devCfg.Devices)
 	probeCol.SetDevices(devCfg.Devices)
 	flowCol.UpdateDevices(byIP)
 	syslogCol.UpdateDevices(byIP)
 	syslogCol.SetTimezone(devCfg.Timezone)
 	restCol.SetIntervals(devCfg.StateIntervalS, devCfg.CounterIntervalS)
 	eapiCol.SetIntervals(devCfg.StateIntervalS, devCfg.CounterIntervalS)
+	netconfCol.SetInterval(devCfg.StateIntervalS)
 
 	logger.Info().
 		Int("devices", len(devCfg.Devices)).

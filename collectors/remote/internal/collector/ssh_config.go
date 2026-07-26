@@ -74,6 +74,13 @@ var (
 	passwordRE = regexp.MustCompile(`(?i)password\s*:`)
 	moreRE     = regexp.MustCompile(`(?i)--\s*[Mm]ore\s*--`)
 	ansiRE     = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+	// junosAnyPromptRE matches either the Junos CLI prompt (#/>) or a Unix
+	// shell prompt — SSHing to Junos as root lands in a shell (FreeBSD/csh),
+	// not the operational CLI, so the initial-connect wait must accept both.
+	junosAnyPromptRE = regexp.MustCompile(`[#>%$]\s*$`)
+	// junosShellPromptRE identifies that we're specifically at a shell prompt
+	// (not CLI), matching netmiko's own JuniperBase._determine_mode pattern.
+	junosShellPromptRE = regexp.MustCompile(`(?:root@|%\s*$|\$\s*$)`)
 	// bannerNoiseRE matches header lines that are CLI framing, not real config.
 	// These vary between captures (timestamps, byte counts, session metadata)
 	// and produce spurious diffs. Mirrors _BANNER_NOISE in configmgmt/collector.py.
@@ -329,9 +336,34 @@ func collectViaShell(client *ssh.Client, vendor, enablePass, showCmd string) (st
 
 	cr := newChanReader(stdoutPipe)
 
-	// 1. Wait for the initial prompt.
-	if _, err := cr.readUntilPrompt(20 * time.Second); err != nil {
+	// 1. Wait for the initial prompt. Junos root logins land in a Unix shell
+	// (FreeBSD/csh), not the operational CLI, so accept either prompt shape.
+	initialPromptRE := promptRE
+	if vendor == "juniper" {
+		initialPromptRE = junosAnyPromptRE
+	}
+	if _, err := cr.readUntil(initialPromptRE, 20*time.Second); err != nil {
 		return "", fmt.Errorf("initial prompt timeout: %w", err)
+	}
+	if vendor == "juniper" {
+		// The raw connection banner can interleave MOTD/mail-notice lines
+		// ahead of the real prompt, so matching shell-vs-CLI against that
+		// banner text is unreliable — confirmed live: intermittently landed
+		// in shell undetected, corrupting the backup with "show: Command
+		// not found" instead of config. Send a bare Enter and check ONLY
+		// the freshly echoed prompt line that comes back in response — the
+		// same approach Netmiko's JuniperBase._determine_mode uses.
+		fmt.Fprintf(stdin, "\n")
+		fresh, err := cr.readUntil(junosAnyPromptRE, 10*time.Second)
+		if err != nil {
+			return "", fmt.Errorf("prompt re-check timeout: %w", err)
+		}
+		if junosShellPromptRE.MatchString(strings.TrimRight(fresh, " \t\r\n")) {
+			fmt.Fprintf(stdin, "cli\n")
+			if _, err := cr.readUntilPrompt(10 * time.Second); err != nil {
+				return "", fmt.Errorf("cli entry timeout: %w", err)
+			}
+		}
 	}
 
 	// 2. Disable pagination so the full config comes back without --More--.

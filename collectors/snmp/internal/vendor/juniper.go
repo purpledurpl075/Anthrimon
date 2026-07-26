@@ -31,5 +31,9 @@ func init() {
 		TempOIDs: &OIDSet{
 			Walk: []string{oid.JnxOperatingTemp},
 		},
+
+		// Junos doesn't populate the standard Q-BRIDGE-MIB VLAN tables on at
+		// least EX3300 15.1R6/R7 — fall back to JUNIPER-VLAN-MIB.
+		JuniperVlan: true,
 	})
 }

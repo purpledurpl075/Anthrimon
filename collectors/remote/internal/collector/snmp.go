@@ -26,20 +26,20 @@ import (
 
 const (
 	// System
-	oidSysUpTime = "1.3.6.1.2.1.1.3.0"
+	oidSysUpTime    = "1.3.6.1.2.1.1.3.0"
 	oidSysDescr     = "1.3.6.1.2.1.1.1.0"
 	oidSysObjectID  = "1.3.6.1.2.1.1.2.0"
 	oidSysName      = "1.3.6.1.2.1.1.5.0"
 	oidSnmpEngineID = "1.3.6.1.6.3.10.2.1.1.0" // SNMP-FRAMEWORK-MIB
 
 	// IF-MIB — ifTable (32-bit counters, admin/oper status, speed, descr)
-	oidIfTable      = "1.3.6.1.2.1.2.2.1"
+	oidIfTable = "1.3.6.1.2.1.2.2.1"
 	// IF-MIB — ifXTable (64-bit HC counters, ifName, ifHighSpeed, ifAlias)
-	oidIfXTable     = "1.3.6.1.2.1.31.1.1.1"
+	oidIfXTable = "1.3.6.1.2.1.31.1.1.1"
 
 	// HOST-RESOURCES-MIB
-	oidHrProcessorLoad = "1.3.6.1.2.1.25.3.3.1.2"
-	oidHrStorageTable  = "1.3.6.1.2.1.25.2.3.1"
+	oidHrProcessorLoad        = "1.3.6.1.2.1.25.3.3.1.2"
+	oidHrStorageTable         = "1.3.6.1.2.1.25.2.3.1"
 	oidHrStorageTypeRAMSuffix = ".2" // hrStorageRam OID ends in .2
 
 	// ENTITY-MIB — physical entity names/descriptions (correlate with sensor index)
@@ -53,7 +53,7 @@ const (
 	oidEntPhySensorValue     = "1.3.6.1.2.1.99.1.1.1.4"
 
 	// BRIDGE-MIB (RFC 4188) — spanning tree
-	oidDot1dBasePortIfIndex = "1.3.6.1.2.1.17.1.4.1.2"  // bridge port → ifIndex
+	oidDot1dBasePortIfIndex = "1.3.6.1.2.1.17.1.4.1.2"   // bridge port → ifIndex
 	oidDot1dStpPortState    = "1.3.6.1.2.1.17.2.15.1.3"  // STP port state (1-5)
 	oidDot1dStpPortRole     = "1.3.6.1.2.1.17.2.15.1.10" // RSTP port role (0-5)
 
@@ -117,10 +117,10 @@ const (
 	oidArubaCXPSUInputPower = "1.3.6.1.4.1.47196.4.1.1.3.12.1.1.1.4" // watts (INTEGER)
 	oidArubaCXPSUMaxPower   = "1.3.6.1.4.1.47196.4.1.1.3.12.1.1.1.5" // watts (INTEGER)
 	// Fan table — indexed by INTEGER fan_index
-	oidArubaCXFanName      = "1.3.6.1.4.1.47196.4.1.1.3.12.1.2.1.2" // DisplayString
-	oidArubaCXFanState     = "1.3.6.1.4.1.47196.4.1.1.3.12.1.2.1.3" // ok=1, fault=2
-	oidArubaCXFanRPM       = "1.3.6.1.4.1.47196.4.1.1.3.12.1.2.1.4" // rpm (INTEGER)
-	oidArubaCXFanSpeedPct  = "1.3.6.1.4.1.47196.4.1.1.3.12.1.2.1.5" // 0-100 %
+	oidArubaCXFanName     = "1.3.6.1.4.1.47196.4.1.1.3.12.1.2.1.2" // DisplayString
+	oidArubaCXFanState    = "1.3.6.1.4.1.47196.4.1.1.3.12.1.2.1.3" // ok=1, fault=2
+	oidArubaCXFanRPM      = "1.3.6.1.4.1.47196.4.1.1.3.12.1.2.1.4" // rpm (INTEGER)
+	oidArubaCXFanSpeedPct = "1.3.6.1.4.1.47196.4.1.1.3.12.1.2.1.5" // 0-100 %
 
 	// ARUBAWIRED-VSX-MIB (1.3.6.1.4.1.47196.4.1.1.3.14) — Virtual Switching Extension
 	// Scalars (.0 suffix)
@@ -153,16 +153,16 @@ const (
 // SNMPCollector polls assigned devices via SNMP and forwards Prometheus text
 // metrics to the hub.
 type SNMPCollector struct {
-	hub     *hub.Client
-	cfg     config.SNMPConfig
-	log     zerolog.Logger
+	hub *hub.Client
+	cfg config.SNMPConfig
+	log zerolog.Logger
 
 	mu      sync.RWMutex
 	devices []hub.Device
 
-	pollNowCh   chan string // device ID to repoll immediately; "" = all devices
-	reachMu     sync.Mutex
-	reachable   map[string]bool // device_id → last-known reachability
+	pollNowCh chan string // device ID to repoll immediately; "" = all devices
+	reachMu   sync.Mutex
+	reachable map[string]bool // device_id → last-known reachability
 }
 
 // NewSNMPCollector creates a new SNMPCollector.
@@ -255,7 +255,7 @@ func (c *SNMPCollector) pollOneByID(ctx context.Context, deviceID string) {
 	}
 
 	pollStart := time.Now()
-	lines, _, err := c.pollDevice(*dev)
+	lines, _, err := c.pollDevice(ctx, *dev)
 	pollDur := time.Since(pollStart)
 	ts := time.Now().UnixMilli()
 	success := err == nil && len(lines) > 0
@@ -305,7 +305,7 @@ outer:
 			defer func() { <-sem }()
 
 			pollStart := time.Now()
-			devLines, devRoutes, err := c.pollDevice(dev)
+			devLines, devRoutes, err := c.pollDevice(ctx, dev)
 			pollDur := time.Since(pollStart)
 			success := err == nil && len(devLines) > 0
 
@@ -338,8 +338,7 @@ outer:
 			// device whose routes are maintained elsewhere. For all other
 			// devices, post unconditionally (even when devRoutes is empty)
 			// so the hub can purge a now-empty table.
-			routeSourceIsSNMP := !((dev.Vendor == "arista" && dev.EapiEnabled) ||
-				(dev.Vendor == "aruba_cx" && dev.RestCollectionEnabled))
+			routeSourceIsSNMP := !routingIsVendorAPI(dev)
 			if routeSourceIsSNMP {
 				if err := c.hub.PostRoutes(ctx, dev.ID, devRoutes); err != nil {
 					c.log.Error().Err(err).Str("device_id", dev.ID).Msg("failed to post routes to hub")
@@ -366,7 +365,7 @@ outer:
 
 // pollDevice connects to one device and returns Prometheus-format metric
 // lines plus route_entries-shaped route records.
-func (c *SNMPCollector) pollDevice(dev hub.Device) ([]string, []map[string]any, error) {
+func (c *SNMPCollector) pollDevice(ctx context.Context, dev hub.Device) ([]string, []map[string]any, error) {
 	cred := pickSNMPCredential(dev.Credentials)
 	if cred == nil {
 		return nil, nil, fmt.Errorf("no usable snmp credential for %s", dev.ID)
@@ -401,9 +400,9 @@ func (c *SNMPCollector) pollDevice(dev hub.Device) ([]string, []map[string]any, 
 	// AuthoritativeEngineID in the security parameters.
 	sysInfoResult, sysErr := g.Get([]string{oidSysName, oidSysDescr, oidSysObjectID, oidSnmpEngineID})
 	if sysErr == nil && len(sysInfoResult.Variables) >= 2 {
-		sysName  := strings.TrimSpace(pduString(sysInfoResult.Variables[0]))
+		sysName := strings.TrimSpace(pduString(sysInfoResult.Variables[0]))
 		sysDescr := strings.TrimSpace(pduString(sysInfoResult.Variables[1]))
-		sysOID   := ""
+		sysOID := ""
 		if len(sysInfoResult.Variables) >= 3 {
 			sysOID = strings.TrimPrefix(pduString(sysInfoResult.Variables[2]), ".")
 		}
@@ -441,15 +440,20 @@ func (c *SNMPCollector) pollDevice(dev hub.Device) ([]string, []map[string]any, 
 	ifLines := pollInterfaces(g, dev, ts, c.log)
 	lines = append(lines, ifLines...)
 
-	// CPU via hrProcessorLoad
-	cpuLines, err := pollCPU(g, dev, ts)
-	if err == nil {
-		lines = append(lines, cpuLines...)
+	// CPU + memory: HOST-RESOURCES-MIB for most vendors; Junos doesn't
+	// implement hrProcessorLoad/hrStorageTable (confirmed noSuchObject on at
+	// least EX3300 15.1R6/R7), so it gets JUNIPER-MIB's jnxOperatingTable
+	// instead, keyed to the Routing Engine row.
+	if dev.Vendor == "juniper" {
+		lines = append(lines, pollJuniperHealth(g, dev, ts, c.log)...)
+	} else {
+		cpuLines, err := pollCPU(g, dev, ts)
+		if err == nil {
+			lines = append(lines, cpuLines...)
+		}
+		memLines := pollMemory(g, dev, ts, c.log)
+		lines = append(lines, memLines...)
 	}
-
-	// Memory via hrStorageTable
-	memLines := pollMemory(g, dev, ts, c.log)
-	lines = append(lines, memLines...)
 
 	// BRIDGE-MIB — STP per-port state and role (non-fatal; many devices won't support it)
 	lines = append(lines, pollSTP(g, dev, ts)...)
@@ -483,9 +487,93 @@ func (c *SNMPCollector) pollDevice(dev hub.Device) ([]string, []map[string]any, 
 		lines = append(lines, pollCiscoExtended(g, dev, ts)...)
 	}
 
+	// Interface inventory, VLANs, ARP/MAC, and LLDP — discovery-table polls
+	// pushed to the hub over their own endpoints (this process has no DB
+	// access). Interface inventory is posted first and synchronously: the
+	// hub resolves VLAN/ARP/MAC records to an interface_id by (device_id,
+	// if_name), so those joins are no-ops until the interfaces rows exist.
+	ifNameByIdx := resolveIfNames(g)
+
+	if ifRecords := pollInterfaceInventory(g, dev, c.log); len(ifRecords) > 0 {
+		if err := c.hub.PostInterfaces(ctx, ifRecords); err != nil {
+			c.log.Warn().Err(err).Str("device_id", dev.ID).Msg("failed to post interface inventory")
+		}
+	}
+	vlanRecords := pollVLANTable(g, dev, ifNameByIdx, c.log)
+	if len(vlanRecords) == 0 && dev.Vendor == "juniper" {
+		vlanRecords = pollVLANDefsJuniper(g, dev, c.log)
+	}
+	if len(vlanRecords) > 0 {
+		if err := c.hub.PostVLANs(ctx, vlanRecords); err != nil {
+			c.log.Warn().Err(err).Str("device_id", dev.ID).Msg("failed to post VLANs")
+		}
+	}
+	if addrRecords := pollAddressTable(g, dev, ifNameByIdx, c.log); len(addrRecords) > 0 {
+		if err := c.hub.PostAddresses(ctx, addrRecords); err != nil {
+			c.log.Warn().Err(err).Str("device_id", dev.ID).Msg("failed to post ARP/MAC addresses")
+		}
+	}
+	lldpRecords := pollLLDPTable(g, dev, c.log)
+	if len(lldpRecords) > 0 {
+		if err := c.hub.PostLLDPNeighbors(ctx, lldpRecords); err != nil {
+			c.log.Warn().Err(err).Str("device_id", dev.ID).Msg("failed to post LLDP neighbors")
+		}
+	}
+
+	// BGP/OSPF/ISIS via SNMP — only for devices where a vendor API isn't
+	// already authoritative for routing state (Arista eAPI, Aruba CX REST,
+	// Junos NETCONF each post their own; posting both would fight over the
+	// same hub tables — see routingIsVendorAPI).
+	if !routingIsVendorAPI(dev) {
+		if bgpRecords := pollBGPSessions(g, dev, c.log); len(bgpRecords) > 0 {
+			if err := c.hub.PostBGPSessions(ctx, dev.ID, bgpRecords); err != nil {
+				c.log.Warn().Err(err).Str("device_id", dev.ID).Msg("failed to post BGP sessions")
+			}
+		}
+
+		ipToIfName := make(map[string]string)
+		for idx, ips := range pollIPAddrTable(g) {
+			name := ifNameByIdx[strconv.Itoa(idx)]
+			if name == "" {
+				continue
+			}
+			for _, ip := range ips {
+				if addr, ok := ip["address"].(string); ok {
+					ipToIfName[addr] = name
+				}
+			}
+		}
+		if ospfRecords := pollOSPFNeighbors(g, dev, ipToIfName, c.log); len(ospfRecords) > 0 {
+			if err := c.hub.PostOSPFNeighbors(ctx, dev.ID, ospfRecords); err != nil {
+				c.log.Warn().Err(err).Str("device_id", dev.ID).Msg("failed to post OSPF neighbors")
+			}
+		}
+
+		// ISIS-MIB has no hostname field for a neighbor, only its sys_id — the
+		// hub's topology builder resolves ISIS neighbors to device nodes by
+		// hostname, so without one it falls back to plotting a standalone
+		// node labeled with the raw sys_id (a MAC-like hex string). Fill it
+		// in from LLDP, which runs over the same physical links and does
+		// report the neighbor's real system name.
+		localIfaceToRemoteHostname := make(map[string]string)
+		for _, r := range lldpRecords {
+			local, _ := r["local_port_name"].(string)
+			remote, _ := r["remote_system_name"].(string)
+			if local != "" && remote != "" {
+				localIfaceToRemoteHostname[local] = remote
+			}
+		}
+
+		if isisRecords := pollISISAdjacencies(g, dev, ifNameByIdx, localIfaceToRemoteHostname, uptime, c.log); len(isisRecords) > 0 {
+			if err := c.hub.PostISISNeighbors(ctx, dev.ID, isisRecords); err != nil {
+				c.log.Warn().Err(err).Str("device_id", dev.ID).Msg("failed to post ISIS neighbors")
+			}
+		}
+	}
+
 	// Route table — ipCidrRouteTable/inetCidrRouteTable, skipped for devices
 	// where eAPI/REST route collection is authoritative (see pollRoutes).
-	routes := pollRoutes(g, dev, resolveIfNames(g))
+	routes := pollRoutes(g, dev, ifNameByIdx)
 
 	return lines, routes, nil
 }
@@ -497,20 +585,20 @@ func (c *SNMPCollector) pollDevice(dev hub.Device) ([]string, []map[string]any, 
 // take precedence over 32-bit ifTable counters when both are present.
 func pollInterfaces(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logger) []string {
 	type ifRow struct {
-		descr        string
-		ifName       string // ifXTable col 1 — preferred display name
-		adminStatus  int
-		operStatus   int
-		speed        uint64 // ifSpeed bps (32-bit)
-		highSpeed    uint64 // ifHighSpeed Mbps (ifXTable col 15)
-		inOctets     uint64
-		inDiscards   uint64
-		inErrors     uint64
-		outOctets    uint64
-		outDiscards  uint64
-		outErrors    uint64
-		hcInOctets   uint64 // 64-bit HC counters (ifXTable)
-		hcOutOctets  uint64
+		descr       string
+		ifName      string // ifXTable col 1 — preferred display name
+		adminStatus int
+		operStatus  int
+		speed       uint64 // ifSpeed bps (32-bit)
+		highSpeed   uint64 // ifHighSpeed Mbps (ifXTable col 15)
+		inOctets    uint64
+		inDiscards  uint64
+		inErrors    uint64
+		outOctets   uint64
+		outDiscards uint64
+		outErrors   uint64
+		hcInOctets  uint64 // 64-bit HC counters (ifXTable)
+		hcOutOctets uint64
 	}
 
 	rows := make(map[int]*ifRow)
@@ -531,16 +619,26 @@ func pollInterfaces(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logg
 		}
 		r := ensure(idx)
 		switch col {
-		case 2:  r.descr = pduString(pdu)
-		case 5:  r.speed = pduUint64(pdu)
-		case 7:  r.adminStatus = pduInt(pdu)
-		case 8:  r.operStatus = pduInt(pdu)
-		case 10: r.inOctets = pduUint64(pdu)
-		case 13: r.inDiscards = pduUint64(pdu)
-		case 14: r.inErrors = pduUint64(pdu)
-		case 16: r.outOctets = pduUint64(pdu)
-		case 19: r.outDiscards = pduUint64(pdu)
-		case 20: r.outErrors = pduUint64(pdu)
+		case 2:
+			r.descr = pduString(pdu)
+		case 5:
+			r.speed = pduUint64(pdu)
+		case 7:
+			r.adminStatus = pduInt(pdu)
+		case 8:
+			r.operStatus = pduInt(pdu)
+		case 10:
+			r.inOctets = pduUint64(pdu)
+		case 13:
+			r.inDiscards = pduUint64(pdu)
+		case 14:
+			r.inErrors = pduUint64(pdu)
+		case 16:
+			r.outOctets = pduUint64(pdu)
+		case 19:
+			r.outDiscards = pduUint64(pdu)
+		case 20:
+			r.outErrors = pduUint64(pdu)
 		}
 		return nil
 	}); err != nil {
@@ -555,10 +653,14 @@ func pollInterfaces(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logg
 		}
 		r := ensure(idx)
 		switch col {
-		case 1:  r.ifName = pduString(pdu)
-		case 6:  r.hcInOctets = pduUint64(pdu)
-		case 10: r.hcOutOctets = pduUint64(pdu)
-		case 15: r.highSpeed = pduUint64(pdu)
+		case 1:
+			r.ifName = pduString(pdu)
+		case 6:
+			r.hcInOctets = pduUint64(pdu)
+		case 10:
+			r.hcOutOctets = pduUint64(pdu)
+		case 15:
+			r.highSpeed = pduUint64(pdu)
 		}
 		return nil
 	}); err != nil {
@@ -583,7 +685,7 @@ func pollInterfaces(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logg
 		}
 
 		// Counters: prefer HC 64-bit; fall back to 32-bit when HC is zero.
-		inOctets  := pickCounter(r.hcInOctets, r.inOctets)
+		inOctets := pickCounter(r.hcInOctets, r.inOctets)
 		outOctets := pickCounter(r.hcOutOctets, r.outOctets)
 
 		// oper/admin status: normalise to 1=up / 0=down (SNMP: 1=up, 2=down).
@@ -667,10 +769,14 @@ func pollMemory(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logger) 
 		}
 		r := ensure(idx)
 		switch col {
-		case 2: r.storageType = pduString(pdu)
-		case 4: r.allocUnits = pduUint64(pdu)
-		case 5: r.size = pduUint64(pdu)
-		case 6: r.used = pduUint64(pdu)
+		case 2:
+			r.storageType = pduString(pdu)
+		case 4:
+			r.allocUnits = pduUint64(pdu)
+		case 5:
+			r.size = pduUint64(pdu)
+		case 6:
+			r.used = pduUint64(pdu)
 		}
 		return nil
 	}); err != nil {
@@ -686,7 +792,7 @@ func pollMemory(g *gosnmp.GoSNMP, dev hub.Device, ts int64, log zerolog.Logger) 
 			continue
 		}
 		totalBytes := r.size * r.allocUnits
-		usedBytes  := r.used * r.allocUnits
+		usedBytes := r.used * r.allocUnits
 		lines = append(lines,
 			fmt.Sprintf(`anthrimon_device_mem_total_bytes{device_id=%q,mem_type="ram"} %d %d`,
 				dev.ID, totalBytes, ts),
@@ -806,11 +912,11 @@ func buildTemperatureLines(
 		if scaleEnum == 0 {
 			scaleEnum = entSensorScaleUnits
 		}
-		scaleExp  := (scaleEnum - entSensorScaleUnits) * 3
+		scaleExp := (scaleEnum - entSensorScaleUnits) * 3
 		precision := precByIdx[idx]
 
 		celsius := float64(rawVal) * math.Pow10(scaleExp) / math.Pow10(precision)
-		celsius  = math.Round(celsius*10) / 10
+		celsius = math.Round(celsius*10) / 10
 
 		lines = append(lines,
 			fmt.Sprintf(`anthrimon_device_temp_celsius{device_id=%q,sensor=%q} %.1f %d`,
@@ -850,7 +956,7 @@ func buildOpticalPowerLines(
 		if scaleEnum == 0 {
 			scaleEnum = entSensorScaleUnits
 		}
-		scaleExp  := (scaleEnum - entSensorScaleUnits) * 3
+		scaleExp := (scaleEnum - entSensorScaleUnits) * 3
 		precision := precByIdx[idx]
 
 		var dbm float64
@@ -858,7 +964,7 @@ func buildOpticalPowerLines(
 			dbm = float64(rawVal) * math.Pow10(scaleExp) / math.Pow10(precision)
 		} else {
 			watts := float64(rawVal) * math.Pow10(scaleExp) / math.Pow10(precision)
-			mw    := watts * 1000.0
+			mw := watts * 1000.0
 			if mw > 0 {
 				dbm = 10.0 * math.Log10(mw)
 			} else {
@@ -903,12 +1009,11 @@ func resolveIfNames(g *gosnmp.GoSNMP) map[string]string {
 // inetCidrRouteTable (RFC 4292), and returns route_entries-shaped records for
 // the hub's POST /api/v1/collectors/routes endpoint.
 //
-// Skipped for devices where eAPI/REST route collection is enabled and
-// authoritative for routes (Arista eAPI, Aruba CX REST), so the SNMP and API
-// paths don't fight over route_entries' per-device mark-and-sweep deletes.
+// Skipped for devices where a vendor API's route collection is enabled and
+// authoritative for routes, so the SNMP and API paths don't fight over
+// route_entries' per-device mark-and-sweep deletes (see routingIsVendorAPI).
 func pollRoutes(g *gosnmp.GoSNMP, dev hub.Device, ifByIdx map[string]string) []map[string]any {
-	if (dev.Vendor == "arista" && dev.EapiEnabled) ||
-		(dev.Vendor == "aruba_cx" && dev.RestCollectionEnabled) {
+	if routingIsVendorAPI(dev) {
 		return nil
 	}
 
@@ -1253,12 +1358,21 @@ func isValidIPOctets(parts []string) bool {
 func pollOpticalPowerJuniper(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 	ifName := resolveIfNames(g)
 
-	toDBm := func(val int) float64 {
+	// jnxDomCurrentEntry has a row for every ifIndex, not just ports with an
+	// installed pluggable optic — copper (RJ45) and empty SFP cages both
+	// report a raw value of exactly 0 (confirmed live: every ge-0/0/x
+	// copper port on an EX3300 returns "0", identical to an empty SFP+
+	// cage). Treating that as "measured -40dBm" is wrong — it's "no
+	// transceiver present" and must be skipped, not converted.
+	toDBm := func(val int) (float64, bool) {
+		if val == 0 {
+			return 0, false
+		}
 		mw := float64(val) * 0.001
 		if mw <= 0 {
-			return -40.0
+			return -40.0, true
 		}
-		return math.Round(10.0*math.Log10(mw)*1000) / 1000
+		return math.Round(10.0*math.Log10(mw)*1000) / 1000, true
 	}
 
 	var lines []string
@@ -1273,9 +1387,13 @@ func pollOpticalPowerJuniper(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []strin
 			if iface == "" {
 				return nil
 			}
+			dbm, present := toDBm(pduInt(pdu))
+			if !present {
+				return nil
+			}
 			lines = append(lines,
 				fmt.Sprintf(`%s{device_id=%q,iface=%q} %.4f %d`,
-					pair.metric, dev.ID, escapeLabelValue(iface), toDBm(pduInt(pdu)), ts))
+					pair.metric, dev.ID, escapeLabelValue(iface), dbm, ts))
 			return nil
 		})
 	}
@@ -1318,9 +1436,9 @@ func pollAristaIfStats(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 	ifNames := resolveIfNames(g)
 
 	type ifRow struct {
-		flaps      int
-		aclDrops   int
-		errReason  string
+		flaps     int
+		aclDrops  int
+		errReason string
 	}
 	rows := make(map[string]*ifRow)
 	ensure := func(idx string) *ifRow {
@@ -1387,7 +1505,7 @@ func pollAristaIfStats(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 // The index is three length-prefixed OctetString components (resource, feature, chip).
 func pollAristaHWUtil(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 	inUse := make(map[string]int)
-	maxE  := make(map[string]int)
+	maxE := make(map[string]int)
 
 	_ = g.BulkWalk(oidAristaHwUtilInUse, func(pdu gosnmp.SnmpPDU) error {
 		if sfx := oidSuffix(pdu.Name, oidAristaHwUtilInUse); sfx != "" {
@@ -1495,21 +1613,33 @@ func pollCiscoEnvMon(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 
 	var lines []string
 	for idx, state := range fanState {
-		if state == 5 { continue } // notPresent — don't emit
+		if state == 5 {
+			continue
+		} // notPresent — don't emit
 		name := fanDescr[idx]
-		if name == "" { name = "fan" + idx }
+		if name == "" {
+			name = "fan" + idx
+		}
 		ok := 0
-		if state == 1 { ok = 1 }
+		if state == 1 {
+			ok = 1
+		}
 		lines = append(lines,
 			fmt.Sprintf(`anthrimon_cisco_fan_ok{%s,fan_name=%q} %d %d`, did, name, ok, ts),
 		)
 	}
 	for idx, state := range psuState {
-		if state == 5 { continue } // notPresent
+		if state == 5 {
+			continue
+		} // notPresent
 		name := psuDescr[idx]
-		if name == "" { name = "psu" + idx }
+		if name == "" {
+			name = "psu" + idx
+		}
 		ok := 0
-		if state == 1 { ok = 1 }
+		if state == 1 {
+			ok = 1
+		}
 		lines = append(lines,
 			fmt.Sprintf(`anthrimon_cisco_psu_ok{%s,psu_name=%q} %d %d`, did, name, ok, ts),
 		)
@@ -1529,9 +1659,9 @@ func pollCiscoIfExtension(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 	ifNames := resolveIfNames(g)
 	did := fmt.Sprintf(`device_id=%q`, dev.ID)
 
-	inDrops  := make(map[string]uint64)
+	inDrops := make(map[string]uint64)
 	outDrops := make(map[string]uint64)
-	resets   := make(map[string]uint64)
+	resets := make(map[string]uint64)
 
 	_ = g.BulkWalk(oidCieIfInputQueueDrops, func(pdu gosnmp.SnmpPDU) error {
 		if idx := trailingIndex(pdu.Name, oidCieIfInputQueueDrops); idx != "" {
@@ -1553,7 +1683,9 @@ func pollCiscoIfExtension(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 	})
 
 	ifName := func(idx string) string {
-		if n := ifNames[idx]; n != "" { return n }
+		if n := ifNames[idx]; n != "" {
+			return n
+		}
 		return "if" + idx
 	}
 
@@ -1609,7 +1741,9 @@ func pollCiscoMemPools(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 	var lines []string
 	for idx := range poolUsed {
 		name := poolName[idx]
-		if name == "" { name = "pool" + idx }
+		if name == "" {
+			name = "pool" + idx
+		}
 		labels := fmt.Sprintf(`%s,pool=%q`, did, name)
 		lines = append(lines,
 			fmt.Sprintf(`anthrimon_cisco_mem_used_bytes{%s} %d %d`, labels, poolUsed[idx], ts),
@@ -1631,21 +1765,28 @@ func pollCiscoCEFFIB(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 
 	_ = g.BulkWalk(oidCiscoCEFFIBPrefixes, func(pdu gosnmp.SnmpPDU) error {
 		sfx := oidSuffix(pdu.Name, oidCiscoCEFFIBPrefixes)
-		if sfx == "" { return nil }
+		if sfx == "" {
+			return nil
+		}
 		// sfx = "<entPhysIndex>.<afi>"
 		parts := strings.Split(sfx, ".")
 		afi := parts[len(parts)-1]
 		af := ""
 		switch afi {
-		case "1": af = "ipv4"
-		case "2": af = "ipv6"
-		default: return nil
+		case "1":
+			af = "ipv4"
+		case "2":
+			af = "ipv6"
+		default:
+			return nil
 		}
 		totals[af] += pduUint64(pdu)
 		return nil
 	})
 
-	if len(totals) == 0 { return nil }
+	if len(totals) == 0 {
+		return nil
+	}
 
 	base := fmt.Sprintf(`device_id=%q`, dev.ID)
 	var lines []string
@@ -1696,12 +1837,20 @@ func pollArubaCXEnvironment(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string
 	psus := make(map[string]*psuRow)
 	fans := make(map[string]*fanRow)
 	ensurePSU := func(idx string) *psuRow {
-		if r, ok := psus[idx]; ok { return r }
-		r := &psuRow{}; psus[idx] = r; return r
+		if r, ok := psus[idx]; ok {
+			return r
+		}
+		r := &psuRow{}
+		psus[idx] = r
+		return r
 	}
 	ensureFan := func(idx string) *fanRow {
-		if r, ok := fans[idx]; ok { return r }
-		r := &fanRow{}; fans[idx] = r; return r
+		if r, ok := fans[idx]; ok {
+			return r
+		}
+		r := &fanRow{}
+		fans[idx] = r
+		return r
 	}
 
 	// PSU table
@@ -1764,7 +1913,9 @@ func pollArubaCXEnvironment(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string
 		}
 		labels := fmt.Sprintf(`%s,psu_name=%q`, did, name)
 		ok := 0
-		if r.status == 1 { ok = 1 }
+		if r.status == 1 {
+			ok = 1
+		}
 		lines = append(lines,
 			fmt.Sprintf(`anthrimon_cx_psu_ok{%s} %d %d`, labels, ok, ts),
 		)
@@ -1782,7 +1933,9 @@ func pollArubaCXEnvironment(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string
 		}
 		labels := fmt.Sprintf(`%s,fan_name=%q`, did, name)
 		ok := 0
-		if r.state == 1 { ok = 1 }
+		if r.state == 1 {
+			ok = 1
+		}
 		lines = append(lines,
 			fmt.Sprintf(`anthrimon_cx_fan_ok{%s} %d %d`, labels, ok, ts),
 		)
@@ -1819,24 +1972,32 @@ func pollArubaCXVSX(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 	}
 
 	operState := pduInt(result.Variables[1])
-	role       := pduInt(result.Variables[2])
-	syncing    := pduInt(result.Variables[3])
-	islState   := pduInt(result.Variables[4])
+	role := pduInt(result.Variables[2])
+	syncing := pduInt(result.Variables[3])
+	islState := pduInt(result.Variables[4])
 
 	did := fmt.Sprintf(`device_id=%q`, dev.ID)
 
 	stateNames := map[int]string{1: "in-sync", 2: "out-of-sync", 3: "standalone", 4: "not-active"}
-	roleNames  := map[int]string{1: "primary", 2: "secondary", 3: "undefined"}
+	roleNames := map[int]string{1: "primary", 2: "secondary", 3: "undefined"}
 
 	stateName := stateNames[operState]
-	if stateName == "" { stateName = "unknown" }
+	if stateName == "" {
+		stateName = "unknown"
+	}
 	roleName := roleNames[role]
-	if roleName == "" { roleName = "undefined" }
+	if roleName == "" {
+		roleName = "undefined"
+	}
 
 	islUp := 0
-	if islState == 1 { islUp = 1 }
+	if islState == 1 {
+		islUp = 1
+	}
 	configSyncing := 0
-	if syncing == 1 { configSyncing = 1 }
+	if syncing == 1 {
+		configSyncing = 1
+	}
 
 	return []string{
 		fmt.Sprintf(`anthrimon_cx_vsx_enabled{%s} 1 %d`, did, ts),
@@ -1855,9 +2016,9 @@ func pollArubaCXVSX(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 func pollArubaCXCoPP(g *gosnmp.GoSNMP, dev hub.Device, ts int64) []string {
 	did := fmt.Sprintf(`device_id=%q`, dev.ID)
 
-	classNames  := make(map[string]string)
-	dropPkts    := make(map[string]uint64)
-	dropBytes   := make(map[string]uint64)
+	classNames := make(map[string]string)
+	dropPkts := make(map[string]uint64)
+	dropBytes := make(map[string]uint64)
 
 	_ = g.BulkWalk(oidArubaCXCoPPClass, func(pdu gosnmp.SnmpPDU) error {
 		if idx := trailingIndex(pdu.Name, oidArubaCXCoPPClass); idx != "" {
@@ -1986,11 +2147,11 @@ func collectEntitySensorMIB(g *gosnmp.GoSNMP, log zerolog.Logger) (
 	valByIdx map[string]int,
 	nameByIdx map[string]string,
 ) {
-	typeByIdx  = make(map[string]int)
+	typeByIdx = make(map[string]int)
 	scaleByIdx = make(map[string]int)
-	precByIdx  = make(map[string]int)
-	valByIdx   = make(map[string]int)
-	nameByIdx  = make(map[string]string)
+	precByIdx = make(map[string]int)
+	valByIdx = make(map[string]int)
+	nameByIdx = make(map[string]string)
 
 	// Sensor type — collect all, filter later.  If empty the device has no
 	// entity sensors; skip the remaining five walks entirely.
@@ -2152,11 +2313,11 @@ func buildSNMPClient(dev hub.Device, cred *hub.Credential, cfg config.SNMPConfig
 	switch normSNMPType(cred.Type) {
 	case "snmpv3":
 		g.Version = gosnmp.Version3
-		username  := credStr(cred.Data, "username")
+		username := credStr(cred.Data, "username")
 		authProto := credStr(cred.Data, "auth_protocol")
-		authPass  := credStr(cred.Data, "auth_key")
+		authPass := credStr(cred.Data, "auth_key")
 		privProto := credStr(cred.Data, "priv_protocol")
-		privPass  := credStr(cred.Data, "priv_key")
+		privPass := credStr(cred.Data, "priv_key")
 
 		msgFlags := gosnmp.NoAuthNoPriv
 		if authPass != "" {
@@ -2168,30 +2329,40 @@ func buildSNMPClient(dev hub.Device, cred *hub.Credential, cfg config.SNMPConfig
 
 		ap := gosnmp.NoAuth
 		switch strings.ToUpper(authProto) {
-		case "MD5":    ap = gosnmp.MD5
-		case "SHA":    ap = gosnmp.SHA
-		case "SHA224": ap = gosnmp.SHA224
-		case "SHA256": ap = gosnmp.SHA256
-		case "SHA384": ap = gosnmp.SHA384
-		case "SHA512": ap = gosnmp.SHA512
+		case "MD5":
+			ap = gosnmp.MD5
+		case "SHA":
+			ap = gosnmp.SHA
+		case "SHA224":
+			ap = gosnmp.SHA224
+		case "SHA256":
+			ap = gosnmp.SHA256
+		case "SHA384":
+			ap = gosnmp.SHA384
+		case "SHA512":
+			ap = gosnmp.SHA512
 		}
 
 		pp := gosnmp.NoPriv
 		switch strings.ToUpper(privProto) {
-		case "DES":    pp = gosnmp.DES
-		case "AES":    pp = gosnmp.AES
-		case "AES192": pp = gosnmp.AES192
-		case "AES256": pp = gosnmp.AES256
+		case "DES":
+			pp = gosnmp.DES
+		case "AES":
+			pp = gosnmp.AES
+		case "AES192":
+			pp = gosnmp.AES192
+		case "AES256":
+			pp = gosnmp.AES256
 		}
 
 		g.SecurityModel = gosnmp.UserSecurityModel
-		g.MsgFlags      = msgFlags
+		g.MsgFlags = msgFlags
 		g.SecurityParameters = &gosnmp.UsmSecurityParameters{
 			UserName:                 username,
-			AuthenticationProtocol:  ap,
+			AuthenticationProtocol:   ap,
 			AuthenticationPassphrase: authPass,
-			PrivacyProtocol:         pp,
-			PrivacyPassphrase:       privPass,
+			PrivacyProtocol:          pp,
+			PrivacyPassphrase:        privPass,
 		}
 	default: // snmpv2c
 		g.Version = gosnmp.Version2c
@@ -2223,12 +2394,18 @@ func pduInt(pdu gosnmp.SnmpPDU) int {
 
 func pduUint64(pdu gosnmp.SnmpPDU) uint64 {
 	switch v := pdu.Value.(type) {
-	case int:    return uint64(v)
-	case int32:  return uint64(v)
-	case int64:  return uint64(v)
-	case uint:   return uint64(v)
-	case uint32: return uint64(v)
-	case uint64: return v
+	case int:
+		return uint64(v)
+	case int32:
+		return uint64(v)
+	case int64:
+		return uint64(v)
+	case uint:
+		return uint64(v)
+	case uint32:
+		return uint64(v)
+	case uint64:
+		return v
 	}
 	return 0
 }
@@ -2291,7 +2468,7 @@ func escapeLabelValue(s string) string {
 
 // LiveSample is a raw SNMP counter snapshot for one interface at one instant.
 type LiveSample struct {
-	TS          int64  `json:"ts"`           // Unix milliseconds
+	TS          int64  `json:"ts"` // Unix milliseconds
 	InOctets    uint64 `json:"in_octets"`
 	OutOctets   uint64 `json:"out_octets"`
 	InErrors    uint64 `json:"in_errors"`
@@ -2361,14 +2538,22 @@ func (c *SNMPCollector) LiveInterface(ctx context.Context, deviceID string, ifIn
 			for i, v := range result.Variables {
 				val := pduUint64(v)
 				switch i {
-				case 0: s.InOctets = val
-				case 1: s.OutOctets = val
-				case 2: s.InErrors = val
-				case 3: s.OutErrors = val
-				case 4: s.InPkts = val
-				case 5: s.OutPkts = val
-				case 6: s.InDiscards = val
-				case 7: s.OutDiscards = val
+				case 0:
+					s.InOctets = val
+				case 1:
+					s.OutOctets = val
+				case 2:
+					s.InErrors = val
+				case 3:
+					s.OutErrors = val
+				case 4:
+					s.InPkts = val
+				case 5:
+					s.OutPkts = val
+				case 6:
+					s.InDiscards = val
+				case 7:
+					s.OutDiscards = val
 				}
 			}
 			return s, true

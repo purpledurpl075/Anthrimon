@@ -612,7 +612,7 @@ export default function UsersPage() {
                   <td className="px-4 py-3 text-xs text-slate-500">{fmtAge(u.last_login)}</td>
                   <td className="px-4 py-3">
                     <div className="flex items-center justify-end gap-1">
-                      <button onClick={() => setModal(u)} title="Edit"
+                      <button onClick={() => setModal(u)} title="Edit" aria-label={`Edit user "${u.username}"`}
                         className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors">
                         <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M11 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-5m-1.414-9.414a2 2 0 1 1 2.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/></svg>
                       </button>
@@ -620,6 +620,7 @@ export default function UsersPage() {
                         <>
                           <button onClick={() => toggleMut.mutate(u)} disabled={toggleMut.isPending}
                             title={u.is_active ? 'Deactivate' : 'Activate'}
+                            aria-label={`${u.is_active ? 'Deactivate' : 'Activate'} user "${u.username}"`}
                             className={`p-1.5 rounded-lg transition-colors disabled:opacity-50 ${
                               u.is_active
                                 ? 'text-slate-400 hover:text-amber-600 hover:bg-amber-50'
@@ -632,7 +633,7 @@ export default function UsersPage() {
                               }
                             </svg>
                           </button>
-                          <button onClick={() => setDeleteConf(u)} title="Delete"
+                          <button onClick={() => setDeleteConf(u)} title="Delete" aria-label={`Delete user "${u.username}"`}
                             className="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors">
                             <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M19 7l-.867 12.142A2 2 0 0 1 16.138 21H7.862a2 2 0 0 1-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v3M4 7h16"/></svg>
                           </button>

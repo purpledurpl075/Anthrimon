@@ -149,14 +149,19 @@ async def _write_isis_neighbors(device_id: uuid.UUID, rows: list[dict]) -> None:
                 "device_id":     str(device_id),
                 "instance":      r["instance"],
                 "sys_id":        r["sys_id"],
-                "hostname":      r["hostname"],
-                "interface_name": r["interface_name"] or "",
-                "circuit_type":  r["circuit_type"],
+                # Optional fields below: only the eAPI (Arista) caller has
+                # always populated every one of these. The SNMP-based caller
+                # (ISIS-MIB has no hostname, and rarely resolves last-change
+                # as a wall-clock timestamp) omits what it doesn't have —
+                # use .get() so a missing key defaults rather than KeyErrors.
+                "hostname":      r.get("hostname"),
+                "interface_name": r.get("interface_name") or "",
+                "circuit_type":  r.get("circuit_type"),
                 "adj_state":     r["adj_state"],
-                "ipv4":          r["ipv4_address"],
-                "ipv6":          r["ipv6_address"],
-                "uptime":        r["uptime_seconds"],
-                "last_change":   r["last_state_change"],
+                "ipv4":          r.get("ipv4_address"),
+                "ipv6":          r.get("ipv6_address"),
+                "uptime":        r.get("uptime_seconds"),
+                "last_change":   r.get("last_state_change"),
                 "now":           now,
             })
 

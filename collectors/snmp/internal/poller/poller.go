@@ -418,6 +418,12 @@ func (m *Manager) runDevice(ctx context.Context, dev model.DeviceRow, prober *Pr
 					counterResult.VLANs = vlans
 					counterResult.InterfaceVLANs = ifvlans
 				}
+			} else if currentProfile != nil && currentProfile.JuniperVlan {
+				if vlans, err := PollVLANsJuniper(session, dev.ID); err != nil {
+					log.Warn().Err(err).Msg("juniper vlan poll failed (non-fatal)")
+				} else {
+					counterResult.VLANs = vlans
+				}
 			} else if vlans, ifvlans, err := PollVLANs(session, dev.ID, ifByIndex); err != nil {
 				log.Warn().Err(err).Msg("vlan poll failed (non-fatal)")
 			} else {

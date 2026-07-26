@@ -30,15 +30,15 @@ const (
 
 // Server is the mini HTTP control plane exposed to the hub.
 type Server struct {
-	wgIP       string
-	port       int
-	version    string
-	authToken  string // sha256hex(apiKey) — expected Bearer token on mutating endpoints
-	onRefresh  func()
-	onUpdate   func() error
-	snmpCol    *collector.SNMPCollector
-	refreshMu  sync.Mutex
-	log        zerolog.Logger
+	wgIP      string
+	port      int
+	version   string
+	authToken string // sha256hex(apiKey) — expected Bearer token on mutating endpoints
+	onRefresh func()
+	onUpdate  func() error
+	snmpCol   *collector.SNMPCollector
+	refreshMu sync.Mutex
+	log       zerolog.Logger
 }
 
 // NewServer creates a Server.
@@ -46,8 +46,8 @@ type Server struct {
 //   - wgIP      is the WireGuard-assigned IP (e.g. "10.100.0.2").
 //   - port      is the listen port; 0 means use defaultPort (9090).
 //   - apiKey    is the collector's plaintext API key; its SHA-256 hex is used
-//               as the expected Bearer token on mutating endpoints so the hub
-//               can authenticate without storing the plaintext key.
+//     as the expected Bearer token on mutating endpoints so the hub
+//     can authenticate without storing the plaintext key.
 //   - onRefresh is called when POST /refresh is received.
 //   - onUpdate  is called when POST /update is received; nil disables the endpoint.
 //   - snmpCol   is used for GET /live streaming; nil disables the endpoint.
@@ -124,6 +124,7 @@ func (s *Server) Run(ctx context.Context) error {
 	mux.HandleFunc("/config-exec", s.handleConfigExec)
 	mux.HandleFunc("/api-probe", s.handleAPIProbe)
 	mux.HandleFunc("/aoscx-rest", s.handleAOSCXRest)
+	mux.HandleFunc("/netconf", s.handleNetconf)
 	mux.HandleFunc("/trap-config", s.handleTrapConfig)
 
 	addr := net.JoinHostPort(s.wgIP, fmt.Sprintf("%d", s.port))
@@ -327,10 +328,10 @@ func (s *Server) handlePoll(w http.ResponseWriter, r *http.Request) {
 // ─── on-demand probe / sweep ──────────────────────────────────────────────────
 
 type probeReq struct {
-	IP       string                `json:"ip"`
-	Port     int                   `json:"port"`
-	Creds    []collector.CredSpec  `json:"creds"`
-	TimeoutS int                   `json:"timeout_s"`
+	IP       string               `json:"ip"`
+	Port     int                  `json:"port"`
+	Creds    []collector.CredSpec `json:"creds"`
+	TimeoutS int                  `json:"timeout_s"`
 }
 
 type sweepReq struct {
@@ -533,8 +534,8 @@ func (s *Server) handleTrapConfig(w http.ResponseWriter, r *http.Request) {
 	_ = rc.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"status":    "restarted",
-		"v3_users":  len(req.Users),
+		"status":   "restarted",
+		"v3_users": len(req.Users),
 	})
 }
 
@@ -551,11 +552,11 @@ func (s *Server) handleTrapConfig(w http.ResponseWriter, r *http.Request) {
 // Hub-side router consumes this and forwards events to its own WebSocket client.
 
 type probeICMPReq struct {
-	Type     string `json:"type"`       // "ping" | "traceroute" | "mtr"
-	Target   string `json:"target"`     // hostname or IP
-	Count    int    `json:"count"`      // probes (ping/mtr) — clamped 1..60
-	TimeoutS int    `json:"timeout_s"`  // per-probe seconds — clamped 1..10
-	MaxHops  int    `json:"max_hops"`   // traceroute only — clamped 1..32
+	Type     string `json:"type"`      // "ping" | "traceroute" | "mtr"
+	Target   string `json:"target"`    // hostname or IP
+	Count    int    `json:"count"`     // probes (ping/mtr) — clamped 1..60
+	TimeoutS int    `json:"timeout_s"` // per-probe seconds — clamped 1..10
+	MaxHops  int    `json:"max_hops"`  // traceroute only — clamped 1..32
 }
 
 func validProbeTarget(s string) bool {
@@ -577,8 +578,12 @@ func validProbeTarget(s string) bool {
 }
 
 func clampInt(v, lo, hi int) int {
-	if v < lo { return lo }
-	if v > hi { return hi }
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
 	return v
 }
 
@@ -603,9 +608,15 @@ func (s *Server) handleProbeICMP(w http.ResponseWriter, r *http.Request) {
 	count := clampInt(req.Count, 1, 60)
 	timeoutS := clampInt(req.TimeoutS, 1, 10)
 	maxHops := clampInt(req.MaxHops, 1, 32)
-	if count == 0 { count = 5 }
-	if timeoutS == 0 { timeoutS = 3 }
-	if maxHops == 0 { maxHops = 24 }
+	if count == 0 {
+		count = 5
+	}
+	if timeoutS == 0 {
+		timeoutS = 3
+	}
+	if maxHops == 0 {
+		maxHops = 24
+	}
 
 	var cmd *exec.Cmd
 	switch req.Type {
@@ -647,7 +658,9 @@ func (s *Server) handleProbeICMP(w http.ResponseWriter, r *http.Request) {
 		if _, err := w.Write(buf); err != nil {
 			return false
 		}
-		if flusher != nil { flusher.Flush() }
+		if flusher != nil {
+			flusher.Flush()
+		}
 		return true
 	}
 
@@ -682,10 +695,14 @@ func (s *Server) handleProbeICMP(w http.ResponseWriter, r *http.Request) {
 			leftover = append(leftover, buf[:n]...)
 			for {
 				i := bytesIndexNewline(leftover)
-				if i < 0 { break }
+				if i < 0 {
+					break
+				}
 				line := strings.TrimRight(string(leftover[:i]), "\r")
 				leftover = leftover[i+1:]
-				if line == "" { continue }
+				if line == "" {
+					continue
+				}
 				if strings.Contains(line, "buffer overflow detected") ||
 					strings.Contains(line, "stack smashing detected") {
 					glibcAbort = true
@@ -697,7 +714,9 @@ func (s *Server) handleProbeICMP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if err != nil { break }
+		if err != nil {
+			break
+		}
 	}
 	if len(leftover) > 0 {
 		tail := strings.TrimRight(string(leftover), "\r")
@@ -734,7 +753,9 @@ func (s *Server) handleProbeICMP(w http.ResponseWriter, r *http.Request) {
 
 func bytesIndexNewline(b []byte) int {
 	for i, c := range b {
-		if c == '\n' { return i }
+		if c == '\n' {
+			return i
+		}
 	}
 	return -1
 }

@@ -134,6 +134,33 @@ def _collect_ssh_paramiko(host: str, port: int, command: str, cred_data: dict) -
         client.close()
 
 
+def _ensure_junos_cli(conn) -> None:
+    """Verify we're at the Junos operational CLI, not the Unix shell.
+
+    Netmiko's JuniperBase.enter_cli_mode() (run once, inside
+    session_preparation() at connect time) is intermittently unreliable on
+    this platform — confirmed live via alternating config-hash backups:
+    roughly half of scheduled collections landed back at the root@ shell
+    prompt instead of the CLI, silently corrupting the backup with
+    "show: Command not found" / "display: Command not found" instead of the
+    real config. Re-check and, if needed, re-enter cli ourselves — checking
+    only the freshly-echoed prompt from a bare Enter, not netmiko's cached
+    base_prompt, mirrors the fix already applied to the Go remote-collector's
+    ssh_config.go for the same root cause.
+    """
+    conn.write_channel(conn.RETURN)
+    prompt = conn.read_until_pattern(pattern=r"[%>#$]\s*$", read_timeout=10)
+    if "root@" in prompt or re.search(r"[%$]\s*$", prompt.strip()):
+        conn.write_channel("cli" + conn.RETURN)
+        conn.read_until_pattern(pattern=r"[>#]\s*$", read_timeout=10)
+        conn.set_base_prompt()
+        # session_preparation's own "set cli screen-length 0" may have been
+        # sent to the shell (harmlessly ignored there) if we just corrected
+        # the transition above — resend now that we're confirmed in the CLI.
+        conn.write_channel("set cli screen-length 0" + conn.RETURN)
+        conn.read_until_pattern(pattern=r"[>#]\s*$", read_timeout=10)
+
+
 def _collect_ssh(host: str, port: int, vendor_key: str, cred_data: dict) -> str:
     """Synchronous SSH collection via Netmiko (runs in a thread pool)."""
     if vendor_key in _PARAMIKO_VENDORS:
@@ -179,6 +206,8 @@ def _collect_ssh(host: str, port: int, vendor_key: str, cred_data: dict) -> str:
                 conn.enable()
             except Exception:
                 pass  # already privileged, or device doesn't use enable
+        if vendor_key == "juniper":
+            _ensure_junos_cli(conn)
         output = conn.send_command(command, read_timeout=60)
 
     # Guard against collecting an error message instead of a config
@@ -295,6 +324,39 @@ def _deploy_ssh(
                 conn.enable()
             except Exception:
                 pass
+
+        if vendor_key == "juniper":
+            # Netmiko's JuniperBase.enter_cli_mode() (session_preparation, at
+            # connect) is intermittently unreliable — see _ensure_junos_cli's
+            # docstring — so re-verify before trusting config_mode() to work.
+            # Once confirmed in the CLI: use commit(confirm=True) so a change
+            # that breaks reachability auto-reverts, sanity-check the session
+            # is still alive, then send the confirming plain commit().
+            # Netmiko's commit() raises ValueError itself if "commit
+            # complete" / "commit confirmed will be..." never appears.
+            _ensure_junos_cli(conn)
+            conn.config_mode()
+            for cmd in commands:
+                if not cmd.strip():
+                    continue
+                out = conn.send_command_timing(cmd.strip(), delay_factor=2)
+                output_parts.append(f"$ {cmd.strip()}\n{out}")
+
+            commit_out = conn.commit(confirm=True, confirm_delay=5)
+            output_parts.append(f"$ commit confirmed 5\n{commit_out}")
+
+            check_out = conn.send_command_timing("run show version", delay_factor=2)
+            output_parts.append(f"$ run show version\n{check_out}")
+            if not check_out.strip():
+                raise RuntimeError(
+                    "Session unresponsive after commit confirmed — leaving "
+                    "unconfirmed; Junos will auto-rollback in 5 minutes"
+                )
+
+            final_out = conn.commit()
+            output_parts.append(f"$ commit\n{final_out}")
+            conn.exit_config_mode()
+            return "\n".join(output_parts).strip()
 
         enter_cmd = _CONFIG_ENTER.get(vendor_key, "configure terminal")
         if enter_cmd:
@@ -689,6 +751,16 @@ async def _collect_via_collector(db: AsyncSession, dev: Device, vendor: str,
 
     show = _SHOW_RUN.get(vendor, "show running-config")
     steps = []
+    if vendor == "juniper":
+        # Root SSH logins land in a Unix shell (FreeBSD/csh), not the Junos
+        # CLI — detect that and send "cli" before anything else. Harmless
+        # no-op if already in CLI (e.g. a non-root login class). Mirrors the
+        # identical step already used in _deploy_steps()'s Juniper branch —
+        # confirmed live that omitting it here made ~half of scheduled
+        # collections land in shell, corrupting the backup with
+        # "show: Command not found" / "display: Command not found" instead
+        # of the real config.
+        steps.append(_proxy.step("", delay=2.0, expect=r"(root@|%\s*$|\$\s*$)", response="cli"))
     if vendor in _NO_PAGE:
         steps.append(_proxy.step(_NO_PAGE[vendor], delay=1.0))
 

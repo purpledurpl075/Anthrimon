@@ -75,6 +75,22 @@ func (s *Server) handleAPIProbe(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// junos_netconf isn't HTTP — probe with a plain TCP dial to the NETCONF
+	// port instead. Same "any response = reachable" philosophy as the HTTP
+	// methods below: a listener on 830 is a strong enough signal that the
+	// service is up (the actual hello/RPC exchange happens on first real use).
+	if req.Method == "junos_netconf" {
+		conn, err := net.DialTimeout("tcp", net.JoinHostPort(req.IP, "830"), 5*time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		if err != nil {
+			_ = json.NewEncoder(w).Encode(apiProbeResp{Reachable: false, Error: err.Error()})
+			return
+		}
+		_ = conn.Close()
+		_ = json.NewEncoder(w).Encode(apiProbeResp{Reachable: true})
+		return
+	}
+
 	urls, ok := probeURLs[req.Method]
 	if !ok {
 		w.Header().Set("Content-Type", "application/json")

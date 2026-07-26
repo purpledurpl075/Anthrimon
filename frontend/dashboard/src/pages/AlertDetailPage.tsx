@@ -182,7 +182,7 @@ export default function AlertDetailPage() {
       </div>
 
       {/* Hero */}
-      <div className="bg-white border-b border-slate-200" style={{ borderLeft: `4px solid ${sevColor}` }}>
+      <div className="bg-white border-b border-slate-200">
         <div className="px-6 py-5">
           {/* Badges row */}
           <div className="flex items-center gap-2 mb-3 flex-wrap">

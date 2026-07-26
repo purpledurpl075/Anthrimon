@@ -30,7 +30,10 @@ from ..schemas.device import (
     DeviceCreate, DeviceListRead, DeviceRead, DeviceUpdate,
 )
 from ..schemas.interface import InterfaceRead
-from ..snmp_probe import probe_v2c, probe_v3, VENDOR_DEVICE_TYPE as _VENDOR_DEVICE_TYPE
+from ..snmp_probe import (
+    probe_v2c, probe_v3, VENDOR_DEVICE_TYPE as _VENDOR_DEVICE_TYPE,
+    detect_device_type as _detect_device_type, detect_platform as _detect_platform,
+)
 
 logger = structlog.get_logger(__name__)
 router = APIRouter(prefix="/devices", tags=["devices"])
@@ -375,11 +378,15 @@ async def create_device(
         if probed_data.get("hostname"):
             device.hostname = probed_data["hostname"]
         vendor = probed_data.get("vendor", "unknown")
+        sys_descr = probed_data.get("sys_descr", "") or ""
         if vendor and vendor != "unknown":
             device.vendor      = vendor
-            device.device_type = _VENDOR_DEVICE_TYPE.get(vendor, "unknown")
-        if probed_data.get("sys_descr"):
-            device.sys_description = probed_data["sys_descr"]
+            device.device_type = _detect_device_type(vendor, sys_descr)
+        if sys_descr:
+            device.sys_description = sys_descr
+            platform = _detect_platform(vendor, sys_descr)
+            if platform:
+                device.platform = platform
 
     # Sync snmp_version from the working credential.
     if working_cred is not None and working_cred.type == "snmp_v3":

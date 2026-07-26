@@ -51,16 +51,6 @@ const CAT_META: Record<string, { color: string; bg: string; border: string; acti
 
 const CATEGORY_ORDER = Object.keys(CAT_META)
 
-const CAT_CARD_ACCENT: Record<string, string> = {
-  Administration:  'group-hover:border-l-violet-400',
-  Configuration:   'group-hover:border-l-blue-400',
-  'SNMP Setup':    'group-hover:border-l-emerald-400',
-  'Syslog Setup':  'group-hover:border-l-teal-400',
-  'Flow Setup':    'group-hover:border-l-cyan-400',
-  Troubleshooting: 'group-hover:border-l-orange-400',
-  Reference:       'group-hover:border-l-slate-400',
-}
-
 export default function WikiPage() {
   const { slug } = useParams<{ slug?: string }>()
   const navigate  = useNavigate()
@@ -139,7 +129,7 @@ export default function WikiPage() {
         {/* Brand */}
         <div className="px-4 pt-5 pb-4 border-b border-slate-100">
           <div className="flex items-center gap-2.5 mb-4">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-br from-indigo-500 to-violet-600 flex items-center justify-center shadow-sm">
+            <div className="w-8 h-8 rounded-xl bg-slate-800 flex items-center justify-center shadow-sm">
               <svg className="w-4 h-4 text-white" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                 <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
               </svg>
@@ -214,7 +204,7 @@ export default function WikiPage() {
           /* ── Landing ── */
           <>
             {/* Hero */}
-            <div className="relative overflow-hidden bg-gradient-to-br from-indigo-600 via-violet-600 to-purple-700">
+            <div className="relative overflow-hidden bg-slate-900">
               <div className="absolute inset-0 opacity-10"
                 style={{ backgroundImage: 'radial-gradient(circle at 25% 25%, white 1px, transparent 1px), radial-gradient(circle at 75% 75%, white 1px, transparent 1px)', backgroundSize: '48px 48px' }} />
               <div className="relative max-w-4xl mx-auto px-6 py-14">
@@ -227,7 +217,7 @@ export default function WikiPage() {
                   <span className="text-white/60 text-sm font-medium">Anthrimon Documentation</span>
                 </div>
                 <h1 className="text-3xl font-bold text-white mb-2">How can we help?</h1>
-                <p className="text-indigo-200 mb-8 text-sm">Administration guides, vendor configuration references, and troubleshooting runbooks.</p>
+                <p className="text-slate-300 mb-8 text-sm">Administration guides, vendor configuration references, and troubleshooting runbooks.</p>
                 {/* Hero search */}
                 <div className="relative max-w-xl">
                   <svg className="absolute left-3.5 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.35-4.35"/></svg>
@@ -252,7 +242,7 @@ export default function WikiPage() {
                   ].map(s => (
                     <div key={s.label} className="flex items-baseline gap-1.5">
                       <span className="text-2xl font-bold text-white tabular-nums">{s.n}</span>
-                      <span className="text-indigo-300 text-xs">{s.label}</span>
+                      <span className="text-slate-400 text-xs">{s.label}</span>
                     </div>
                   ))}
                 </div>
@@ -282,7 +272,7 @@ export default function WikiPage() {
                         <button
                           key={a.slug}
                           onClick={() => navigate(`/wiki/${a.slug}`)}
-                          className={`group text-left bg-white rounded-xl border border-l-4 border-slate-200 border-l-slate-200 ${CAT_CARD_ACCENT[cat]} hover:shadow-md transition-all duration-150 p-4`}
+                          className="group text-left bg-white rounded-xl border border-slate-200 hover:shadow-md transition-all duration-150 p-4"
                         >
                           <p className={`text-sm font-semibold text-slate-800 group-hover:${meta.color} transition-colors mb-1 leading-snug`}>{a.title}</p>
                           <p className="text-xs text-slate-400 leading-relaxed line-clamp-2">{a.description}</p>

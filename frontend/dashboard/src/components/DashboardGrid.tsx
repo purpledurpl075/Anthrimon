@@ -6,6 +6,10 @@ import { Download, Trash2 } from 'lucide-react'
 import type { DashboardWidget, MetricWidgetConfig } from '../api/dashboards'
 import { findWidgetDef, timeRangeToMinutes } from '../hooks/useDashboardWidgets'
 import { WIDGET_COMPONENTS, MetricGauge, MetricStat, MetricGraph, TextNote, Icons } from './widgets'
+import { useMobile } from '../hooks/useMobile'
+
+const ROW_HEIGHT = 120
+const ROW_MARGIN = 16
 
 export interface DashboardGridProps {
   widgets: DashboardWidget[]
@@ -72,6 +76,7 @@ function WidgetCard({
   const cardRef = useRef<HTMLDivElement>(null)
   const def = findWidgetDef(widget.type)
   const canConfigure = isEditing && !!def?.isMetric
+  const isMobile = useMobile()
 
   const exportPng = async () => {
     if (!cardRef.current) return
@@ -89,8 +94,10 @@ function WidgetCard({
   return (
     <div className="relative h-full group">
       {!readOnly && (
-        <div className="absolute top-2 right-2 z-20 flex items-center gap-1 bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl shadow-md px-2 py-1.5 opacity-0 group-hover:opacity-100 focus-within:opacity-100 transition-opacity">
-          {isEditing && (
+        <div className={`absolute top-2 right-2 z-20 flex items-center gap-1 bg-white/95 backdrop-blur-sm border border-slate-200 rounded-xl shadow-md px-2 py-1.5 transition-opacity ${
+          isMobile ? 'opacity-100' : 'opacity-0 group-hover:opacity-100 focus-within:opacity-100'
+        }`}>
+          {isEditing && !isMobile && (
             <>
               <div
                 className="widget-drag-handle flex items-center gap-1 px-2 py-1 text-[10px] font-medium text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg cursor-grab active:cursor-grabbing transition-colors select-none"
@@ -104,8 +111,9 @@ function WidgetCard({
           <button
             onMouseDown={e => e.stopPropagation()}
             onClick={exportPng}
+            aria-label="Export as PNG"
             title="Export as PNG"
-            className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+            className={`text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors ${isMobile ? 'p-3.5' : 'p-1.5'}`}
           >
             <Download className="w-3.5 h-3.5" />
           </button>
@@ -113,8 +121,9 @@ function WidgetCard({
             <button
               onMouseDown={e => e.stopPropagation()}
               onClick={onConfigure}
+              aria-label="Configure widget"
               title="Configure"
-              className="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors"
+              className={`text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg transition-colors ${isMobile ? 'p-3.5' : 'p-1.5'}`}
             >
               <Icons.Settings />
             </button>
@@ -123,8 +132,9 @@ function WidgetCard({
             <button
               onMouseDown={e => e.stopPropagation()}
               onClick={onRemove}
+              aria-label="Remove widget"
               title="Remove widget"
-              className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+              className={`text-slate-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-colors ${isMobile ? 'p-3.5' : 'p-1.5'}`}
             >
               <Trash2 className="w-3.5 h-3.5" />
             </button>
@@ -148,6 +158,7 @@ export function DashboardGrid({
 }: DashboardGridProps) {
   const [containerWidth, setContainerWidth] = useState(1200)
   const containerRef = useRef<HTMLDivElement | null>(null)
+  const isMobile = useMobile()
 
   useEffect(() => {
     const node = containerRef.current
@@ -167,6 +178,33 @@ export function DashboardGrid({
     )
   }
 
+  // Mobile: skip react-grid-layout entirely — no drag/resize on touch, just
+  // stack widgets full-width in their saved order, each sized to roughly the
+  // vertical space it occupies in the desktop grid. Configure/remove still
+  // work in edit mode; only drag-to-reorder is unavailable (WidgetCard hides
+  // its own drag handle on mobile).
+  if (isMobile) {
+    const ordered = [...widgets].sort((a, b) => a.y - b.y || a.x - b.x)
+    return (
+      <div className="space-y-4">
+        {ordered.map(w => (
+          <div key={w.instance_id} style={{ height: w.h * ROW_HEIGHT + (w.h - 1) * ROW_MARGIN }}>
+            <WidgetCard
+              widget={w}
+              isEditing={isEditing}
+              readOnly={readOnly}
+              refreshIntervalS={refreshIntervalS}
+              rangeMinutes={rangeMinutes}
+              onRemove={() => onRemoveWidget?.(w.instance_id)}
+              onConfigure={() => onConfigureWidget?.(w.instance_id)}
+              onUpdateWidgetConfig={onUpdateWidgetConfig}
+            />
+          </div>
+        ))}
+      </div>
+    )
+  }
+
   return (
     <div ref={containerRef}>
       <GridLayout
@@ -177,9 +215,9 @@ export function DashboardGrid({
           minH: findWidgetDef(w.type)?.minH ?? 2,
         }))}
         cols={12}
-        rowHeight={120}
+        rowHeight={ROW_HEIGHT}
         width={containerWidth}
-        margin={[16, 16]}
+        margin={[ROW_MARGIN, ROW_MARGIN]}
         containerPadding={[0, 0]}
         isDraggable={isEditing && !readOnly}
         isResizable={isEditing && !readOnly}

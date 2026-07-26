@@ -161,7 +161,7 @@ function SettingRow({ label, description, children, badge }: {
   label: string; description: string; children: React.ReactNode; badge?: React.ReactNode
 }) {
   return (
-    <div className="flex items-start justify-between gap-8 py-4 border-b border-slate-100 last:border-0">
+    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-8 py-4 border-b border-slate-100 last:border-0">
       <div className="min-w-0">
         <div className="flex items-center gap-2">
           <p className="text-sm font-medium text-slate-800">{label}</p>
@@ -169,7 +169,7 @@ function SettingRow({ label, description, children, badge }: {
         </div>
         <p className="text-xs text-slate-400 mt-0.5">{description}</p>
       </div>
-      <div className="shrink-0 w-64">{children}</div>
+      <div className="shrink-0 w-full sm:w-64">{children}</div>
     </div>
   )
 }

@@ -42,6 +42,7 @@ type Device struct {
 	RestCollectionEnabled bool         `json:"rest_collection_enabled"`
 	EapiEnabled           bool         `json:"eapi_enabled"`
 	EapiAllowHTTP         bool         `json:"eapi_allow_http"`
+	NetconfEnabled        bool         `json:"netconf_enabled"`
 	ConfigIntervalS       int          `json:"config_interval_s"`
 }
 
@@ -237,6 +238,20 @@ func (c *Client) PostDeviceInventory(ctx context.Context, records []map[string]a
 // the device's interface_vlans.
 func (c *Client) PostVLANs(ctx context.Context, records []map[string]any) error {
 	return c.postJSON(ctx, "/api/v1/collectors/vlans", records, nil)
+}
+
+// PostInterfaces sends interface inventory records to the hub, which upserts
+// them into `interfaces`. Each record must contain at least device_id,
+// if_index, and name — this is the prerequisite for VLANs/addresses/STP
+// ingestion, which all resolve interface_id by (device_id, if_index/name).
+func (c *Client) PostInterfaces(ctx context.Context, records []map[string]any) error {
+	return c.postJSON(ctx, "/api/v1/collectors/interfaces", records, nil)
+}
+
+// PostLLDPNeighbors sends a flat list of LLDP neighbor records to the hub,
+// which upserts them into `lldp_neighbors` and sweeps stale rows per device.
+func (c *Client) PostLLDPNeighbors(ctx context.Context, records []map[string]any) error {
+	return c.postJSON(ctx, "/api/v1/collectors/lldp-neighbors", records, nil)
 }
 
 // PostRoutes sends one device's current route table to the hub, including

@@ -128,6 +128,45 @@ async def config_exec(*, wg_ip: str, api_key_hash: str, payload: dict,
     return resp.json()
 
 
+async def netconf_exec(*, wg_ip: str, api_key_hash: str, device_ip: str,
+                       username: str, password: str, rpcs: list[dict],
+                       timeout: float = 120.0) -> dict:
+    """POST a NETCONF RPC sequence to a collector and return its JSON result
+    ({"replies": [str, ...], "error": str | None}).
+
+    Each item in `rpcs` is {"body": "<inner-rpc-xml/>", "timeout_s": float}
+    (timeout_s optional). All Junos RPC construction and reply
+    interpretation lives in configmgmt/netconf.py — this is just the
+    authenticated HTTP client to the collector's /netconf endpoint,
+    mirroring config_exec/aoscx_rest.
+
+    Raises RuntimeError on transport/HTTP errors. A partial-sequence
+    transport failure still returns 200 with whatever replies were
+    collected before the failure plus a non-empty "error" — that's not
+    raised here, callers must check the "error" key themselves.
+    """
+    ip = str(wg_ip).split("/")[0]
+    try:
+        in_subnet = ipaddress.ip_address(ip) in _WG_SUBNET
+    except ValueError:
+        in_subnet = False
+    if not in_subnet:
+        raise RuntimeError(f"collector wg_ip '{ip}' is not in the WireGuard subnet")
+
+    async with httpx.AsyncClient(timeout=timeout) as hc:
+        resp = await hc.post(
+            f"http://{ip}:{_COLLECTOR_PORT}/netconf",
+            json={
+                "device_ip": device_ip, "username": username, "password": password,
+                "rpcs": rpcs,
+            },
+            headers={"Authorization": f"Bearer {_control_token(api_key_hash)}"},
+        )
+    if resp.status_code != 200:
+        raise RuntimeError(f"collector netconf HTTP {resp.status_code}: {resp.text[:400]}")
+    return resp.json()
+
+
 def step(command: str, *, delay: float = 1.0, expect: str = "", response: str = "",
          expect2: str = "", response2: str = "", delay2: float = 1.0,
          min_wait: float = 0.0) -> dict:

@@ -835,6 +835,19 @@ async def collector_config(
         )).all()
         eapi_enabled_ids = {str(r[0]) for r in eapi_rows}
 
+    netconf_enabled_ids: set[str] = set()
+    if device_ids:
+        netconf_rows = (await db.execute(
+            select(DeviceApiMethod.device_id)
+            .where(
+                DeviceApiMethod.device_id.in_(device_ids),
+                DeviceApiMethod.method == "junos_netconf",
+                DeviceApiMethod.enabled == True,  # noqa: E712
+                DeviceApiMethod.reachable == True,  # noqa: E712
+            )
+        )).all()
+        netconf_enabled_ids = {str(r[0]) for r in netconf_rows}
+
     devices_out = []
     for dev in device_rows:
         # Load credentials
@@ -867,6 +880,7 @@ async def collector_config(
             "credentials":             cred_list,
             "rest_collection_enabled": dev.rest_collection_enabled,
             "eapi_enabled":            str(dev.id) in eapi_enabled_ids,
+            "netconf_enabled":         str(dev.id) in netconf_enabled_ids,
             "config_interval_s":       3600,
         })
 
@@ -2763,6 +2777,101 @@ async def ingest_stp_ports(
     return {"written": written}
 
 
+@router.post("/interfaces",
+             summary="Ingest interface inventory collected by the remote collector")
+async def ingest_interfaces(
+    request: Request,
+    db:      AsyncSession = Depends(get_db),
+) -> dict:
+    """Accept a flat list of interface inventory records from a remote collector
+    and upsert them into `interfaces`. This is the remote-collector counterpart
+    to the hub-local SNMP collector's direct-to-Postgres interface writer — the
+    /metrics endpoint's oper/admin-status sync only ever UPDATEs existing rows,
+    so this endpoint is what actually creates them for collector-managed devices.
+    """
+    collector = await _require_collector(request, db)
+    records   = await request.json()
+    if not records:
+        return {"written": 0}
+
+    allowed = {
+        str(did) for (did,) in (await db.execute(
+            select(Device.id).where(
+                Device.collector_id == collector.id,
+                Device.is_active == True,  # noqa: E712
+            )
+        )).all()
+    }
+
+    by_device: dict[str, list[dict]] = {}
+    for r in records:
+        did = r.get("device_id")
+        if not did or did not in allowed or r.get("if_index") is None or not r.get("name"):
+            continue
+        by_device.setdefault(did, []).append(r)
+
+    written = 0
+    for did_str, rows in by_device.items():
+        await db.execute(
+            text("""
+                INSERT INTO interfaces (
+                    device_id, if_index, name, description, if_type,
+                    speed_bps, mtu, mac_address,
+                    admin_status, oper_status, ip_addresses, updated_at
+                )
+                SELECT CAST(:did AS uuid), v.if_index, v.name, v.description, v.if_type,
+                       v.speed_bps, v.mtu, v.mac_address::macaddr,
+                       COALESCE(v.admin_status, 'unknown')::if_status,
+                       COALESCE(v.oper_status, 'unknown')::if_status,
+                       COALESCE(v.ip_addresses::jsonb, '[]'::jsonb), NOW()
+                FROM (
+                    SELECT unnest(CAST(:if_indexes AS integer[]))    AS if_index,
+                           unnest(CAST(:names AS text[]))            AS name,
+                           unnest(CAST(:descriptions AS text[]))     AS description,
+                           unnest(CAST(:if_types AS text[]))         AS if_type,
+                           unnest(CAST(:speeds AS bigint[]))         AS speed_bps,
+                           unnest(CAST(:mtus AS integer[]))          AS mtu,
+                           unnest(CAST(:macs AS text[]))             AS mac_address,
+                           unnest(CAST(:admin_statuses AS text[]))   AS admin_status,
+                           unnest(CAST(:oper_statuses AS text[]))    AS oper_status,
+                           unnest(CAST(:ip_addresses_list AS text[])) AS ip_addresses
+                ) v
+                ON CONFLICT (device_id, if_index) DO UPDATE SET
+                    name         = EXCLUDED.name,
+                    description  = EXCLUDED.description,
+                    if_type      = EXCLUDED.if_type,
+                    speed_bps    = EXCLUDED.speed_bps,
+                    mtu          = EXCLUDED.mtu,
+                    mac_address  = EXCLUDED.mac_address,
+                    admin_status = EXCLUDED.admin_status,
+                    oper_status  = EXCLUDED.oper_status,
+                    ip_addresses = CASE
+                        WHEN EXCLUDED.ip_addresses != '[]'::jsonb
+                        THEN EXCLUDED.ip_addresses
+                        ELSE interfaces.ip_addresses
+                    END,
+                    updated_at   = EXCLUDED.updated_at
+            """),
+            {
+                "did": did_str,
+                "if_indexes":        [r["if_index"] for r in rows],
+                "names":             [r["name"] for r in rows],
+                "descriptions":      [r.get("description") for r in rows],
+                "if_types":          [r.get("if_type") for r in rows],
+                "speeds":            [r.get("speed_bps") or 0 for r in rows],
+                "mtus":              [r.get("mtu") for r in rows],
+                "macs":              [r.get("mac_address") or None for r in rows],
+                "admin_statuses":    [r.get("admin_status") for r in rows],
+                "oper_statuses":     [r.get("oper_status") for r in rows],
+                "ip_addresses_list": [json.dumps(r.get("ip_addresses") or []) for r in rows],
+            },
+        )
+        written += len(rows)
+
+    await db.commit()
+    return {"written": written}
+
+
 @router.post("/vlans",
              summary="Ingest VLANs + interface membership collected by the remote collector")
 async def ingest_vlans(
@@ -2939,6 +3048,100 @@ async def ingest_addresses(
             {"did": did_str},
         )
         written += len(macs)
+
+    await db.commit()
+    return {"written": written}
+
+
+@router.post("/lldp-neighbors",
+             summary="Ingest LLDP neighbor table collected by the remote collector")
+async def ingest_lldp_neighbors(
+    request: Request,
+    db:      AsyncSession = Depends(get_db),
+) -> dict:
+    """Accept a flat list of LLDP neighbor records from a remote collector,
+    upsert into `lldp_neighbors`, and sweep stale rows per device (mark-and-sweep,
+    same pattern as /addresses) so neighbors that have aged out disappear.
+    """
+    collector = await _require_collector(request, db)
+    records   = await request.json()
+    if not records:
+        return {"written": 0}
+
+    allowed = {
+        str(did) for (did,) in (await db.execute(
+            select(Device.id).where(
+                Device.collector_id == collector.id,
+                Device.is_active == True,  # noqa: E712
+            )
+        )).all()
+    }
+
+    by_device: dict[str, list[dict]] = {}
+    for r in records:
+        did = r.get("device_id")
+        if not did or did not in allowed or not r.get("local_port_name") or not r.get("remote_chassis_id"):
+            continue
+        by_device.setdefault(did, []).append(r)
+
+    written = 0
+    for did_str, rows in by_device.items():
+        await db.execute(
+            text("""
+                INSERT INTO lldp_neighbors (
+                    device_id, local_port_name,
+                    remote_chassis_id_subtype, remote_chassis_id,
+                    remote_port_id_subtype, remote_port_id, remote_port_desc,
+                    remote_system_name, remote_mgmt_ip, remote_system_capabilities,
+                    ttl, updated_at
+                )
+                SELECT CAST(:did AS uuid), v.local_port_name,
+                       v.chassis_subtype, v.chassis_id,
+                       v.port_subtype, v.port_id, v.port_desc,
+                       v.sys_name, NULLIF(v.mgmt_ip, '')::inet, v.capabilities::jsonb,
+                       v.ttl, NOW()
+                FROM (
+                    SELECT unnest(CAST(:local_ports AS text[]))      AS local_port_name,
+                           unnest(CAST(:chassis_subtypes AS text[])) AS chassis_subtype,
+                           unnest(CAST(:chassis_ids AS text[]))      AS chassis_id,
+                           unnest(CAST(:port_subtypes AS text[]))    AS port_subtype,
+                           unnest(CAST(:port_ids AS text[]))         AS port_id,
+                           unnest(CAST(:port_descs AS text[]))       AS port_desc,
+                           unnest(CAST(:sys_names AS text[]))        AS sys_name,
+                           unnest(CAST(:mgmt_ips AS text[]))         AS mgmt_ip,
+                           unnest(CAST(:capabilities_list AS text[])) AS capabilities,
+                           unnest(CAST(:ttls AS integer[]))          AS ttl
+                ) v
+                ON CONFLICT (device_id, local_port_name, remote_chassis_id) DO UPDATE SET
+                    remote_chassis_id_subtype  = EXCLUDED.remote_chassis_id_subtype,
+                    remote_port_id_subtype     = EXCLUDED.remote_port_id_subtype,
+                    remote_port_id              = EXCLUDED.remote_port_id,
+                    remote_port_desc            = EXCLUDED.remote_port_desc,
+                    remote_system_name          = EXCLUDED.remote_system_name,
+                    remote_mgmt_ip              = EXCLUDED.remote_mgmt_ip,
+                    remote_system_capabilities  = EXCLUDED.remote_system_capabilities,
+                    ttl                         = EXCLUDED.ttl,
+                    updated_at                  = EXCLUDED.updated_at
+            """),
+            {
+                "did": did_str,
+                "local_ports":       [r["local_port_name"] for r in rows],
+                "chassis_subtypes":  [r.get("remote_chassis_id_subtype") for r in rows],
+                "chassis_ids":       [r["remote_chassis_id"] for r in rows],
+                "port_subtypes":     [r.get("remote_port_id_subtype") for r in rows],
+                "port_ids":          [r.get("remote_port_id") for r in rows],
+                "port_descs":        [r.get("remote_port_desc") for r in rows],
+                "sys_names":         [r.get("remote_system_name") for r in rows],
+                "mgmt_ips":          [r.get("remote_mgmt_ip") or "" for r in rows],
+                "capabilities_list": [json.dumps(r.get("remote_system_capabilities") or []) for r in rows],
+                "ttls":              [r.get("ttl") for r in rows],
+            },
+        )
+        await db.execute(
+            text("DELETE FROM lldp_neighbors WHERE device_id = CAST(:did AS uuid) AND updated_at < NOW() - INTERVAL '1 minute'"),
+            {"did": did_str},
+        )
+        written += len(rows)
 
     await db.commit()
     return {"written": written}

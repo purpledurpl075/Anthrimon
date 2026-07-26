@@ -257,7 +257,6 @@ export default function AlertsPage() {
                   key={a.id}
                   onClick={() => navigate(`/alerts/${a.id}`)}
                   className="group bg-white border border-slate-200 rounded-xl px-4 py-3.5 cursor-pointer hover:shadow-sm hover:-translate-y-px transition-all duration-150 flex items-center gap-4"
-                  style={{ borderLeft: `3px solid ${sc}` }}
                 >
                   {/* Checkbox */}
                   {canAct && (a.status === 'open' || a.status === 'acknowledged') && (

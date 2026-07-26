@@ -5,6 +5,7 @@ import { fetchSmtpSettings, saveSmtpSettings, testSmtpSettings } from '../api/ad
 import { fetchChannels, createChannel, updateChannel, deleteChannel, testChannel, fetchChannelSendLog, type NotificationChannel, type ChannelSendLogEntry } from '../api/channels'
 import api from '../api/client'
 import { useRole, hasRole, useCurrentUser } from '../hooks/useCurrentUser'
+import { useMobile } from '../hooks/useMobile'
 
 function apiError(e: any): string {
   const detail = e?.response?.data?.detail
@@ -804,7 +805,7 @@ function SettingRow({ label, description, children, badge }: {
   label: string; description: string; children: React.ReactNode; badge?: React.ReactNode
 }) {
   return (
-    <div className="flex items-start justify-between gap-8 py-4 border-b border-slate-100 last:border-0">
+    <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-8 py-4 border-b border-slate-100 last:border-0">
       <div className="min-w-0">
         <div className="flex items-center gap-2">
           <p className="text-sm font-medium text-slate-800">{label}</p>
@@ -812,7 +813,7 @@ function SettingRow({ label, description, children, badge }: {
         </div>
         <p className="text-xs text-slate-400 mt-0.5">{description}</p>
       </div>
-      <div className="shrink-0 w-64">{children}</div>
+      <div className="shrink-0 w-full sm:w-64">{children}</div>
     </div>
   )
 }
@@ -1128,9 +1129,30 @@ function EmailTemplateTab() {
   if (isLoading) return <div className="p-6 text-slate-400 text-sm">Loading…</div>
 
   return (
-    <div className="flex h-full min-h-0">
-      {/* Sidebar — metric selector */}
-      <div className="w-48 shrink-0 border-r border-slate-200 bg-slate-50 overflow-y-auto flex flex-col">
+    <div className="flex flex-col md:flex-row h-full min-h-0">
+      {/* Mobile: horizontal scrolling metric strip (replaces the fixed
+          sidebar, which would otherwise squeeze the editor into ~130px). */}
+      <div className="md:hidden flex items-center gap-1.5 px-3 py-2 border-b border-slate-200 bg-slate-50 overflow-x-auto shrink-0">
+        {allMetrics.map(metric => {
+          const status = metric === 'default' ? null : statusByMetric[metric]
+          const isCustom = metric === 'default' ? false : status?.is_custom ?? false
+          const active = selectedMetric === metric
+          return (
+            <button key={metric} onClick={() => setSelectedMetric(metric)}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs shrink-0 transition-colors ${
+                active ? 'bg-blue-600 text-white font-medium' : 'bg-white text-slate-600 border border-slate-200'
+              }`}>
+              {METRIC_LABELS[metric] ?? metric}
+              {isCustom && (
+                <span className={`text-[9px] font-semibold px-1 py-0.5 rounded shrink-0 ${active ? 'bg-white/20' : 'bg-blue-100 text-blue-600'}`}>custom</span>
+              )}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* Desktop: sidebar — metric selector */}
+      <div className="hidden md:flex w-48 shrink-0 border-r border-slate-200 bg-slate-50 overflow-y-auto flex-col">
         <div className="px-3 py-2.5 border-b border-slate-200">
           <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-wide">Alert type</p>
         </div>
@@ -1280,7 +1302,24 @@ interface ApiDevice {
   methods: ApiMethod[]
 }
 
-const METHOD_ORDER = ['snmp', 'arista_eapi', 'aruba_cx_rest', 'gnmi']
+const METHOD_ORDER = ['snmp', 'arista_eapi', 'aruba_cx_rest', 'junos_netconf', 'gnmi']
+
+const METHOD_LABELS: Record<string, string> = {
+  snmp: 'SNMP',
+  arista_eapi: 'Arista eAPI',
+  aruba_cx_rest: 'CX REST',
+  junos_netconf: 'Junos NETCONF',
+  gnmi: 'gNMI',
+}
+const methodLabel = (m: string) => METHOD_LABELS[m] ?? m
+
+const METHOD_SHORT_LABELS: Record<string, string> = {
+  arista_eapi: 'eAPI',
+  aruba_cx_rest: 'REST',
+  junos_netconf: 'NETCONF',
+  gnmi: 'gNMI',
+}
+const methodShortLabel = (m: string) => METHOD_SHORT_LABELS[m] ?? methodLabel(m)
 
 function MethodBadge({ m }: { m: ApiMethod | undefined; method: string }) {
   if (!m) return <span className="text-xs text-slate-300">—</span>
@@ -1335,7 +1374,7 @@ function ConfigureModal({ device, method, onClose, onDone }: {
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-lg">
         <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
           <h2 className="text-sm font-semibold text-slate-800">
-            Auto-configure {method === 'arista_eapi' ? 'Arista eAPI' : 'CX REST'} — {device.hostname}
+            Auto-configure {methodLabel(method)} — {device.hostname}
           </h2>
           <button onClick={onClose} aria-label="Close dialog" className="text-slate-400 hover:text-slate-600">✕</button>
         </div>
@@ -1506,7 +1545,7 @@ function ApiMethodsTab() {
                   className="px-3 py-1.5 text-xs font-medium bg-amber-600 text-white rounded-lg hover:bg-amber-700 disabled:opacity-60">
                   {bulkConfiguring[method]
                     ? `Configuring ${devs.length} device${devs.length !== 1 ? 's' : ''}…`
-                    : `Configure ${method === 'arista_eapi' ? 'Arista eAPI' : 'CX REST'} on ${devs.length} device${devs.length !== 1 ? 's' : ''}`}
+                    : `Configure ${methodLabel(method)} on ${devs.length} device${devs.length !== 1 ? 's' : ''}`}
                 </button>
               ))}
             </div>
@@ -1530,7 +1569,7 @@ function ApiMethodsTab() {
                   filtered.some(d => d.supported_methods.includes(m))
                 ).map(m => (
                   <th key={m} className="text-left px-4 py-3 text-xs font-medium text-slate-400">
-                    {{snmp:'SNMP', arista_eapi:'Arista eAPI', aruba_cx_rest:'CX REST', gnmi:'gNMI'}[m] ?? m}
+                    {methodLabel(m)}
                   </th>
                 ))}
                 <th className="px-4 py-3" />
@@ -1597,7 +1636,7 @@ function ApiMethodsTab() {
                               <button key={method}
                                 onClick={() => setModal({ device: dev, method })}
                                 className="text-xs px-2 py-1 bg-blue-600 text-white rounded-lg hover:bg-blue-700">
-                                Configure {method === 'arista_eapi' ? 'eAPI' : 'REST'}
+                                Configure {methodShortLabel(method)}
                               </button>
                             ))}
                           </div>
@@ -1708,11 +1747,33 @@ export default function AdminPage() {
     .map(group => ({ ...group, items: group.items.filter(i => !PLATFORM_ONLY_TABS.has(i.id) || isPlatformAdmin) }))
     .filter(group => group.items.length > 0)
   const activeTab: Tab = (PLATFORM_ONLY_TABS.has(tab) && !isPlatformAdmin) ? 'tenant' : tab
+  const isMobile = useMobile()
 
   return (
-    <div className="flex h-full overflow-hidden">
-      {/* Left settings nav */}
-      <div className="w-52 shrink-0 border-r border-slate-200 bg-slate-50 flex flex-col overflow-y-auto">
+    <div className="flex flex-col md:flex-row h-full overflow-hidden">
+      {/* Mobile: horizontal scrolling tab strip (replaces the fixed sidebar,
+          which would otherwise squeeze the whole Administration section into
+          ~130px on a phone). */}
+      <nav
+        aria-label="Administration sections"
+        className="md:hidden flex items-center gap-1.5 px-3 py-2 border-b border-slate-200 bg-slate-50 overflow-x-auto shrink-0"
+      >
+        {nav.flatMap(({ items }) => items).map(item => {
+          const active = activeTab === item.id
+          return (
+            <button key={item.id} onClick={() => setTab(item.id)}
+              className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm shrink-0 transition-colors ${
+                active ? 'bg-blue-600 text-white font-medium' : 'bg-white text-slate-500 border border-slate-200'
+              }`}>
+              <span className={active ? 'text-white' : 'text-slate-400'}>{item.icon}</span>
+              {item.label}
+            </button>
+          )
+        })}
+      </nav>
+
+      {/* Desktop: left settings nav */}
+      <div className="hidden md:flex w-52 shrink-0 border-r border-slate-200 bg-slate-50 flex-col overflow-y-auto">
         <div className="px-5 py-4 border-b border-slate-200">
           <h1 className="text-sm font-semibold text-slate-800">Administration</h1>
         </div>

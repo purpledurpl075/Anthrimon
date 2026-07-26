@@ -179,6 +179,11 @@ async def get_commands(
         cmds = _build_arista_eapi_commands(vrf) if method == "arista_eapi" else _build_cx_rest_commands(vrf)
         return {"commands": cmds, "vrf": vrf}
 
+    if method == "junos_netconf":
+        await _get_device(device_id, principal, db, "operator")
+        # No VRF detection needed — see configure_method's own comment.
+        return {"commands": ["set system services netconf ssh"]}
+
     return {"commands": []}
 
 

@@ -854,10 +854,30 @@ def _juniper_recipe(url: str, save: bool, vrf: Optional[str], source_if: Optiona
     # Must enter config mode (`configure`) before `load`.
     # Junos fetches over its default routing instance; `load override` takes no
     # inline routing-instance.  The detected VRF is logged for the audit trail.
+    #
+    # Leading blank-command step: root SSH logins land in a Unix shell
+    # (FreeBSD/csh), not the Junos CLI — detect that and send "cli" first.
+    # Harmless no-op via the hub-local Netmiko path (run_recipe), which
+    # already lands in CLI automatically on connect; required for the
+    # collector-managed path, whose executor has no such auto-detection.
+    #
+    # `load override` is a full-replace — highest blast radius of any recipe
+    # here — so it gets the same commit-confirmed safety net as a normal
+    # deploy: commit confirmed (auto-rollback if this breaks reachability),
+    # sanity-check the session, then a plain commit to finalize.
     return Recipe(steps=[
+        RecipeStep(command="", expect=r"(root@|%\s*$|\$\s*$)", response="cli", delay=2.0),
         RecipeStep(command="configure exclusive", delay=2.0),  # exclusive lock prevents concurrent edits
         RecipeStep(command=f"load override {url}", delay=5.0),
-        RecipeStep(command="commit and-quit", delay=15.0),
+        # min_wait: see _deploy_steps in routers/config_mgmt.py — measured
+        # live against an EX3300, commit confirmed pauses ~11s between its
+        # validation warnings and its real completion marker (~15.8s total);
+        # the confirming commit pauses ~5.4s (~7s total). Both are far
+        # longer than the executor's default 1.2s idle-detection window.
+        RecipeStep(command="commit confirmed 5", delay=30.0, min_wait=16.0),
+        RecipeStep(command="run show version", delay=3.0, min_wait=1.0),
+        RecipeStep(command="commit", delay=25.0, min_wait=10.0),
+        RecipeStep(command="exit", delay=1.0),
     ])
 
 

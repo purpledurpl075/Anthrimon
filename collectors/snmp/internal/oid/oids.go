@@ -296,6 +296,21 @@ const (
 	Dot1qTpFdbTable = "1.3.6.1.2.1.17.7.1.2.2.1"
 )
 
+// ── JUNIPER-VLAN-MIB (jnxExVlanTable) ───────────────────────────────────────
+// Junos EX doesn't populate the standard Q-BRIDGE-MIB static/current VLAN
+// tables (confirmed: both return noSuchObject on EX3300 15.1R6/R7), so VLAN
+// definitions fall back to this vendor MIB. No per-physical-port membership
+// table was found — only the VLAN-to-L3-IRB-interface binding
+// (jnxExVlanPortGroupTable), which doesn't cover access/trunk assignment.
+const (
+	// jnxExVlanName: VLAN name string, indexed by an internal VLAN index.
+	JnxExVlanName = "1.3.6.1.4.1.2636.3.40.1.5.1.5.1.2"
+
+	// jnxExVlanTag: 802.1Q tag, indexed by the same VLAN index as above.
+	// 0 = untagged default VLAN — not a meaningful catalog entry, skip it.
+	JnxExVlanTag = "1.3.6.1.4.1.2636.3.40.1.5.1.5.1.5"
+)
+
 // ── HP-ICF-VLAN-MIB (HP ProCurve / Aruba ProVision) ─────────────────────────
 // Used when Q-BRIDGE-MIB is not populated (ProCurve ProVision firmware).
 // All OIDs under hpicfVlanMib = 1.3.6.1.4.1.11.2.14.11.5.1.7.1.15

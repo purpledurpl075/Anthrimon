@@ -24,6 +24,7 @@ from ..models.config import (
     CompliancePolicy, ComplianceResult, ConfigBackup, ConfigDiff,
     GoldenConfig, GoldenConfigResult,
 )
+from ..models.api_method import DeviceApiMethod
 from ..models.device import Device
 from ..models.site import RemoteCollector
 from ..models.tenant import User
@@ -722,6 +723,20 @@ async def deploy_config_multi(
         )).scalars():
             col_map[c.id] = c
 
+    # Same reason as col_map: pre-load which targets have NETCONF enabled so
+    # the concurrent deploy tasks below don't touch the request DB session.
+    netconf_ids: set[str] = set()
+    if dev_objs:
+        rows = (await db.execute(
+            select(DeviceApiMethod.device_id).where(
+                DeviceApiMethod.device_id.in_([d.id for d in dev_objs.values()]),
+                DeviceApiMethod.method == "junos_netconf",
+                DeviceApiMethod.enabled == True,  # noqa: E712
+                DeviceApiMethod.reachable == True,  # noqa: E712
+            )
+        )).all()
+        netconf_ids = {str(r[0]) for r in rows}
+
     async def _deploy_one(did: str) -> dict:
         dev_obj = dev_objs.get(did)
         if not dev_obj:
@@ -737,11 +752,13 @@ async def deploy_config_multi(
         resolved_cmds = [c for c in resolved_cmds if c.strip()]
         vendor = _vendor_key(dev_obj)
         collector = col_map.get(dev_obj.collector_id) if dev_obj.collector_id else None
+        netconf_enabled = did in netconf_ids
 
         async with sem:
             try:
                 output = await _deploy_to_device(
-                    dev_obj, vendor, cred_data, resolved_cmds, body.save, collector)
+                    dev_obj, vendor, cred_data, resolved_cmds, body.save, collector,
+                    netconf_enabled=netconf_enabled)
                 async def _bk():
                     from ..database import AsyncSessionLocal
                     async with AsyncSessionLocal() as s:
@@ -856,8 +873,18 @@ async def deploy_config(
             select(RemoteCollector).where(RemoteCollector.id == dev.collector_id)
         )).scalar_one_or_none()
 
+    netconf_enabled = (await db.execute(
+        select(DeviceApiMethod.device_id).where(
+            DeviceApiMethod.device_id == dev.id,
+            DeviceApiMethod.method == "junos_netconf",
+            DeviceApiMethod.enabled == True,  # noqa: E712
+            DeviceApiMethod.reachable == True,  # noqa: E712
+        )
+    )).scalar_one_or_none() is not None
+
     try:
-        output = await _deploy_to_device(dev, vendor, cred_data, commands, body.save, collector)
+        output = await _deploy_to_device(dev, vendor, cred_data, commands, body.save, collector,
+                                          netconf_enabled=netconf_enabled)
     except Exception as exc:
         logger.error("config_deploy_failed", device=dev.hostname, error=str(exc))
         await _audit(db, action="config_push", resource_type="device",
@@ -1008,8 +1035,32 @@ def _deploy_steps(vendor: str, commands: list[str], save: bool) -> list[dict]:
     equivalent for collector-managed devices."""
     s = _proxy.step
     if vendor == "juniper":
-        return [s("configure", delay=1.5), *[s(c) for c in commands],
-                s("commit and-quit", delay=8.0, expect=r"(commit complete|error|warning)")]
+        # Root SSH logins land in a Unix shell (FreeBSD/csh), not the Junos
+        # CLI — detect that and send "cli" before anything else. Harmless
+        # no-op if already in CLI (e.g. a non-root login class).
+        # Commit workflow: commit confirmed (auto-rollback safety net) ->
+        # sanity-check the session is still alive -> plain commit to
+        # finalize. If the confirming commit never runs, Junos reverts on
+        # its own after the timer — _deploy_to_device checks the transcript
+        # for "commit complete" and raises if the confirm step didn't land.
+        return [
+            s("", delay=2.0, expect=r"(root@|%\s*$|\$\s*$)", response="cli"),
+            s("configure", delay=1.5),
+            *[s(c) for c in commands],
+            # min_wait: `commit confirmed` prints validation warnings
+            # immediately, then goes silent for ~11s (full commit-check + RE
+            # sync) before the real "commit confirmed will be automatically
+            # rolled back..." marker — measured live against an EX3300 at
+            # ~15.8s total. The plain confirming `commit` similarly pauses
+            # ~5.4s before its "commit complete" marker, ~7s total. Both are
+            # far longer than the executor's default 1.2s idle-detection
+            # window, which would otherwise move on mid-response and
+            # interleave the next step's input with this one's still-
+            # streaming output (confirmed live — this is not hypothetical).
+            s("commit confirmed 5", delay=30.0, min_wait=16.0),
+            s("run show version", delay=3.0, min_wait=1.0),
+            s("commit", delay=25.0, min_wait=10.0),
+        ]
     if vendor == "cisco_iosxr":
         return [s("configure terminal", delay=1.5), *[s(c) for c in commands],
                 s("commit", delay=5.0), s("end", delay=1.0)]
@@ -1023,10 +1074,38 @@ def _deploy_steps(vendor: str, commands: list[str], save: bool) -> list[dict]:
     return steps
 
 
-async def _deploy_to_device(dev, vendor, cred_data, commands, save, collector) -> str:
+async def _deploy_to_device(dev, vendor, cred_data, commands, save, collector,
+                             netconf_enabled: bool = False) -> str:
     """Run a config deploy either hub-direct or via the owning collector.
     `collector` is the pre-loaded RemoteCollector (or None for hub-managed).
-    Does no DB I/O so it is safe to call concurrently."""
+    `netconf_enabled` is pre-loaded by the caller (device_api_methods has
+    junos_netconf enabled+reachable) — never queried here, to keep this safe
+    to call concurrently (no DB I/O).
+
+    Junos devices with NETCONF enabled deploy over NETCONF (structured
+    RPCs, no screen-scraping) instead of the SSH-CLI path — see
+    configmgmt/netconf.py for why this covers deploy only, not rollback.
+    """
+    if vendor == "juniper" and netconf_enabled:
+        from ..configmgmt import netconf as _netconf
+        username = cred_data.get("username", "")
+        password = cred_data.get("password", "")
+        if dev.collector_id is not None:
+            if collector is None or not collector.wg_ip or not collector.api_key_hash:
+                raise RuntimeError("device's collector is offline or has no WireGuard IP")
+            output, ok = await _netconf.deploy_via_collector(
+                wg_ip=str(collector.wg_ip), api_key_hash=collector.api_key_hash,
+                device_ip=dev.mgmt_ip_str, username=username, password=password,
+                commands=commands,
+            )
+        else:
+            loop = asyncio.get_running_loop()
+            output, ok = await loop.run_in_executor(
+                None, _netconf.deploy_direct_sync, dev.mgmt_ip_str, username, password, commands)
+        if not ok:
+            raise RuntimeError(f"Junos NETCONF deploy failed:\n{output[-800:]}")
+        return output
+
     if dev.collector_id is not None:
         if collector is None or not collector.wg_ip or not collector.api_key_hash:
             raise RuntimeError("device's collector is offline or has no WireGuard IP")
@@ -1046,7 +1125,14 @@ async def _deploy_to_device(dev, vendor, cred_data, commands, save, collector) -
         }
         data = await _proxy.config_exec(
             wg_ip=str(collector.wg_ip), api_key_hash=collector.api_key_hash, payload=payload)
-        return data.get("output", "")
+        output = data.get("output", "")
+        # The collector executor is a blind send/expect sequence — it has no
+        # notion of "did the commit actually succeed", so check the
+        # transcript here the way Netmiko's own commit() does for the
+        # hub-local path (raising if "commit complete" never appeared).
+        if vendor == "juniper" and "commit complete" not in output:
+            raise RuntimeError(f"Junos commit did not confirm — device may auto-rollback:\n{output[-500:]}")
+        return output
 
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
@@ -1156,6 +1242,12 @@ async def rollback_config(
         else:
             output, served = await _rollback_via_hub(
                 host, vendor, cred_data, target, body, mgmt_vrf, mgmt_if)
+        # Neither rollback path inspects command output for success — a failed
+        # `commit` inside the recipe wouldn't otherwise surface as an error.
+        # _juniper_recipe's commit-confirmed step only finalizes on a plain
+        # `commit`, whose success marker is "commit complete".
+        if vendor == "juniper" and "commit complete" not in output:
+            raise RuntimeError(f"Junos commit did not confirm — device may auto-rollback:\n{output[-500:]}")
     except Exception as exc:
         logger.error("config_rollback_failed", device=dev.hostname, error=str(exc))
         await _audit(db, action="config_push", resource_type="device",

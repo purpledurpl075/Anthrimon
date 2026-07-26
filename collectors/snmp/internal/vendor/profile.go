@@ -65,6 +65,11 @@ type Profile struct {
 	// not populate the standard dot1qVlanStaticTable.
 	HpicfVlan bool
 
+	// JuniperVlan: when true, use JUNIPER-VLAN-MIB (VLAN definitions only, no
+	// port membership) instead of Q-BRIDGE-MIB. Set on Junos, which does not
+	// populate the standard dot1qVlanStaticTable on at least EX3300 15.1R6/R7.
+	JuniperVlan bool
+
 	// UptimeOID overrides sysUpTime for the health uptime metric.
 	// Use when the vendor's SNMP agent uptime diverges from actual system uptime
 	// (e.g. Aruba CX resets sysUpTime on agent restart; hrSystemUptime is stable).

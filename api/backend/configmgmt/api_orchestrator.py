@@ -33,7 +33,7 @@ VENDOR_METHODS: dict[str, list[str]] = {
     "aruba_cx": ["snmp", "aruba_cx_rest"],
     "procurve": ["snmp"],
     "cisco":    ["snmp"],
-    "juniper":  ["snmp"],
+    "juniper":  ["snmp", "junos_netconf"],
     "fortios":  ["snmp"],
     "unknown":  ["snmp"],
 }
@@ -43,6 +43,7 @@ METHOD_LABELS: dict[str, str] = {
     "snmp":          "SNMP",
     "arista_eapi":   "Arista eAPI",
     "aruba_cx_rest": "ArubaOS-CX REST",
+    "junos_netconf": "Junos NETCONF",
     "gnmi":          "gNMI",
 }
 
@@ -219,6 +220,21 @@ async def probe_method(ip: str, method: str) -> tuple[bool, Optional[str]]:
     if method == "snmp":
         return True, None  # SNMP not probed via HTTP
 
+    if method == "junos_netconf":
+        # Not HTTP — a plain TCP connect to the NETCONF port is the same
+        # "is anything listening" signal the HTTP methods below use.
+        import asyncio as _asyncio
+        try:
+            _, writer = await _asyncio.wait_for(_asyncio.open_connection(ip, 830), timeout=5)
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:
+                pass
+            return True, None
+        except Exception as exc:
+            return False, str(exc)
+
     urls = _PROBE_URLS.get(method, [])
     if not urls:
         return False, "no probe URL defined for method"
@@ -358,6 +374,11 @@ async def configure_method(device_id: str, method: str) -> dict:
     elif method == "aruba_cx_rest":
         mgmt_vrf = await _detect_mgmt_vrf(vendor, device_id, host, cred_data)
         commands = _build_cx_rest_commands(mgmt_vrf)
+    elif method == "junos_netconf":
+        # No VRF detection needed — NETCONF listens on the same management
+        # path SSH already uses; there's no separate vrf/interface toggle
+        # like eAPI's "vrf <name>" or CX's "https-server vrf <name>".
+        commands = ["set system services netconf ssh"]
     else:
         return {
             "status": "failed",

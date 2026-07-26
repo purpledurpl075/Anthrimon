@@ -1080,7 +1080,7 @@ function MaintenanceBadge({ deviceId }: { deviceId: string }) {
   if (!windows.some(w => w.is_active)) return null
   return (
     <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-amber-100 text-amber-800 border border-amber-300">
-      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+      <span className="w-1.5 h-1.5 rounded-full bg-amber-500 motion-safe:animate-pulse" />
       In maintenance
     </span>
   )
@@ -1174,7 +1174,7 @@ function MaintenanceSection({ deviceId }: { deviceId: string }) {
             <input value={name} onChange={e => setName(e.target.value)} placeholder="Scheduled maintenance"
               className="w-full border border-slate-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500" />
           </div>
-          <div className="grid grid-cols-2 gap-2">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             <div>
               <label className="block text-xs font-medium text-slate-600 mb-1">Start</label>
               <input type="datetime-local" value={startsAt} onChange={e => setStartsAt(e.target.value)}
@@ -1457,10 +1457,15 @@ function HealthTab({ deviceId, currentHealth }: { deviceId: string; currentHealt
           )
         }
 
+        // Membership is gated on CURRENT data only (dom_tx_now/dom_rx_now,
+        // plus the live temperature reading) — not the historical range
+        // series (hist.dom_tx/dom_rx). A port that stops reporting DOM data
+        // (e.g. an optic pulled, or a copper port that was previously
+        // mis-reported) still has old points inside the range-query window,
+        // so unioning those in would keep it listed indefinitely with a
+        // stale "last known" reading long after it's genuinely absent.
         const domIfaces = Array.from(new Set([
           ...domTemps.map(t => t.sensor.replace(/DOM Temperature Sensor for /i, '').trim()),
-          ...Object.keys(hist?.dom_tx ?? {}),
-          ...Object.keys(hist?.dom_rx ?? {}),
           ...Object.keys(hist?.dom_tx_now ?? {}),
           ...Object.keys(hist?.dom_rx_now ?? {}),
         ])).filter(Boolean)
@@ -1508,7 +1513,7 @@ function HealthTab({ deviceId, currentHealth }: { deviceId: string; currentHealt
 
                     <div className="px-4 py-3 space-y-2.5">
                       {/* Tx / Rx power current values */}
-                      <div className="grid grid-cols-2 gap-3">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                         {/* Tx */}
                         <div>
                           <p className="text-[9px] font-semibold text-slate-400 uppercase tracking-wide mb-1">Tx Power</p>
@@ -1573,7 +1578,7 @@ function HealthTab({ deviceId, currentHealth }: { deviceId: string; currentHealt
         return (
           <div>
             <p className="text-xs font-semibold text-slate-400 uppercase tracking-wide mb-3">FIB Route Table</p>
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
               {ipv4 !== null && (
                 <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
                   <div className="px-4 py-3 border-b border-slate-100 flex items-center gap-2">
@@ -2320,6 +2325,84 @@ export default function DeviceDetail() {
     polling_interval_s: Number(pollingInterval),
   })
 
+  // ── Tab nav definitions — shared between the desktop sidebar and the
+  // mobile horizontal scroller so icons/badges/labels never drift apart. ──
+  const tabIcon = (key: TabKey, colorClass: string) => {
+    const cls = `w-3.5 h-3.5 shrink-0 ${colorClass}`
+    switch (key) {
+      case 'interfaces': return (
+        <svg className={cls} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/>
+          <line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>
+        </svg>)
+      case 'addresses': return (
+        <svg className={cls} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/>
+          <circle cx="12" cy="9" r="2.5"/>
+        </svg>)
+      case 'vlans': return (
+        <svg className={cls} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>
+        </svg>)
+      case 'stp': return (
+        <svg className={cls} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <circle cx="12" cy="3" r="2"/><circle cx="4" cy="20" r="2"/><circle cx="20" cy="20" r="2"/>
+          <path d="M12 5v6M12 11l-6.3 7.5M12 11l6.3 7.5"/>
+        </svg>)
+      case 'routes': return (
+        <svg className={cls} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
+        </svg>)
+      case 'bgp': return (
+        <svg className={cls} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
+          <path d="m8.59 13.51 6.83 3.98M15.41 6.51l-6.82 3.98"/>
+        </svg>)
+      case 'neighbors': return (
+        <svg className={cls} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
+          <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
+        </svg>)
+      case 'health': return (
+        <svg className={cls} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
+        </svg>)
+      case 'traps': return (
+        <svg className={cls} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+        </svg>)
+      case 'config': return (
+        <svg className={cls} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
+          <polyline points="10 9 9 9 8 9"/>
+        </svg>)
+    }
+  }
+  const tabLabel: Record<TabKey, string> = {
+    interfaces: 'Interfaces', addresses: 'Addresses', vlans: 'VLANs', stp: 'STP',
+    routes: 'Routes', bgp: 'BGP', neighbors: 'Neighbors', health: 'Health',
+    traps: 'Traps', config: 'Config',
+  }
+  const tabBadge = (key: TabKey, active: boolean): React.ReactNode => {
+    if (key === 'interfaces' && (totalIfaces ?? 0) > 0) {
+      return <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${active ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>{totalIfaces}</span>
+    }
+    if (key === 'bgp') {
+      if (bgpDownCount > 0) return <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 bg-red-100 text-red-600">{bgpDownCount}</span>
+      if (bgpCount > 0) return <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${active ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'}`}>{bgpCount}</span>
+    }
+    return null
+  }
+  const tabGroups: Array<{ section: string; items: TabKey[] }> = [
+    { section: 'Network', items: ['interfaces', 'addresses'] },
+    { section: 'Layer 2', items: ['vlans', 'stp'] },
+    { section: 'Routing', items: ['routes', 'bgp', 'neighbors'] },
+    { section: 'Monitoring', items: ['health', 'traps'] },
+    ...(hasConfigCred ? [{ section: 'Configuration', items: ['config'] as TabKey[] }] : []),
+  ]
+
   const typeColor = DEVICE_TYPE_COLOR[device.device_type] ?? '#475569'
   const statusColor: Record<string, string> = {
     up: '#16a34a', down: '#dc2626', unreachable: '#f97316', unknown: '#94a3b8',
@@ -2352,7 +2435,7 @@ export default function DeviceDetail() {
       </div>
 
       {/* Hero */}
-      <div className="bg-white border-b border-slate-200" style={{ borderLeft: `4px solid ${typeColor}` }}>
+      <div className="bg-white border-b border-slate-200">
         <div className="px-6 py-5 flex items-start gap-5">
           {/* Device type icon */}
           <div className="w-14 h-14 rounded-2xl flex items-center justify-center shrink-0 mt-0.5"
@@ -2379,7 +2462,7 @@ export default function DeviceDetail() {
                   className="inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-amber-50 text-amber-700 border border-amber-200"
                   title="The device is unreachable but the device_down rule's duration gate hasn't expired yet. An alert will fire if the failure continues."
                 >
-                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500 motion-safe:animate-pulse" />
                   Alert pending
                 </span>
               )}
@@ -2504,7 +2587,7 @@ export default function DeviceDetail() {
                 <GearIcon />
                 <span className="text-sm font-semibold">Device settings</span>
               </div>
-              <button onClick={() => setSettingsOpen(false)} className="text-slate-400 hover:text-slate-600">
+              <button onClick={() => setSettingsOpen(false)} aria-label="Close device settings" className="text-slate-400 hover:text-slate-600">
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
               </button>
             </div>
@@ -2723,161 +2806,52 @@ export default function DeviceDetail() {
       <main className="p-6 space-y-4">
 
         {/* Tabbed panel — sidebar + content */}
-        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-1 min-h-0" style={{ minHeight: 480 }}>
+        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden flex flex-col md:flex-row flex-1 min-h-0" style={{ minHeight: 480 }}>
 
-          {/* Left sidebar nav */}
-          <div className="w-48 shrink-0 border-r border-slate-200 bg-slate-50 overflow-y-auto">
+          {/* Mobile: horizontal scrolling tab strip (replaces the fixed sidebar,
+              which would otherwise squeeze content into ~130px on a phone). */}
+          <nav
+            aria-label="Device sections"
+            className="md:hidden flex items-center gap-1.5 px-3 py-2 border-b border-slate-200 bg-slate-50 overflow-x-auto"
+          >
+            {tabGroups.flatMap(g => g.items).map(key => {
+              const active = tab === key
+              return (
+                <button key={key} onClick={() => setTab(key)}
+                  className={`flex items-center gap-1.5 px-3 py-2 rounded-lg text-sm shrink-0 transition-colors ${
+                    active ? 'bg-blue-600 text-white font-medium' : 'bg-white text-slate-500 border border-slate-200'
+                  }`}>
+                  {tabIcon(key, active ? 'text-white' : 'text-slate-400')}
+                  {tabLabel[key]}
+                  {tabBadge(key, active)}
+                </button>
+              )
+            })}
+          </nav>
+
+          {/* Desktop: left sidebar nav */}
+          <div className="hidden md:block w-48 shrink-0 border-r border-slate-200 bg-slate-50 overflow-y-auto">
             <nav className="py-1">
-
-              {/* Network */}
-              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest px-4 pt-3 pb-1">Network</p>
-              <button onClick={() => setTab('interfaces')}
-                className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors relative ${
-                  tab === 'interfaces'
-                    ? 'bg-white text-slate-800 font-medium border-r-2 border-blue-500'
-                    : 'text-slate-500 hover:bg-white/70 hover:text-slate-700'
-                }`}>
-                <svg className={`w-3.5 h-3.5 shrink-0 ${tab === 'interfaces' ? 'text-blue-500' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <rect x="2" y="2" width="20" height="8" rx="2"/><rect x="2" y="14" width="20" height="8" rx="2"/>
-                  <line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/>
-                </svg>
-                <span className="flex-1">Interfaces</span>
-                {(totalIfaces ?? 0) > 0 && (
-                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
-                    tab === 'interfaces' ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'
-                  }`}>{totalIfaces}</span>
-                )}
-              </button>
-              <button onClick={() => setTab('addresses')}
-                className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors relative ${
-                  tab === 'addresses'
-                    ? 'bg-white text-slate-800 font-medium border-r-2 border-blue-500'
-                    : 'text-slate-500 hover:bg-white/70 hover:text-slate-700'
-                }`}>
-                <svg className={`w-3.5 h-3.5 shrink-0 ${tab === 'addresses' ? 'text-blue-500' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7z"/>
-                  <circle cx="12" cy="9" r="2.5"/>
-                </svg>
-                Addresses
-              </button>
-
-              {/* Layer 2 */}
-              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest px-4 pt-3 pb-1">Layer 2</p>
-              <button onClick={() => setTab('vlans')}
-                className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors relative ${
-                  tab === 'vlans'
-                    ? 'bg-white text-slate-800 font-medium border-r-2 border-blue-500'
-                    : 'text-slate-500 hover:bg-white/70 hover:text-slate-700'
-                }`}>
-                <svg className={`w-3.5 h-3.5 shrink-0 ${tab === 'vlans' ? 'text-blue-500' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>
-                </svg>
-                VLANs
-              </button>
-              <button onClick={() => setTab('stp')}
-                className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors relative ${
-                  tab === 'stp'
-                    ? 'bg-white text-slate-800 font-medium border-r-2 border-blue-500'
-                    : 'text-slate-500 hover:bg-white/70 hover:text-slate-700'
-                }`}>
-                <svg className={`w-3.5 h-3.5 shrink-0 ${tab === 'stp' ? 'text-blue-500' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <circle cx="12" cy="3" r="2"/><circle cx="4" cy="20" r="2"/><circle cx="20" cy="20" r="2"/>
-                  <path d="M12 5v6M12 11l-6.3 7.5M12 11l6.3 7.5"/>
-                </svg>
-                STP
-              </button>
-
-              {/* Routing */}
-              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest px-4 pt-3 pb-1">Routing</p>
-              <button onClick={() => setTab('routes')}
-                className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors relative ${
-                  tab === 'routes'
-                    ? 'bg-white text-slate-800 font-medium border-r-2 border-blue-500'
-                    : 'text-slate-500 hover:bg-white/70 hover:text-slate-700'
-                }`}>
-                <svg className={`w-3.5 h-3.5 shrink-0 ${tab === 'routes' ? 'text-blue-500' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>
-                </svg>
-                Routes
-              </button>
-              <button onClick={() => setTab('bgp')}
-                className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors relative ${
-                  tab === 'bgp'
-                    ? 'bg-white text-slate-800 font-medium border-r-2 border-blue-500'
-                    : 'text-slate-500 hover:bg-white/70 hover:text-slate-700'
-                }`}>
-                <svg className={`w-3.5 h-3.5 shrink-0 ${tab === 'bgp' ? 'text-blue-500' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/>
-                  <path d="m8.59 13.51 6.83 3.98M15.41 6.51l-6.82 3.98"/>
-                </svg>
-                <span className="flex-1">BGP</span>
-                {bgpDownCount > 0 ? (
-                  <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 bg-red-100 text-red-600">{bgpDownCount}</span>
-                ) : bgpCount > 0 ? (
-                  <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded-full shrink-0 ${
-                    tab === 'bgp' ? 'bg-blue-100 text-blue-600' : 'bg-slate-100 text-slate-500'
-                  }`}>{bgpCount}</span>
-                ) : null}
-              </button>
-              <button onClick={() => setTab('neighbors')}
-                className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors relative ${
-                  tab === 'neighbors'
-                    ? 'bg-white text-slate-800 font-medium border-r-2 border-blue-500'
-                    : 'text-slate-500 hover:bg-white/70 hover:text-slate-700'
-                }`}>
-                <svg className={`w-3.5 h-3.5 shrink-0 ${tab === 'neighbors' ? 'text-blue-500' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>
-                  <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75"/>
-                </svg>
-                Neighbors
-              </button>
-
-              {/* Monitoring */}
-              <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest px-4 pt-3 pb-1">Monitoring</p>
-              <button onClick={() => setTab('health')}
-                className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors relative ${
-                  tab === 'health'
-                    ? 'bg-white text-slate-800 font-medium border-r-2 border-blue-500'
-                    : 'text-slate-500 hover:bg-white/70 hover:text-slate-700'
-                }`}>
-                <svg className={`w-3.5 h-3.5 shrink-0 ${tab === 'health' ? 'text-blue-500' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path d="M22 12h-4l-3 9L9 3l-3 9H2"/>
-                </svg>
-                Health
-              </button>
-              <button onClick={() => setTab('traps')}
-                className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors relative ${
-                  tab === 'traps'
-                    ? 'bg-white text-slate-800 font-medium border-r-2 border-blue-500'
-                    : 'text-slate-500 hover:bg-white/70 hover:text-slate-700'
-                }`}>
-                <svg className={`w-3.5 h-3.5 shrink-0 ${tab === 'traps' ? 'text-blue-500' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                  <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
-                </svg>
-                Traps
-              </button>
-
-              {/* Configuration */}
-              {hasConfigCred && (
-                <>
-                  <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest px-4 pt-3 pb-1">Configuration</p>
-                  <button onClick={() => setTab('config')}
-                    className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors relative ${
-                      tab === 'config'
-                        ? 'bg-white text-slate-800 font-medium border-r-2 border-blue-500'
-                        : 'text-slate-500 hover:bg-white/70 hover:text-slate-700'
-                    }`}>
-                    <svg className={`w-3.5 h-3.5 shrink-0 ${tab === 'config' ? 'text-blue-500' : 'text-slate-400'}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-                      <polyline points="14 2 14 8 20 8"/>
-                      <line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/>
-                      <polyline points="10 9 9 9 8 9"/>
-                    </svg>
-                    Config
-                  </button>
-                </>
-              )}
-
+              {tabGroups.map(({ section, items }) => (
+                <div key={section}>
+                  <p className="text-[10px] font-semibold text-slate-400 uppercase tracking-widest px-4 pt-3 pb-1">{section}</p>
+                  {items.map(key => {
+                    const active = tab === key
+                    return (
+                      <button key={key} onClick={() => setTab(key)}
+                        className={`w-full flex items-center gap-2.5 px-4 py-2 text-sm text-left transition-colors relative ${
+                          active
+                            ? 'bg-white text-slate-800 font-medium border-r-2 border-blue-500'
+                            : 'text-slate-500 hover:bg-white/70 hover:text-slate-700'
+                        }`}>
+                        {tabIcon(key, active ? 'text-blue-500' : 'text-slate-400')}
+                        <span className="flex-1">{tabLabel[key]}</span>
+                        {tabBadge(key, active)}
+                      </button>
+                    )
+                  })}
+                </div>
+              ))}
             </nav>
           </div>
 
@@ -3296,7 +3270,7 @@ function BGPSection({ deviceId }: { deviceId: string }) {
           <p className="text-xs text-slate-300 mt-1">BGP data is collected via SNMP bgpPeerTable (RFC 1657)</p>
         </div>
       ) : (
-        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <div className="bg-white rounded-2xl border border-slate-200 overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-100">
@@ -3700,7 +3674,7 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
               <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
                   <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Diff</h3>
-                  <button onClick={() => setSelectedDiffId(null)} className="text-slate-300 hover:text-slate-500">
+                  <button onClick={() => setSelectedDiffId(null)} aria-label="Close diff" className="text-slate-300 hover:text-slate-500">
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
                   </button>
                 </div>
@@ -3720,7 +3694,7 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
               <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
                   <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Config — {fmtTime(selectedBackup.collected_at)}</h3>
-                  <button onClick={() => setSelectedBackupId(null)} className="text-slate-300 hover:text-slate-500">
+                  <button onClick={() => setSelectedBackupId(null)} aria-label="Close backup view" className="text-slate-300 hover:text-slate-500">
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
                   </button>
                 </div>
@@ -3732,7 +3706,7 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
               <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
                 <div className="px-5 py-3 border-b border-slate-100 flex items-center justify-between">
                   <h3 className="text-xs font-semibold text-slate-500 uppercase tracking-wide">Config @ {gitShow.commit.slice(0, 10)}</h3>
-                  <button onClick={() => setSelectedGitCommit(null)} className="text-slate-300 hover:text-slate-500">
+                  <button onClick={() => setSelectedGitCommit(null)} aria-label="Close revision view" className="text-slate-300 hover:text-slate-500">
                     <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg>
                   </button>
                 </div>
@@ -3941,7 +3915,7 @@ function RollbackModal({
               </div>
 
               {diff && (
-                <div className="grid grid-cols-2 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="border border-slate-100 rounded-lg overflow-hidden">
                     <div className="px-3 py-1.5 bg-red-50 text-[10px] font-semibold text-red-600 uppercase tracking-wide">
                       Will be removed ({diff.removed.length} lines)
@@ -4259,7 +4233,7 @@ function TrapTab({ deviceId }: { deviceId: string }) {
       ) : items.length === 0 ? (
         <div className="text-xs text-slate-400 py-8 text-center">No trap events in this period</div>
       ) : (
-        <div className="rounded-xl border border-slate-200 overflow-hidden">
+        <div className="rounded-xl border border-slate-200 overflow-x-auto">
           <table className="w-full text-xs">
             <thead>
               <tr className="bg-slate-50 border-b border-slate-200">

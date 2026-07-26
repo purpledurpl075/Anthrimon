@@ -210,12 +210,68 @@ func bitmapBitSet(bitmap []byte, portNum int) bool {
 	return (bitmap[idx]>>uint(bit))&1 == 1
 }
 
+// PollVLANsJuniper collects VLAN definitions (name + 802.1Q tag) using
+// JUNIPER-VLAN-MIB's jnxExVlanTable, used as a fallback on Junos devices whose
+// Q-BRIDGE-MIB tables come back empty (confirmed unimplemented on at least
+// Junos EX3300 15.1R6/R7). No per-interface membership is returned — no
+// physical-port-to-VLAN table was found via SNMP on this platform, only the
+// VLAN-to-L3-IRB-interface binding, which isn't the same thing.
+func PollVLANsJuniper(s *client.Session, deviceID uuid.UUID) ([]*model.VLANResult, error) {
+	namePDUs, err := s.BulkWalkAll(oid.JnxExVlanName)
+	if err != nil {
+		return nil, err
+	}
+	names := make(map[int]string)
+	nameBase := strings.TrimPrefix(oid.JnxExVlanName, ".")
+	for _, pdu := range namePDUs {
+		full := strings.TrimPrefix(pdu.Name, ".")
+		if !strings.HasPrefix(full, nameBase+".") {
+			continue
+		}
+		idx, err := strconv.Atoi(full[len(nameBase)+1:])
+		if err != nil {
+			continue
+		}
+		names[idx] = client.PDUString(pdu)
+	}
+	if len(names) == 0 {
+		log.Debug().Msg("vlan(juniper): jnxExVlanName empty — device may not support JUNIPER-VLAN-MIB")
+		return nil, nil
+	}
+
+	tagPDUs, _ := s.BulkWalkAll(oid.JnxExVlanTag)
+	tags := make(map[int]int)
+	tagBase := strings.TrimPrefix(oid.JnxExVlanTag, ".")
+	for _, pdu := range tagPDUs {
+		full := strings.TrimPrefix(pdu.Name, ".")
+		if !strings.HasPrefix(full, tagBase+".") {
+			continue
+		}
+		idx, err := strconv.Atoi(full[len(tagBase)+1:])
+		if err != nil {
+			continue
+		}
+		tags[idx] = client.PDUInt(pdu)
+	}
+
+	vlans := make([]*model.VLANResult, 0, len(names))
+	for idx, name := range names {
+		tag := tags[idx]
+		if tag <= 0 {
+			continue
+		}
+		vlans = append(vlans, &model.VLANResult{DeviceID: deviceID, VlanID: tag, Name: name})
+	}
+	log.Debug().Int("vlans", len(vlans)).Msg("vlan(juniper): jnxExVlanTable parsed")
+	return vlans, nil
+}
+
 // PollVLANsHPICF collects VLAN data using HP-ICF-VLAN-MIB, used on HP ProCurve
 // and Aruba ProVision switches that do not populate Q-BRIDGE-MIB tables.
 //
-//   hpicfVlanInfoName         → VLAN names indexed by VlanID
-//   hpicfVlanPortInfoVlanId   → access (native) VLAN per ifIndex
-//   hpicfVlanPortInfoTaggedVlans → tagged VLAN bitmap per ifIndex
+//	hpicfVlanInfoName         → VLAN names indexed by VlanID
+//	hpicfVlanPortInfoVlanId   → access (native) VLAN per ifIndex
+//	hpicfVlanPortInfoTaggedVlans → tagged VLAN bitmap per ifIndex
 func PollVLANsHPICF(s *client.Session, deviceID uuid.UUID) ([]*model.VLANResult, []*model.InterfaceVLANResult, error) {
 	// ── 1. VLAN names ─────────────────────────────────────────────────────────
 	namePDUs, _ := s.BulkWalkAll(oid.HpicfVlanInfoName)
