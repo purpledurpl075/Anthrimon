@@ -11,6 +11,7 @@ from .settings import SystemSetting, PlatformSetting, TenantSetting, TenantEmail
 from .saved_view import SavedView
 from .dashboard import Dashboard
 from .orchestration import ChangeRequest, ChangeAction
+from .report import ScheduledReport, ReportRun
 
 __all__ = [
     "Tenant", "User", "ApiToken", "UserSiteRole",
@@ -27,4 +28,5 @@ __all__ = [
     "SavedView",
     "Dashboard",
     "ChangeRequest", "ChangeAction",
+    "ScheduledReport", "ReportRun",
 ]

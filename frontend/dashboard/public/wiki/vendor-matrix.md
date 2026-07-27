@@ -8,7 +8,7 @@
 | Cisco IOS-XR | ✓ | ✓ | — | — | ✓ v9/IPFIX | ✓ | ✓ |
 | Cisco NX-OS | ✓ | ✓ | — | — | ✓ v9 | ✓ | ✓ |
 | Arista EOS | ✓ | ✓ | ✓ (eAPI) | ✓ | — | ✓ | ✓ |
-| Juniper JunOS | ✓ | ✓ | — | — | ✓ IPFIX/J-Flow | ✓ | ✓ |
+| Juniper JunOS | ✓ | ✓ (NETCONF or SSH) | — | — | ✓ IPFIX/J-Flow | ✓ | ✓ |
 | HP ProCurve | ✓ | ✓ (invoke_shell) | — | ✓ | — | ✓ (UDP only) | ✓ |
 | Aruba CX | ✓ | ✓ (REST) | ✓ | ✓ | — | ✓ | ✓ |
 | Fortinet FortiOS | ✓ | ✓ | — | — | ✓ v9 | ✓ | ✓ |
@@ -64,6 +64,7 @@
 
 ## Notes
 
+- **Juniper NETCONF** — when the device's `junos_netconf` API method is enabled and reachable, config backup/compliance/deploy use structured NETCONF RPCs instead of SSH screen-scraping (same `ssh` credential either way). Juniper also gets a dedicated **Operational** tab for read-only `show ...` commands, over either transport. Falls back to SSH automatically if NETCONF isn't enabled.
 - **Config (invoke_shell)** — ProCurve switches require an interactive terminal session; collection is slower but fully supported
 - **Arista eAPI** — supplements SNMP with richer BGP, IS-IS, and LLDP data; requires an `api_token` credential
 - **Aruba CX REST** — config collection uses the REST API; link an `api_token` credential

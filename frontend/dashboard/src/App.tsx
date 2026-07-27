@@ -34,6 +34,7 @@ import DashboardsListPage from './pages/DashboardsListPage'
 import DashboardViewPage from './pages/DashboardViewPage'
 import KioskPage from './pages/KioskPage'
 import ChangesPage from './pages/ChangesPage'
+import ReportsPage from './pages/ReportsPage'
 import Layout from './components/Layout'
 import ProtectedRoute from './components/ProtectedRoute'
 
@@ -84,6 +85,7 @@ export default function App() {
             <Route path="/changes"        element={<ChangesPage />} />
             <Route path="/dashboards"     element={<DashboardsListPage />} />
             <Route path="/dashboards/:id" element={<DashboardViewPage />} />
+            <Route path="/reports"        element={<ReportsPage />} />
           </Route>
           <Route path="/dashboards/kiosk" element={<ProtectedRoute><KioskPage /></ProtectedRoute>} />
           <Route path="*" element={<Navigate to="/" replace />} />

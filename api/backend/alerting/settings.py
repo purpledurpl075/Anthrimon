@@ -18,6 +18,16 @@ PLATFORM_DEFAULTS: dict = {
     "base_url":      "",
     "platform_name": "Anthrimon",
     "timezone":      "UTC",
+    # Report branding (Advanced Reports) — org name/logo shown in generated
+    # PDF report headers/footers. Defaults to Anthrimon's own mark (same SVG
+    # as the sidebar's collapsed-state icon, frontend/dashboard/public/logo-icon.svg)
+    # until an admin uploads a replacement via Platform Settings.
+    "report_company_name":  "",
+    "report_logo_data_uri": (
+        "data:image/svg+xml;base64,"
+        "PHN2ZyB3aWR0aD0iMjAwIiBoZWlnaHQ9IjIwMCIgdmlld0JveD0iMCAwIDIwMCAyMDAiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyI+"
+        "CiAgICA8cmVjdCB4PSIxMCIgeT0iMTAiIHdpZHRoPSIxODAiIGhlaWdodD0iMTgwIiByeD0iMzYiIHJ5PSIzNiIgZmlsbD0iIzBkMWIyNCIvPgogICAgPHBvbHlnb24gcG9pbnRzPSI0OCwxNjIuNCA2Mi41NiwxNjIuNCAxMDQuMzY4LDQ0Ljg4IDk1LjYzMiw0NC44OCIgZmlsbD0iI2ZmZmZmZiIvPgogICAgPHBvbHlnb24gcG9pbnRzPSIxNTIsMTYyLjQgMTM3LjQ0LDE2Mi40IDk1LjYzMiw0NC44OCAxMDQuMzY4LDQ0Ljg4IiBmaWxsPSIjZmZmZmZmIi8+CiAgICA8cmVjdCB4PSI3Mi45NiIgeT0iMTA5Ljk4NCIgd2lkdGg9IjU0LjA4IiBoZWlnaHQ9IjguNzM2IiBmaWxsPSIjZmZmZmZmIi8+CiAgICA8Y2lyY2xlIGN4PSIxMDAiIGN5PSIxMjcuNDU2IiByPSI1LjUzMjgiIGZpbGw9IiM1Y2I4NWMiLz4KPC9zdmc+Cg=="
+    ),
     # Alerting engine — platform-wide defaults; tenants may override the
     # subset in TENANT_OVERRIDABLE_KEYS via /admin/settings/alerting
     "device_down_stale_min_s":        90,
@@ -43,6 +53,10 @@ PLATFORM_DEFAULTS: dict = {
     "trap_events_days":                 30,
     "config_backups_keep_per_device":   50,
     "compliance_results_keep_per_pair": 20,
+    "report_runs_retention_days":       90,
+    # Scheduler retry/failure-notify (feature 6) — consecutive failures a
+    # schedule must hit before a report_failure AlertRule notification fires.
+    "report_schedule_failure_threshold": 3,
     # Host-level storage — applied via privileged helper scripts, see
     # scripts/apply-vm-retention.sh and scripts/apply-journald-limit.sh
     "vm_retention_months":  12,

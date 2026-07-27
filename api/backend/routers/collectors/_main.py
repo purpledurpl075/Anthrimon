@@ -371,6 +371,7 @@ async def list_collectors(
              status_code=status.HTTP_201_CREATED)
 async def create_collector(
     body:         CollectorCreate,
+    request:      Request,
     current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
@@ -384,6 +385,11 @@ async def create_collector(
         status           = "pending",
     )
     db.add(c)
+    await db.flush()
+    from ...audit import audit as _audit
+    await _audit(db, action="create", resource_type="remote_collector",
+                 resource_id=c.id, new_value={"name": c.name, "site_id": str(body.site_id) if body.site_id else None},
+                 user=current_user, request=request)
     await db.commit()
     await db.refresh(c)
     logger.info("collector_created", collector=c.name, id=str(c.id))
@@ -591,6 +597,7 @@ async def list_trap_v3_users(
 @router.post("/trap-v3-users", summary="Add a tenant-wide SNMPv3 trap user")
 async def add_trap_v3_user(
     body:         TrapV3UserIn,
+    request:      Request,
     current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
@@ -662,8 +669,13 @@ async def add_trap_v3_user(
         data["engine_id"] = engine_id
     data = _crypto.encrypt_credential_data(data)
 
+    from ...audit import audit as _audit
     if existing:
         existing.data = data
+        await _audit(db, action="update", resource_type="trap_v3_user",
+                     resource_id=existing.id,
+                     new_value={"username": body.username, "has_engine_id": bool(engine_id)},
+                     user=current_user, request=request)
         await db.commit()
     else:
         cred = Credential(
@@ -673,6 +685,11 @@ async def add_trap_v3_user(
             data=data,
         )
         db.add(cred)
+        await db.flush()
+        await _audit(db, action="create", resource_type="trap_v3_user",
+                     resource_id=cred.id,
+                     new_value={"username": body.username, "has_engine_id": bool(engine_id)},
+                     user=current_user, request=request)
         await db.commit()
 
     asyncio.create_task(_push_trap_config(None, str(current_user.tenant_id)))
@@ -753,6 +770,7 @@ async def discover_trap_v3_engine_id(
                summary="Remove a tenant-wide SNMPv3 trap user")
 async def delete_trap_v3_user(
     username:     str,
+    request:      Request,
     current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> None:
@@ -766,6 +784,10 @@ async def delete_trap_v3_user(
         )
     )).scalar_one_or_none()
     if row:
+        from ...audit import audit as _audit
+        await _audit(db, action="delete", resource_type="trap_v3_user",
+                     resource_id=row.id, old_value={"username": username},
+                     user=current_user, request=request)
         await db.delete(row)
         await db.commit()
 
@@ -1427,6 +1449,7 @@ async def collector_sweep(
 @router.post("/{collector_id}/token", summary="Regenerate registration token")
 async def regenerate_token(
     collector_id: str,
+    request:      Request,
     current_user: User         = Depends(require_tenant_user("tenant_admin")),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
@@ -1441,6 +1464,10 @@ async def regenerate_token(
     token, token_hash = _generate_token()
     c.token_hash       = token_hash
     c.token_expires_at = datetime.now(timezone.utc) + timedelta(hours=TOKEN_TTL_HOURS)
+    from ...audit import audit as _audit
+    await _audit(db, action="update", resource_type="remote_collector",
+                 resource_id=c.id, new_value={"action": "token_regenerated", "name": c.name},
+                 user=current_user, request=request)
     await db.commit()
     return {"registration_token": token, "ca_cert": _ca_cert_pem(),
             "expires_at": c.token_expires_at.isoformat()}

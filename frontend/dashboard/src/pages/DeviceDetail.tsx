@@ -11,7 +11,7 @@ import { useParams, Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { fetchDevice, fetchDeviceHealth, fetchDeviceHealthHistory, fetchDeviceLatency, fetchDeviceInterfaces, fetchDeviceBaselines, overrideBaseline, deleteDevice, patchDevice, setAlertExclusions, fetchDeviceCredentials, linkDeviceCredential, unlinkDeviceCredential, runSnmpDiag, fetchDeviceNeighbors, fetchDeviceOSPF, fetchDeviceAddresses, fetchDeviceRoutes, fetchDeviceVlans, fetchDeviceStp, fetchDeviceTraps, discoverSnmpEngineId, type AddressEntry, type VlanEntry, type StpPort, type BaselineRow, type TrapEvent } from '../api/devices'
 import TimeSeriesChart from '../components/TimeSeriesChart'
 import { fetchCredentials } from '../api/credentials'
-import { fetchConfigStatus, fetchBackups, fetchDiffs, fetchBackup, fetchDiff, triggerCollect, fetchComplianceResults, deployConfig, rollbackConfig, fetchGoldenConfigResults, fetchGitLog, fetchGitShow, type ConfigBackupMeta, type ConfigDiffMeta, type GoldenConfigResult, type GitLogEntry } from '../api/config'
+import { fetchConfigStatus, fetchBackups, fetchDiffs, fetchBackup, fetchDiff, triggerCollect, fetchComplianceResults, deployConfig, runOperational, rollbackConfig, fetchGoldenConfigResults, fetchGitLog, fetchGitShow, type ConfigBackupMeta, type ConfigDiffMeta, type GoldenConfigResult, type GitLogEntry } from '../api/config'
 import { fetchAlerts } from '../api/alerts'
 import { fetchCollectors } from '../api/collectors'
 import { fetchDeviceBGPSessions, fetchBGPSessionEvents, fetchBGPPrefixHistory, type BGPSession, type BGPSessionEvent, type BGPPeerSeries } from '../api/bgp'
@@ -3434,7 +3434,8 @@ function DeviceGoldenResultRow({ result }: { result: GoldenConfigResult }) {
 
 function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; vendor?: string; hostname?: string }) {
   const qc = useQueryClient()
-  const [view, setView] = useState<'history' | 'compliance' | 'deploy'>('history')
+  const [view, setView] = useState<'history' | 'compliance' | 'deploy' | 'operational'>('history')
+  const isJuniper = (vendor ?? '').toLowerCase().includes('juniper')
   const [selectedDiffId, setSelectedDiffId] = useState<string | null>(null)
   const [selectedBackupId, setSelectedBackupId] = useState<string | null>(null)
   const [selectedGitCommit, setSelectedGitCommit] = useState<string | null>(null)
@@ -3554,7 +3555,10 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
 
       {/* Sub-tabs */}
       <div className="flex gap-0 border-b border-slate-100">
-        {(['history', 'compliance', 'deploy'] as const).map(v => (
+        {(isJuniper
+          ? (['history', 'compliance', 'deploy', 'operational'] as const)
+          : (['history', 'compliance', 'deploy'] as const)
+        ).map(v => (
           <button key={v} onClick={() => setView(v)}
             className={`px-4 py-2 text-xs font-medium capitalize border-b-2 transition-colors ${
               view === v ? 'border-blue-500 text-blue-600' : 'border-transparent text-slate-500 hover:text-slate-700'
@@ -3771,6 +3775,10 @@ function DeviceConfigTab({ deviceId, vendor, hostname }: { deviceId: string; ven
 
       {view === 'deploy' && (
         <DeployPanel deviceId={deviceId} vendor={vendor} />
+      )}
+
+      {view === 'operational' && (
+        <OperationalPanel deviceId={deviceId} />
       )}
 
       {rollbackTarget && (
@@ -4189,6 +4197,105 @@ function DeployPanel({ deviceId, vendor }: { deviceId: string; vendor?: string }
             <span className="text-xs font-semibold text-slate-600">Deploy output</span>
           </div>
           <pre className="p-4 text-[11px] font-mono bg-slate-950 text-green-400 overflow-auto max-h-72 leading-relaxed whitespace-pre-wrap">{output}</pre>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ── Operational panel (Junos read-only "show" commands) ─────────────────────
+
+const JUNOS_SHOW_SNIPPETS: { label: string; text: string }[] = [
+  { label: 'Version',      text: 'show version' },
+  { label: 'BGP summary',   text: 'show bgp summary' },
+  { label: 'Interfaces',    text: 'show interfaces terse' },
+  { label: 'Route summary', text: 'show route summary' },
+  { label: 'Alarms',        text: 'show system alarms' },
+  { label: 'Chassis HW',    text: 'show chassis hardware' },
+]
+
+function OperationalPanel({ deviceId }: { deviceId: string }) {
+  const [commands, setCommands] = useState('')
+  const [output, setOutput]     = useState<string | null>(null)
+  const [error, setError]       = useState<string | null>(null)
+  const [running, setRunning]   = useState(false)
+
+  const handleRun = async () => {
+    const lines = commands.split('\n').filter(l => l.trim())
+    if (!lines.length) return
+    setRunning(true); setOutput(null); setError(null)
+    try {
+      const result = await runOperational(deviceId, lines)
+      setOutput(result.output || '(no output)')
+    } catch (e: any) {
+      setError(e?.response?.data?.detail ?? String(e))
+    } finally {
+      setRunning(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-start gap-2.5 bg-blue-50 border border-blue-200 rounded-xl px-4 py-3">
+        <svg className="w-4 h-4 text-blue-500 shrink-0 mt-0.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <path d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/>
+        </svg>
+        <p className="text-xs text-blue-700">
+          Read-only "show" commands — nothing is changed on the device. No lock, no commit, no
+          snapshot triggered. Use the Deploy tab for configuration changes.
+        </p>
+      </div>
+
+      {/* Quick insert */}
+      <div>
+        <p className="text-xs font-medium text-slate-500 mb-2">Quick insert</p>
+        <div className="flex flex-wrap gap-1.5">
+          {JUNOS_SHOW_SNIPPETS.map(s => (
+            <button key={s.label} type="button"
+              onClick={() => setCommands(c => c ? c + '\n' + s.text : s.text)}
+              className="px-2 py-0.5 rounded-md text-[11px] border border-slate-200 bg-slate-50 text-slate-600 hover:border-blue-400 hover:text-blue-600 transition-colors">
+              + {s.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div>
+        <label className="block text-xs font-medium text-slate-600 mb-1.5">
+          Commands <span className="text-slate-400 font-normal">— one "show ..." command per line</span>
+        </label>
+        <textarea
+          value={commands}
+          onChange={e => setCommands(e.target.value)}
+          spellCheck={false}
+          rows={7}
+          placeholder={'show version\nshow bgp summary'}
+          className="w-full border border-slate-200 rounded-xl px-4 py-3 font-mono text-xs bg-slate-950 text-blue-300 focus:outline-none focus:ring-2 focus:ring-blue-500 resize-y leading-relaxed"
+        />
+      </div>
+
+      <div className="flex items-center gap-4">
+        <button onClick={handleRun} disabled={running || !commands.trim()}
+          className="ml-auto flex items-center gap-1.5 px-4 py-2 bg-slate-800 text-white text-xs font-medium rounded-xl hover:bg-slate-700 transition-colors disabled:opacity-50">
+          {running ? (
+            <><span className="w-3 h-3 rounded-full border-2 border-white border-t-transparent animate-spin" />Running…</>
+          ) : (
+            <><svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24"><path d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>Run</>
+          )}
+        </button>
+      </div>
+
+      {error && (
+        <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-xs text-red-700 font-mono whitespace-pre-wrap">{error}</div>
+      )}
+
+      {output !== null && !error && (
+        <div className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-slate-100 flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-blue-500" />
+            <span className="text-xs font-semibold text-slate-600">Command output</span>
+          </div>
+          <pre className="p-4 text-[11px] font-mono bg-slate-950 text-blue-300 overflow-auto max-h-72 leading-relaxed whitespace-pre-wrap">{output}</pre>
         </div>
       )}
     </div>

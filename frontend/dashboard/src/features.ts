@@ -20,7 +20,7 @@ export const PAID_FEATURES: PaidFeature[] = [
     key: 'reports',
     label: 'Advanced Reports',
     category: 'Analysis',
-    to: '/upgrade?feature=reports',
+    to: '/reports',
     tagline: 'Scheduled, branded PDF/CSV reports for capacity, SLA, and inventory.',
     bullets: [
       'Schedule recurring reports and email them to stakeholders',

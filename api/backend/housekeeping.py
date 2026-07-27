@@ -92,6 +92,27 @@ async def _run_housekeeping() -> None:
         if res.rowcount:
             logger.info("housekeeping_pruned", table="compliance_results", deleted=res.rowcount, keep_per_pair=keep)
 
+        # Report runs — unlike the other prunes, each row may reference a
+        # generated file on disk that must be removed too, not just the row.
+        days = settings["report_runs_retention_days"]
+        stale_paths = (await db.execute(text(
+            "SELECT file_path FROM report_runs "
+            f"WHERE started_at < now() - interval '{days} days' AND file_path IS NOT NULL"
+        ))).scalars().all()
+        for path in stale_paths:
+            try:
+                import os
+                os.remove(path)
+            except OSError:
+                pass  # already gone, or never written (failed run) — fine either way
+        res = await db.execute(text(
+            "DELETE FROM report_runs "
+            f"WHERE started_at < now() - interval '{days} days'"
+        ))
+        if res.rowcount:
+            logger.info("housekeeping_pruned", table="report_runs", deleted=res.rowcount,
+                       files_removed=len(stale_paths), retention_days=days)
+
         await db.commit()
 
 

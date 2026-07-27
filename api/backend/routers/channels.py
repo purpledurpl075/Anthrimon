@@ -4,7 +4,7 @@ import uuid
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -45,6 +45,7 @@ async def list_channels(
              status_code=status.HTTP_201_CREATED)
 async def create_channel(
     body: NotificationChannelCreate,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin")),
     db: AsyncSession = Depends(get_db),
 ) -> NotificationChannelRead:
@@ -54,6 +55,15 @@ async def create_channel(
 
     channel = NotificationChannel(tenant_id=current_user.tenant_id, **body.model_dump())
     db.add(channel)
+    await db.flush()
+    # config (webhook URLs, PagerDuty keys, etc.) carries secrets — never put
+    # its contents in the audit trail, just note that config was supplied.
+    from ..audit import audit as _audit
+    await _audit(db, action="create", resource_type="notification_channel",
+                 resource_id=channel.id,
+                 new_value={"name": channel.name, "type": channel.type,
+                            "is_enabled": channel.is_enabled, "has_config": bool(channel.config)},
+                 user=current_user, request=request)
     await db.commit()
     await db.refresh(channel)
     logger.info("notification_channel_created", channel_id=str(channel.id), type=channel.type)
@@ -73,12 +83,21 @@ async def get_channel(
 async def update_channel(
     channel_id: uuid.UUID,
     body: NotificationChannelUpdate,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin")),
     db: AsyncSession = Depends(get_db),
 ) -> NotificationChannelRead:
     channel = await _get(channel_id, current_user.tenant_id, db)
-    for field, value in body.model_dump(exclude_none=True).items():
+    before = {"name": channel.name, "is_enabled": channel.is_enabled}
+    updates = body.model_dump(exclude_none=True)
+    for field, value in updates.items():
         setattr(channel, field, value)
+    from ..audit import audit as _audit
+    await _audit(db, action="update", resource_type="notification_channel",
+                 resource_id=channel.id, old_value=before,
+                 new_value={"name": channel.name, "is_enabled": channel.is_enabled,
+                            "config_changed": "config" in updates},
+                 user=current_user, request=request)
     await db.commit()
     await db.refresh(channel)
     return NotificationChannelRead.model_validate(channel)
@@ -88,10 +107,16 @@ async def update_channel(
                response_model=None)
 async def delete_channel(
     channel_id: uuid.UUID,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     channel = await _get(channel_id, current_user.tenant_id, db)
+    from ..audit import audit as _audit
+    await _audit(db, action="delete", resource_type="notification_channel",
+                 resource_id=channel.id,
+                 old_value={"name": channel.name, "type": channel.type},
+                 user=current_user, request=request)
     await db.delete(channel)
     await db.commit()
     logger.info("notification_channel_deleted", channel_id=str(channel_id))

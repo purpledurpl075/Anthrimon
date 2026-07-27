@@ -12,7 +12,7 @@ from pydantic import BaseModel
 from sqlalchemy import func, select, desc, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..configmgmt.collector import collect_device, _deploy_ssh, _vendor_key
+from ..configmgmt.collector import collect_device, _deploy_ssh, _vendor_key, run_operational_ssh
 from ..configmgmt.compliance import run_compliance_for_device, evaluate_policy
 from ..configmgmt.golden_config import evaluate_golden_config
 from ..configmgmt import proxy as _proxy
@@ -649,6 +649,10 @@ class DeployRequest(BaseModel):
     save:     bool = True      # write memory / commit after deploy
 
 
+class OperationalRequest(BaseModel):
+    commands: list[str]        # read-only "show ..." commands to run
+
+
 class MultiDeployRequest(BaseModel):
     commands:        list[str]
     device_selector: Optional[dict] = None   # None = all tenant devices
@@ -926,6 +930,83 @@ async def deploy_config(
     }
 
 
+@router.post("/operational/{device_id}", summary="Run read-only operational commands on a Junos device")
+async def operational_command(
+    device_id:    str,
+    body:         OperationalRequest,
+    principal:    Principal     = Depends(get_current_principal),
+    db:           AsyncSession  = Depends(get_db),
+) -> dict:
+    """Run "show ..." style read-only commands — separate from /deploy since
+    these don't change device state: no lock/commit, no audit config_push,
+    no post-run backup trigger. Junos-only for now (see DeployPanel's sibling
+    OperationalPanel, only rendered for vendor == "juniper")."""
+    import json as _json
+    from .. import crypto
+    from ..models.credential import Credential, DeviceCredential
+
+    dev = await _assert_device(device_id, principal, db, min_role="readonly")
+
+    commands = [c for c in body.commands if c.strip()]
+    if not commands:
+        raise HTTPException(status_code=400, detail="No commands provided")
+    if len(commands) > 50:
+        raise HTTPException(status_code=400, detail="Too many commands (max 50)")
+
+    vendor = _vendor_key(dev)
+    if vendor != "juniper":
+        raise HTTPException(status_code=400, detail="Operational commands are currently only supported for Juniper devices")
+
+    cred_row = (await db.execute(
+        select(DeviceCredential, Credential)
+        .join(Credential, Credential.id == DeviceCredential.credential_id)
+        .where(DeviceCredential.device_id == device_id, Credential.type == "ssh")
+        .order_by(DeviceCredential.priority)
+    )).first()
+    if cred_row is None:
+        raise HTTPException(status_code=400, detail="No SSH credential assigned to this device")
+
+    _, cred = cred_row
+    cred_data = cred.data if isinstance(cred.data, dict) else _json.loads(cred.data)
+    if cred_data.get("password") and crypto.is_configured():
+        try:
+            cred_data["password"] = crypto.decrypt(cred_data["password"])
+        except Exception:
+            pass
+
+    collector = None
+    if dev.collector_id is not None:
+        collector = (await db.execute(
+            select(RemoteCollector).where(RemoteCollector.id == dev.collector_id)
+        )).scalar_one_or_none()
+
+    netconf_enabled = (await db.execute(
+        select(DeviceApiMethod.device_id).where(
+            DeviceApiMethod.device_id == dev.id,
+            DeviceApiMethod.method == "junos_netconf",
+            DeviceApiMethod.enabled == True,  # noqa: E712
+            DeviceApiMethod.reachable == True,  # noqa: E712
+        )
+    )).scalar_one_or_none() is not None
+
+    try:
+        output = await _run_operational_to_device(dev, cred_data, commands, collector,
+                                                   netconf_enabled=netconf_enabled)
+    except Exception as exc:
+        logger.error("config_operational_failed", device=dev.hostname, error=str(exc))
+        raise HTTPException(status_code=502, detail=f"Command failed: {exc}")
+
+    logger.info("config_operational_run", device=dev.hostname, commands=len(commands),
+               via="collector" if dev.collector_id else "hub")
+
+    return {
+        "device_id": device_id,
+        "hostname":  dev.display_name,
+        "commands":  len(commands),
+        "output":    output,
+    }
+
+
 # ── Rollback to a previous backup (device-pulls-from-HTTP) ────────────────────
 
 class RollbackRequest(BaseModel):
@@ -1074,6 +1155,18 @@ def _deploy_steps(vendor: str, commands: list[str], save: bool) -> list[dict]:
     return steps
 
 
+def _operational_steps(commands: list[str]) -> list[dict]:
+    """Read-only Junos operational-mode send/expect steps for the collector
+    executor — no configure/commit, just the same root-shell-vs-CLI landing
+    check _deploy_steps' juniper branch uses, then each show command
+    directly at the operational prompt."""
+    s = _proxy.step
+    return [
+        s("", delay=2.0, expect=r"(root@|%\s*$|\$\s*$)", response="cli"),
+        *[s(c, delay=3.0, min_wait=1.0) for c in commands if c.strip()],
+    ]
+
+
 async def _deploy_to_device(dev, vendor, cred_data, commands, save, collector,
                              netconf_enabled: bool = False) -> str:
     """Run a config deploy either hub-direct or via the owning collector.
@@ -1086,6 +1179,14 @@ async def _deploy_to_device(dev, vendor, cred_data, commands, save, collector,
     RPCs, no screen-scraping) instead of the SSH-CLI path — see
     configmgmt/netconf.py for why this covers deploy only, not rollback.
     """
+    if vendor == "juniper":
+        from ..configmgmt.netconf import validate_config_commands
+        problems = validate_config_commands(commands)
+        if problems:
+            raise RuntimeError(
+                "Junos deploy rejected — not valid configuration statements:\n" + "\n".join(problems)
+            )
+
     if vendor == "juniper" and netconf_enabled:
         from ..configmgmt import netconf as _netconf
         username = cred_data.get("username", "")
@@ -1137,6 +1238,75 @@ async def _deploy_to_device(dev, vendor, cred_data, commands, save, collector,
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None, _deploy_ssh, dev.mgmt_ip_str, 22, vendor, cred_data, commands, save)
+
+
+async def _run_operational_to_device(dev, cred_data, commands, collector,
+                                     netconf_enabled: bool = False) -> str:
+    """Run read-only Junos operational ("show ...") commands, either
+    hub-direct or via the owning collector — same collector/hub-direct and
+    NETCONF/SSH-CLI branching shape as _deploy_to_device, but no lock/
+    commit/confirm dance since nothing is being changed. Junos-only; callers
+    must already have checked vendor == "juniper"."""
+    from ..configmgmt.netconf import classify_command
+
+    config_lines = [
+        f'Line {i}: "{c.strip()}" looks like a configuration statement '
+        f'(starts with "{c.strip().split(None, 1)[0]}"), not a read-only '
+        f"command. Use the Deploy tab for configuration changes."
+        for i, c in enumerate(commands, start=1)
+        if c.strip() and classify_command(c) == "config"
+    ]
+    if config_lines:
+        raise RuntimeError(
+            "Operational command(s) rejected — looks like configuration, not read-only commands:\n"
+            + "\n".join(config_lines)
+        )
+
+    username = cred_data.get("username", "")
+    password = cred_data.get("password", "")
+
+    if netconf_enabled:
+        from ..configmgmt import netconf as _netconf
+        if dev.collector_id is not None:
+            if collector is None or not collector.wg_ip or not collector.api_key_hash:
+                raise RuntimeError("device's collector is offline or has no WireGuard IP")
+            output, ok = await _netconf.run_operational_via_collector(
+                wg_ip=str(collector.wg_ip), api_key_hash=collector.api_key_hash,
+                device_ip=dev.mgmt_ip_str, username=username, password=password,
+                commands=commands,
+            )
+        else:
+            loop = asyncio.get_running_loop()
+            output, ok = await loop.run_in_executor(
+                None, _netconf.run_operational_direct_sync, dev.mgmt_ip_str, username, password, commands)
+        if not ok:
+            raise RuntimeError(f"Junos NETCONF operational command failed:\n{output[:800]}")
+        return output
+
+    if dev.collector_id is not None:
+        if collector is None or not collector.wg_ip or not collector.api_key_hash:
+            raise RuntimeError("device's collector is offline or has no WireGuard IP")
+        payload = {
+            "operation":          "operational",
+            "device_ip":          dev.mgmt_ip_str,
+            "ssh_port":           22,
+            "vendor":             "juniper",
+            "username":           username,
+            "password":           password,
+            "enable_secret":      "",
+            "enter_enable":       False,
+            "serve_config":       "",
+            "expected_source_ip": "",
+            "steps":              _operational_steps(commands),
+            "final_read_command": "",
+        }
+        data = await _proxy.config_exec(
+            wg_ip=str(collector.wg_ip), api_key_hash=collector.api_key_hash, payload=payload)
+        return data.get("output", "")
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, run_operational_ssh, dev.mgmt_ip_str, 22, cred_data, commands)
 
 
 @router.post("/rollback/{device_id}",

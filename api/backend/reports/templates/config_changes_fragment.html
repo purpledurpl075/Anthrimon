@@ -1,0 +1,28 @@
+<table>
+  <thead>
+    <tr>
+      <th>Device</th>
+      <th>Collected</th>
+      <th class="num">+Lines</th>
+      <th class="num">-Lines</th>
+      <th>Changed By</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for c in data.changes %}
+    <tr>
+      <td>{{ c.hostname }}</td>
+      <td>{{ c.collected_at[:16] | replace('T', ' ') }}</td>
+      <td class="num">{{ c.lines_added }}</td>
+      <td class="num">{{ c.lines_removed }}</td>
+      <td>{{ c.changed_by }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted">{{ data.changes|length }} config change{{ 's' if data.changes|length != 1 }} from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}.</p>
+{% if comparison %}
+<h3>vs. previous period</h3>
+<p>Change count: {{ '%+d'|format(comparison.deltas.change_count_delta) }}
+  {% if comparison.deltas.change_count_delta_pct is not none %}({{ '%+.1f%%'|format(comparison.deltas.change_count_delta_pct) }}){% endif %}</p>
+{% endif %}

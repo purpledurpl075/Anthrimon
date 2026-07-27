@@ -18,6 +18,30 @@
     "description": "How to restart the API, collectors, and supporting services"
   },
   {
+    "slug": "licensing",
+    "title": "Licensing",
+    "category": "Administration",
+    "description": "How the free/paid module system works, applying a license, node-locking"
+  },
+  {
+    "slug": "multi-tenancy",
+    "title": "Multi-Tenancy and Sites",
+    "category": "Administration",
+    "description": "Tenants, cross-tenant switching, site-scoped roles, and Sites"
+  },
+  {
+    "slug": "two-factor-auth",
+    "title": "Two-Factor Authentication (TOTP)",
+    "category": "Administration",
+    "description": "Enable 2FA, backup codes, and disabling it"
+  },
+  {
+    "slug": "backup-restore",
+    "title": "Backup and Restore",
+    "category": "Administration",
+    "description": "Full-platform backup/restore covering PostgreSQL, ClickHouse, and config snapshots"
+  },
+  {
     "slug": "device-onboarding",
     "title": "Device Onboarding Workflow",
     "category": "Configuration",
@@ -82,6 +106,12 @@
     "title": "BGP Monitoring",
     "category": "Configuration",
     "description": "Sessions, prefix counts, baselines, and BGP alert rules"
+  },
+  {
+    "slug": "advanced-reports",
+    "title": "Advanced Reports",
+    "category": "Configuration",
+    "description": "Scheduled and on-demand branded PDF/CSV reports, comparisons, and bundles"
   },
   {
     "slug": "snmp-cisco-ios",

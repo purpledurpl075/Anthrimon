@@ -1,0 +1,43 @@
+<table>
+  <thead>
+    <tr>
+      <th>Device</th>
+      <th class="num">In Errors</th>
+      <th class="num">Out Errors</th>
+      <th class="num">In Discards</th>
+      <th class="num">Out Discards</th>
+      <th class="num">Flaps</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in data.devices %}
+    <tr>
+      <td>{{ d.hostname }}</td>
+      <td class="num">{{ d.in_errors }}</td>
+      <td class="num">{{ d.out_errors }}</td>
+      <td class="num">{{ d.in_discards }}</td>
+      <td class="num">{{ d.out_discards }}</td>
+      <td class="num">{{ d.flap_count }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if not data.devices %}
+<p class="muted">No interface errors, discards, or flaps from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}.</p>
+{% else %}
+<p class="muted">{{ data.devices|length }} device{{ 's' if data.devices|length != 1 }} with activity from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}. Devices with a clean window are omitted.</p>
+{% endif %}
+{% if comparison %}
+<h3>vs. previous period</h3>
+<table>
+  <thead><tr><th>Device</th><th class="num">Errors+Discards+Flaps Δ</th></tr></thead>
+  <tbody>
+    {% for d in comparison.deltas.devices %}
+    <tr>
+      <td>{{ d.hostname }}</td>
+      <td class="num">{{ '%+d'|format(d.total_delta) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}

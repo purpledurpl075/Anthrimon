@@ -4,7 +4,7 @@ import uuid
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -191,11 +191,20 @@ async def get_commands(
 async def configure(
     device_id:    str,
     method:       str,
+    request:      Request,
     principal:    Principal    = Depends(get_current_principal),
     db:           AsyncSession = Depends(get_db),
 ) -> dict:
-    await _get_device(device_id, principal, db, "operator")
-    return await configure_method(device_id, method)
+    dev = await _get_device(device_id, principal, db, "operator")
+    result = await configure_method(device_id, method)
+    from ..audit import audit as _audit
+    await _audit(db, action="config_push", resource_type="device",
+                 resource_id=dev.id, tenant_id=principal.active_tenant_id,
+                 new_value={"method": method, "action": "api_auto_configure",
+                            "status": result.get("status") if isinstance(result, dict) else None},
+                 user=principal.user, request=request)
+    await db.commit()
+    return result
 
 
 @router.post("/probe-all", summary="Probe all non-SNMP methods for tenant devices")

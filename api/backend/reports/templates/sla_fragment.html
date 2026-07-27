@@ -1,0 +1,39 @@
+<table>
+  <thead>
+    <tr>
+      <th>Site</th>
+      <th>Device</th>
+      <th class="num">Downtime</th>
+      <th class="num">Uptime</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in data.devices %}
+    <tr>
+      <td>{{ d.site }}</td>
+      <td>{{ d.hostname }}</td>
+      <td class="num">{{ d.downtime_seconds | fmt_duration }}</td>
+      <td class="num">
+        <span class="badge {{ 'badge-good' if d.uptime_pct >= 99.9 else 'badge-warn' if d.uptime_pct >= 99 else 'badge-bad' }}">
+          {{ '%.3f'|format(d.uptime_pct) }}%
+        </span>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted">SLA computed from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}, from device-down alert history. {{ data.devices|length }} device{{ 's' if data.devices|length != 1 }}.</p>
+{% if comparison %}
+<h3>vs. previous period</h3>
+<table>
+  <thead><tr><th>Device</th><th class="num">Uptime Δ (pts)</th></tr></thead>
+  <tbody>
+    {% for d in comparison.deltas.devices %}
+    <tr>
+      <td>{{ d.hostname }}</td>
+      <td class="num">{{ '%+.3f'|format(d.uptime_pct_delta) if d.uptime_pct_delta is not none else '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}

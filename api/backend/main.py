@@ -37,6 +37,7 @@ from .configmgmt.rest_state import start_rest_state_collector
 from .configmgmt.api_orchestrator import start_api_probe_loop
 from .configmgmt.eapi_collector import start_eapi_isis_collector
 from .collectors.monitor import start_collector_monitor
+from .reports.scheduler import start_report_scheduler
 from .housekeeping import start_housekeeping
 from .routers import (admin_router, platform_router, platform_health_router, alerts_router, api_methods_router, audit_router, auth_router,
                       channels_router, bgp_router, clients_router, collectors_router, config_router,
@@ -133,7 +134,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     probe_task       = start_api_probe_loop(interval_s=300)
     eapi_isis_task   = start_eapi_isis_collector(interval_s=60)
     housekeeping_task = start_housekeeping()
+    report_task      = start_report_scheduler()
     yield
+    report_task.cancel()
     housekeeping_task.cancel()
     eapi_isis_task.cancel()
     probe_task.cancel()

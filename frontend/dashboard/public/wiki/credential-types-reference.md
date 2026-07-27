@@ -85,7 +85,7 @@ NETCONF over SSH.
 | Username | NETCONF username |
 | Password | NETCONF password |
 
-Used for: NETCONF-capable devices (future use).
+Used for: NETCONF-capable devices (future use). **Note:** Juniper's current NETCONF support (config backup/compliance/deploy/operational commands) does not use this credential type yet — it authenticates with the device's regular `ssh` credential instead.
 
 ---
 

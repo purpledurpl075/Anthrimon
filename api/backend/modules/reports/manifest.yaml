@@ -1,0 +1,7 @@
+name: reports
+version: 1.0.0
+# Advanced Reports — scheduled, branded PDF/CSV reports for capacity, SLA, and
+# inventory. Matches frontend/dashboard/src/features.ts's PAID_FEATURES
+# key: 'reports'.
+license_key: reports
+router: backend.modules.reports.router:router

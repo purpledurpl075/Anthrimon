@@ -1831,6 +1831,7 @@ interface DataStats {
     bgp_session_events:    { rows: number; size: string; retention_days: number }
     notification_send_log: { rows: number; size: string; retention_days: number }
     trap_events:           { rows: number; size: string; retention_days: number }
+    report_runs:           { rows: number; size: string; retention_days: number }
     config_backups_keep_per_device: number
     compliance_results_keep_per_pair: number
   }
@@ -1927,6 +1928,7 @@ function HousekeepingCard({ stats, onSave, saving }: {
     bgp_session_events_days: number
     notification_send_log_days: number
     trap_events_days: number
+    report_runs_retention_days: number
     config_backups_keep_per_device: number
     compliance_results_keep_per_pair: number
   }) => void
@@ -1937,6 +1939,7 @@ function HousekeepingCard({ stats, onSave, saving }: {
     bgp_session_events_days:    stats.bgp_session_events.retention_days,
     notification_send_log_days: stats.notification_send_log.retention_days,
     trap_events_days:           stats.trap_events.retention_days,
+    report_runs_retention_days: stats.report_runs.retention_days,
     config_backups_keep_per_device:   stats.config_backups_keep_per_device,
     compliance_results_keep_per_pair: stats.compliance_results_keep_per_pair,
   })
@@ -1980,6 +1983,10 @@ function HousekeepingCard({ stats, onSave, saving }: {
       <SettingRow label="Trap events"
         description={`${fmtNum(stats.trap_events.rows)} rows · ${stats.trap_events.size}`}>
         <div className="flex items-center gap-2 justify-end">{num('trap_events_days')}<span className="text-sm text-slate-500">days</span></div>
+      </SettingRow>
+      <SettingRow label="Saved reports"
+        description={`${fmtNum(stats.report_runs.rows)} rows · ${stats.report_runs.size} — generated PDF/CSV files pruned along with their history`}>
+        <div className="flex items-center gap-2 justify-end">{num('report_runs_retention_days')}<span className="text-sm text-slate-500">days</span></div>
       </SettingRow>
       <SettingRow label="Config backups"
         description="Keep this many most-recent backups per device">

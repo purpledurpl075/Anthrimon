@@ -9,8 +9,8 @@ DIST_DIR="${REPO_DIR}/frontend/dashboard/dist"
 API_SERVICE="/etc/systemd/system/anthrimon-api.service"
 NGINX_CONF="/etc/nginx/sites-available/anthrimon"
 
-echo "==> Installing nginx..."
-apt-get install -y nginx
+echo "==> Installing nginx (via nginx-ee)..."
+bash "${SCRIPT_DIR}/install-nginx-ee.sh"
 
 echo "==> Writing nginx site config..."
 cat > "$NGINX_CONF" << 'NGINX'

@@ -1,0 +1,38 @@
+<table>
+  <thead>
+    <tr>
+      <th>Site</th>
+      <th>Device</th>
+      <th class="num">Avg CPU</th>
+      <th class="num">Avg inbound</th>
+      <th class="num">Peak inbound</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in data.devices %}
+    <tr>
+      <td>{{ d.site }}</td>
+      <td>{{ d.hostname }}</td>
+      <td class="num">{{ '%.1f'|format(d.avg_cpu_pct) + '%' if d.avg_cpu_pct is not none else '—' }}</td>
+      <td class="num">{{ d.avg_in_bps | fmt_bps }}</td>
+      <td class="num">{{ d.peak_in_bps | fmt_bps }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted">Utilisation aggregated from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}. {{ data.devices|length }} device{{ 's' if data.devices|length != 1 }}.</p>
+{% if comparison %}
+<h3>vs. previous period</h3>
+<table>
+  <thead><tr><th>Device</th><th class="num">Avg CPU Δ</th><th class="num">Avg Inbound Δ</th></tr></thead>
+  <tbody>
+    {% for d in comparison.deltas.devices %}
+    <tr>
+      <td>{{ d.hostname }}</td>
+      <td class="num">{{ '%+.1f%%'|format(d.avg_cpu_pct_delta_pct) if d.avg_cpu_pct_delta_pct is not none else '—' }}</td>
+      <td class="num">{{ '%+.1f%%'|format(d.avg_in_bps_delta_pct) if d.avg_in_bps_delta_pct is not none else '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}

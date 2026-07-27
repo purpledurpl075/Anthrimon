@@ -1,0 +1,49 @@
+<h3>Severity Breakdown</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Severity</th>
+      <th class="num">Count</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in data.by_severity %}
+    <tr>
+      <td>
+        <span class="badge {{ 'badge-bad' if s.severity <= 3 else 'badge-good' }}">
+          {{ s.severity_name }}
+        </span>
+      </td>
+      <td class="num">{{ s.count }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if not data.by_severity %}
+<p class="muted">No syslog activity from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}.</p>
+{% endif %}
+
+<h3>Matched Security Rules</h3>
+<table>
+  <thead>
+    <tr>
+      <th>Rule</th>
+      <th>Pattern</th>
+      <th class="num">Match Count</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in data.matched_rules %}
+    <tr>
+      <td>{{ r.rule_name }}</td>
+      <td class="mono">{{ r.pattern }}</td>
+      <td class="num">{{ r.match_count }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if not data.matched_rules %}
+<p class="muted">No syslog_match alert rules configured, or none matched from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}.</p>
+{% else %}
+<p class="muted">{{ data.matched_rules|length }} rule{{ 's' if data.matched_rules|length != 1 }} evaluated from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}.</p>
+{% endif %}

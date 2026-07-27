@@ -5,7 +5,7 @@ from datetime import datetime, timezone
 from typing import Optional  # noqa: F401 — used in _next_fire return type
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -64,6 +64,7 @@ async def list_windows(
 @router.post("", response_model=MaintenanceWindowRead, status_code=status.HTTP_201_CREATED)
 async def create_window(
     body: MaintenanceWindowCreate,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin", "operator")),
     db: AsyncSession = Depends(get_db),
 ) -> MaintenanceWindowRead:
@@ -73,6 +74,13 @@ async def create_window(
         **body.model_dump(),
     )
     db.add(w)
+    await db.flush()
+    from ..audit import audit as _audit
+    await _audit(db, action="create", resource_type="maintenance_window",
+                 resource_id=w.id,
+                 new_value={"name": w.name, "starts_at": w.starts_at.isoformat(),
+                            "ends_at": w.ends_at.isoformat(), "is_recurring": w.is_recurring},
+                 user=current_user, request=request)
     await db.commit()
     await db.refresh(w)
     logger.info("maintenance_window_created", id=str(w.id), name=w.name)
@@ -92,12 +100,19 @@ async def get_window(
 async def update_window(
     window_id: uuid.UUID,
     body: MaintenanceWindowUpdate,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin", "operator")),
     db: AsyncSession = Depends(get_db),
 ) -> MaintenanceWindowRead:
     w = await _get(window_id, current_user.tenant_id, db)
+    before = {"name": w.name, "starts_at": w.starts_at.isoformat(), "ends_at": w.ends_at.isoformat()}
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(w, field, value)
+    from ..audit import audit as _audit
+    await _audit(db, action="update", resource_type="maintenance_window",
+                 resource_id=w.id, old_value=before,
+                 new_value={"name": w.name, "starts_at": w.starts_at.isoformat(), "ends_at": w.ends_at.isoformat()},
+                 user=current_user, request=request)
     await db.commit()
     await db.refresh(w)
     return _to_read(w)
@@ -106,10 +121,15 @@ async def update_window(
 @router.delete("/{window_id}", status_code=status.HTTP_204_NO_CONTENT, response_model=None)
 async def delete_window(
     window_id: uuid.UUID,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin", "operator")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     w = await _get(window_id, current_user.tenant_id, db)
+    from ..audit import audit as _audit
+    await _audit(db, action="delete", resource_type="maintenance_window",
+                 resource_id=w.id, old_value={"name": w.name},
+                 user=current_user, request=request)
     await db.delete(w)
     await db.commit()
     logger.info("maintenance_window_deleted", id=str(window_id))

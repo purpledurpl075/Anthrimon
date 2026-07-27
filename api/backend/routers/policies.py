@@ -4,7 +4,7 @@ import uuid
 from typing import Optional
 
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -158,11 +158,17 @@ async def list_policies(
              summary="Create a custom alert policy")
 async def create_policy(
     body: AlertPolicyCreate,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin")),
     db: AsyncSession = Depends(get_db),
 ) -> AlertPolicyRead:
     policy = AlertPolicy(tenant_id=current_user.tenant_id, **body.model_dump(exclude_none=True))
     db.add(policy)
+    await db.flush()
+    from ..audit import audit as _audit
+    await _audit(db, action="create", resource_type="alert_policy",
+                 resource_id=policy.id,
+                 new_value={"name": policy.name}, user=current_user, request=request)
     await db.commit()
     await db.refresh(policy)
     return AlertPolicyRead.model_validate(policy)
@@ -172,14 +178,21 @@ async def create_policy(
 async def update_policy(
     policy_id: uuid.UUID,
     body: AlertPolicyUpdate,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin")),
     db: AsyncSession = Depends(get_db),
 ) -> AlertPolicyRead:
     policy = await _get(policy_id, current_user.tenant_id, db)
     if policy.is_builtin:
         raise HTTPException(status_code=400, detail="Built-in policies cannot be edited — apply them to create editable rules")
+    before = {"name": policy.name, "is_enabled": policy.is_enabled}
     for field, value in body.model_dump(exclude_none=True).items():
         setattr(policy, field, value)
+    from ..audit import audit as _audit
+    await _audit(db, action="update", resource_type="alert_policy",
+                 resource_id=policy.id, old_value=before,
+                 new_value={"name": policy.name, "is_enabled": policy.is_enabled},
+                 user=current_user, request=request)
     await db.commit()
     await db.refresh(policy)
     return AlertPolicyRead.model_validate(policy)
@@ -189,12 +202,17 @@ async def update_policy(
                summary="Delete a custom policy")
 async def delete_policy(
     policy_id: uuid.UUID,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
     policy = await _get(policy_id, current_user.tenant_id, db)
     if policy.is_builtin:
         raise HTTPException(status_code=400, detail="Built-in policies cannot be deleted")
+    from ..audit import audit as _audit
+    await _audit(db, action="delete", resource_type="alert_policy",
+                 resource_id=policy.id, old_value={"name": policy.name},
+                 user=current_user, request=request)
     await db.delete(policy)
     await db.commit()
 
@@ -204,6 +222,7 @@ async def delete_policy(
 async def apply_policy(
     policy_id: uuid.UUID,
     body: ApplyPolicyRequest,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin")),
     db: AsyncSession = Depends(get_db),
 ) -> list[AlertRuleRead]:
@@ -236,6 +255,11 @@ async def apply_policy(
         db.add(rule)
         created.append(rule)
 
+    from ..audit import audit as _audit
+    await _audit(db, action="create", resource_type="alert_policy",
+                 resource_id=policy.id,
+                 new_value={"action": "apply", "policy": policy.name, "rules_created": len(created)},
+                 user=current_user, request=request)
     await db.commit()
     for r in created:
         await db.refresh(r)

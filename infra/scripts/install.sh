@@ -4,7 +4,7 @@
 # Usage: sudo bash infra/scripts/install.sh
 #
 # What this script does:
-#   1.  Installs system packages (nginx, wireguard-tools, build tools, etc.)
+#   1.  Installs system packages (wireguard-tools, build tools, etc.)
 #   2.  Installs Go 1.26.4
 #   3.  Installs Node.js 20.x (via NodeSource)
 #   4.  Installs Python virtualenv + API requirements
@@ -17,14 +17,15 @@
 #   11. Builds the syslog collector (Go) + installs systemd unit
 #   12. Builds the hub SNMP trap receiver + installs systemd unit
 #   13. Builds the remote collector + trap-handler binaries (no service — needs token first)
-#   14. Builds the frontend production bundle (npm)
-#   14. Generates TLS certificate (self-signed CA + server cert)
-#   15. Configures nginx with HTTPS
-#   16. Sets up WireGuard hub interface (wg0) + sudoers grant for wg commands
-#   16b. Installs anthrimon-backup / anthrimon-restore CLI + sudoers grant for tar
-#   16c. Opens firewall ports 5050-5054 for config rollback (device-pulls-from-HTTP)
-#   17. Installs the API systemd unit + seeds platform settings
-#   18. Starts everything and prints a summary
+#   13. Builds the frontend production bundle (npm)
+#   14. Builds/installs the latest nginx from source via nginx-ee
+#   15. Generates TLS certificate (self-signed CA + server cert)
+#   16. Configures nginx with HTTPS
+#   17. Sets up WireGuard hub interface (wg0) + sudoers grant for wg commands
+#   17b. Installs anthrimon-backup / anthrimon-restore CLI + sudoers grant for tar
+#   17c. Opens firewall ports 5050-5054 for config rollback (device-pulls-from-HTTP)
+#   18. Installs the API systemd unit + seeds platform settings
+#   19. Starts everything and prints a summary
 
 set -euo pipefail
 
@@ -191,7 +192,6 @@ apt-get install -y -qq \
     git build-essential openssl zstd \
     python3 python3-pip python3-venv python3-dev \
     libpq-dev libssl-dev libffi-dev postgresql-client \
-    nginx \
     wireguard wireguard-tools \
     snmptrapd \
     net-tools iproute2 traceroute mtr iputils-ping \
@@ -887,7 +887,16 @@ info "Building production bundle..."
 sudo -u "${REAL_USER}" bash -c "cd '${FRONTEND_DIR}' && npm run build"
 ok "Frontend built to ${FRONTEND_DIR}/dist"
 
-# ── 14. TLS (self-signed CA + server certificate) ─────────────────────────────
+# ── 14. nginx (nginx-ee) ──────────────────────────────────────────────────────
+# Compiles/installs the latest nginx from source via VirtuBox's nginx-ee —
+# see scripts/install-nginx-ee.sh for the full rationale (minimal module
+# set, master-branch tracking, apt-nginx migration + hold). Must run before
+# TLS/site-config setup below, which needs a working nginx to test/reload.
+
+hdr "nginx (nginx-ee)"
+bash "${REPO_DIR}/scripts/install-nginx-ee.sh"
+
+# ── 15. TLS (self-signed CA + server certificate) ─────────────────────────────
 
 hdr "TLS certificates"
 
@@ -907,7 +916,7 @@ esac
 chmod 755 "${TLS_DIR}"
 chmod 644 "${TLS_DIR}/ca.crt"
 
-# ── 15. nginx ─────────────────────────────────────────────────────────────────
+# ── 16. nginx ─────────────────────────────────────────────────────────────────
 
 hdr "nginx"
 
@@ -921,7 +930,7 @@ chmod o+x "${REAL_HOME}" \
 nginx -t && systemctl reload nginx
 ok "nginx running with HTTPS"
 
-# ── 16. WireGuard hub (wg0) ───────────────────────────────────────────────────
+# ── 17. WireGuard hub (wg0) ───────────────────────────────────────────────────
 
 hdr "WireGuard hub"
 bash "${REPO_DIR}/scripts/setup-wireguard.sh"
@@ -935,7 +944,7 @@ chmod 440 "${SUDOERS_DST}"
 visudo -cf "${SUDOERS_DST}" && ok "sudoers rule written: ${SUDOERS_DST}" \
     || { rm -f "${SUDOERS_DST}"; warn "sudoers syntax check failed — skipping"; }
 
-# ── 16b. Backup tool (CLI + sudoers for tar) ─────────────────────────────────
+# ── 17b. Backup tool (CLI + sudoers for tar) ─────────────────────────────────
 
 hdr "Backup tool"
 
@@ -962,7 +971,7 @@ chmod 440 "${BACKUP_SUDOERS_DST}"
 visudo -cf "${BACKUP_SUDOERS_DST}" && ok "sudoers rule written: ${BACKUP_SUDOERS_DST}" \
     || { rm -f "${BACKUP_SUDOERS_DST}"; warn "sudoers syntax check failed — skipping"; }
 
-# ── 16b2. Storage retention (journald cap, VM/journald sudoers) ──────────────
+# ── 17b2. Storage retention (journald cap, VM/journald sudoers) ──────────────
 
 hdr "Storage retention"
 
@@ -996,7 +1005,7 @@ chmod 440 "${STORAGE_SUDOERS_DST}"
 visudo -cf "${STORAGE_SUDOERS_DST}" && ok "sudoers rule written: ${STORAGE_SUDOERS_DST}" \
     || { rm -f "${STORAGE_SUDOERS_DST}"; warn "sudoers syntax check failed — skipping"; }
 
-# ── 16c. Config rollback firewall (device-pulls-from-HTTP) ───────────────────
+# ── 17c. Config rollback firewall (device-pulls-from-HTTP) ───────────────────
 
 hdr "Config rollback firewall"
 
@@ -1042,7 +1051,7 @@ EOF
 chmod 644 "${ROLLBACK_ENV_DROPIN}"
 ok "rollback port range written to ${ROLLBACK_ENV_DROPIN}"
 
-# ── 17. API systemd unit ──────────────────────────────────────────────────────
+# ── 18. API systemd unit ──────────────────────────────────────────────────────
 
 hdr "Anthrimon API"
 

@@ -217,6 +217,40 @@ def _collect_ssh(host: str, port: int, vendor_key: str, cred_data: dict) -> str:
     return output.strip()
 
 
+def run_operational_ssh(host: str, port: int, cred_data: dict, commands: list[str]) -> str:
+    """Run read-only Junos operational ("show ...") commands via SSH/Netmiko
+    for a hub-managed device without NETCONF enabled (see
+    configmgmt/netconf.py's run_operational_* for the NETCONF path, preferred
+    when available). No config_mode entry, no commit — each command runs
+    directly at the operational prompt. Junos-only."""
+    from .hostkeys import pinned_connect_handler
+
+    conn_params = {
+        "device_type":         _NETMIKO_TYPE["juniper"],
+        "host":                host,
+        "port":                port,
+        "username":            cred_data.get("username", ""),
+        "password":            cred_data.get("password", ""),
+        "timeout":             30,
+        "conn_timeout":        15,
+        "auth_timeout":        20,
+        "banner_timeout":      20,
+        "fast_cli":            False,
+        "global_delay_factor": 1,
+    }
+
+    output_parts: list[str] = []
+    with pinned_connect_handler(**conn_params) as conn:
+        _ensure_junos_cli(conn)
+        for cmd in commands:
+            if not cmd.strip():
+                continue
+            out = conn.send_command(cmd.strip(), read_timeout=30)
+            output_parts.append(f"$ {cmd.strip()}\n{out}")
+
+    return "\n\n".join(output_parts).strip()
+
+
 def _ssh_exec(host: str, port: int, vendor_key: str, cred_data: dict, command: str) -> str:
     """Run a single exec-mode command via SSH and return output. Not config mode."""
     from .hostkeys import pinned_connect_handler

@@ -9,7 +9,7 @@ from typing import List, Optional
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -1278,6 +1278,7 @@ async def list_device_credentials(
 async def link_device_credential(
     device_id: uuid.UUID,
     body: _CredentialLinkBody,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin", "operator")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
@@ -1304,6 +1305,16 @@ async def link_device_credential(
         await db.rollback()
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Credential already linked to this device") from exc
 
+    # Audited after the fact, not before: audit()'s own flush would otherwise
+    # surface the unique-constraint conflict above through the wrong code path.
+    from ..audit import audit as _audit
+    await _audit(db, action="create", resource_type="device_credential",
+                 resource_id=device_id, tenant_id=current_user.tenant_id,
+                 new_value={"device_id": str(device_id), "credential_type": cred.type,
+                            "priority": body.priority},
+                 user=current_user, request=request)
+    await db.commit()
+
     # Keep device.snmp_version in sync with the highest-priority SNMP credential.
     if cred.type in ("snmp_v3", "snmp_v2c"):
         snmp_v = "v3" if cred.type == "snmp_v3" else "v2c"
@@ -1326,6 +1337,7 @@ async def link_device_credential(
 async def unlink_device_credential(
     device_id: uuid.UUID,
     credential_id: uuid.UUID,
+    request: Request,
     current_user: User = Depends(require_role("admin", "superadmin", "operator")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
@@ -1343,6 +1355,11 @@ async def unlink_device_credential(
     )).scalar_one_or_none()
     if link is None:
         raise HTTPException(status_code=404, detail="Credential not assigned to this device")
+    from ..audit import audit as _audit
+    await _audit(db, action="delete", resource_type="device_credential",
+                 resource_id=device_id, tenant_id=current_user.tenant_id,
+                 old_value={"device_id": str(device_id), "credential_type": cred.type if cred else None},
+                 user=current_user, request=request)
     await db.delete(link)
     await db.commit()
 

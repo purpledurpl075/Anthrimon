@@ -6,8 +6,8 @@ from typing import Optional
 
 import bcrypt as _bcrypt
 import structlog
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from pydantic import BaseModel, EmailStr
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -51,6 +51,10 @@ class PlatformGlobalSettingsRead(BaseModel):
     business_days:                  list[int]     = [0, 1, 2, 3, 4]
     abuseipdb_api_key:               str          = ""
     wg_public_endpoint:              str          = ""
+    # Advanced Reports branding — shown in generated PDF report headers/footers.
+    # Empty logo = Anthrimon's own default mark.
+    report_company_name:            str          = Field(default="", max_length=200)
+    report_logo_data_uri:           str          = Field(default="", max_length=500_000)
 
 
 class PlatformGlobalSettingsWrite(PlatformGlobalSettingsRead):
@@ -139,7 +143,8 @@ async def list_tenants(
 @router.post("/tenants", response_model=TenantRead, status_code=201, summary="Create a tenant")
 async def create_tenant(
     body: TenantCreate,
-    _: Principal = Depends(_PLATFORM_ADMIN),
+    request: Request,
+    principal: Principal = Depends(_PLATFORM_ADMIN),
     db: AsyncSession = Depends(get_db),
 ) -> TenantRead:
     existing = (await db.execute(
@@ -153,6 +158,12 @@ async def create_tenant(
         is_active=body.is_active,
     )
     db.add(tenant)
+    await db.flush()
+    from ..audit import audit as _audit
+    await _audit(db, action="create", resource_type="tenant",
+                 resource_id=tenant.id, tenant_id=tenant.id,
+                 new_value={"name": tenant.name, "slug": tenant.slug, "is_active": tenant.is_active},
+                 user=principal.user, request=request)
     await db.commit()
     await db.refresh(tenant)
     logger.info("tenant_created", tenant_id=str(tenant.id), slug=tenant.slug)
@@ -185,7 +196,8 @@ async def get_tenant(
 async def update_tenant(
     tenant_id: uuid.UUID,
     body: TenantUpdate,
-    _: Principal = Depends(_PLATFORM_ADMIN),
+    request: Request,
+    principal: Principal = Depends(_PLATFORM_ADMIN),
     db: AsyncSession = Depends(get_db),
 ) -> TenantRead:
     tenant = (await db.execute(
@@ -193,10 +205,17 @@ async def update_tenant(
     )).scalar_one_or_none()
     if tenant is None:
         raise HTTPException(status_code=404, detail="Tenant not found")
+    before = {"name": tenant.name, "is_active": tenant.is_active}
     if body.name is not None:
         tenant.name = body.name.strip()
     if body.is_active is not None:
         tenant.is_active = body.is_active
+    after = {"name": tenant.name, "is_active": tenant.is_active}
+    from ..audit import audit as _audit
+    await _audit(db, action="update", resource_type="tenant",
+                 resource_id=tenant.id, tenant_id=tenant.id,
+                 old_value=before, new_value=after,
+                 user=principal.user, request=request)
     await db.commit()
     await db.refresh(tenant)
     user_count = (await db.execute(
@@ -309,7 +328,8 @@ def _to_platform_user_read(user: User, tenant_name: str) -> PlatformUserRead:
 @router.post("/users", response_model=PlatformUserRead, status_code=201, summary="Create a user in any tenant")
 async def create_platform_user(
     body: PlatformUserCreate,
-    _: Principal = Depends(_PLATFORM_ADMIN),
+    request: Request,
+    principal: Principal = Depends(_PLATFORM_ADMIN),
     db: AsyncSession = Depends(get_db),
 ) -> PlatformUserRead:
     if not (await db.execute(select(Tenant).where(Tenant.id == body.tenant_id))).scalar_one_or_none():
@@ -337,6 +357,13 @@ async def create_platform_user(
         platform_role=body.platform_role if body.is_platform_admin else None,
     )
     db.add(user)
+    await db.flush()
+    from ..audit import audit as _audit
+    await _audit(db, action="create", resource_type="user",
+                 resource_id=user.id, tenant_id=user.tenant_id,
+                 new_value={"username": user.username, "email": user.email, "role": user.role,
+                            "is_platform_admin": user.is_platform_admin},
+                 user=principal.user, request=request)
     await db.commit()
     await db.refresh(user)
     tenant_name = (await db.execute(select(Tenant.name).where(Tenant.id == body.tenant_id))).scalar_one()
@@ -358,10 +385,13 @@ async def get_platform_user(
 async def update_platform_user(
     user_id: uuid.UUID,
     body: PlatformUserUpdate,
-    _: Principal = Depends(_PLATFORM_ADMIN),
+    request: Request,
+    principal: Principal = Depends(_PLATFORM_ADMIN),
     db: AsyncSession = Depends(get_db),
 ) -> PlatformUserRead:
     user, tenant_name = await _get_platform_user(user_id, db)
+    before = {"email": user.email, "role": user.role, "is_active": user.is_active,
+              "is_platform_admin": user.is_platform_admin, "platform_role": user.platform_role}
 
     if body.role is not None:
         if body.role not in _VALID_ROLES:
@@ -384,6 +414,13 @@ async def update_platform_user(
             raise HTTPException(status_code=422, detail=f"platform_role must be one of: {sorted(_VALID_PLATFORM_ROLES)}")
         user.platform_role = body.platform_role
 
+    after = {"email": user.email, "role": user.role, "is_active": user.is_active,
+             "is_platform_admin": user.is_platform_admin, "platform_role": user.platform_role}
+    from ..audit import audit as _audit
+    await _audit(db, action="update", resource_type="user",
+                 resource_id=user.id, tenant_id=user.tenant_id,
+                 old_value=before, new_value=after,
+                 user=principal.user, request=request)
     await db.commit()
     await db.refresh(user)
     logger.info("platform_user_updated", user_id=str(user_id))
@@ -393,12 +430,18 @@ async def update_platform_user(
 @router.delete("/users/{user_id}", status_code=204, response_model=None, summary="Delete a user")
 async def delete_platform_user(
     user_id: uuid.UUID,
+    request: Request,
     principal: Principal = Depends(_PLATFORM_ADMIN),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     if user_id == principal.user.id:
         raise HTTPException(status_code=403, detail="Cannot delete your own account")
     user, _ = await _get_platform_user(user_id, db)
+    from ..audit import audit as _audit
+    await _audit(db, action="delete", resource_type="user",
+                 resource_id=user.id, tenant_id=user.tenant_id,
+                 old_value={"username": user.username, "role": user.role, "tenant_id": str(user.tenant_id)},
+                 user=principal.user, request=request)
     await db.delete(user)
     await db.commit()
     logger.info("platform_user_deleted", user_id=str(user_id))
@@ -409,7 +452,8 @@ async def delete_platform_user(
 async def reset_platform_user_password(
     user_id: uuid.UUID,
     body: PlatformPasswordReset,
-    _: Principal = Depends(_PLATFORM_ADMIN),
+    request: Request,
+    principal: Principal = Depends(_PLATFORM_ADMIN),
     db: AsyncSession = Depends(get_db),
 ) -> Response:
     user, _ = await _get_platform_user(user_id, db)
@@ -417,6 +461,11 @@ async def reset_platform_user_password(
         raise HTTPException(status_code=422, detail="Password must be at least 8 characters")
     user.password_hash = _hash(body.new_password)
     user.token_generation += 1
+    from ..audit import audit as _audit
+    await _audit(db, action="update", resource_type="user",
+                 resource_id=user.id, tenant_id=user.tenant_id,
+                 new_value={"action": "password_reset", "username": user.username},
+                 user=principal.user, request=request)
     await db.commit()
     logger.info("platform_password_reset", user_id=str(user_id))
     return Response(status_code=204)
@@ -475,7 +524,8 @@ class TenantAccessWrite(BaseModel):
 async def set_user_tenant_access(
     user_id: uuid.UUID,
     body: list[TenantAccessWrite],
-    _: Principal = Depends(_PLATFORM_ADMIN),
+    request: Request,
+    principal: Principal = Depends(_PLATFORM_ADMIN),
     db: AsyncSession = Depends(get_db),
 ) -> list[TenantAccessEntry]:
     user, home_tenant_name = await _get_platform_user(user_id, db)
@@ -498,6 +548,11 @@ async def set_user_tenant_access(
     for entry in body:
         db.add(UserTenantAccess(user_id=user_id, tenant_id=entry.tenant_id, role=entry.role))
 
+    from ..audit import audit as _audit
+    await _audit(db, action="update", resource_type="user_tenant_access",
+                 resource_id=user_id, tenant_id=user.tenant_id,
+                 new_value={"grants": [{"tenant_id": str(e.tenant_id), "role": e.role} for e in body]},
+                 user=principal.user, request=request)
     await db.commit()
     logger.info("user_tenant_access_updated", user_id=str(user_id), grant_count=len(body))
 

@@ -1,0 +1,62 @@
+<table>
+  <thead>
+    <tr>
+      <th>Policy</th>
+      <th class="num">Pass</th>
+      <th class="num">Fail</th>
+      <th class="num">Error</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in data.summary %}
+    <tr>
+      <td>{{ s.policy }}</td>
+      <td class="num">{{ s.pass }}</td>
+      <td class="num">{{ s.fail }}</td>
+      <td class="num">{{ s.error }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<table>
+  <thead>
+    <tr>
+      <th>Policy</th>
+      <th>Device</th>
+      <th>Status</th>
+      <th class="num">Findings</th>
+      <th>Checked</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for r in data.results %}
+    <tr>
+      <td>{{ r.policy }}</td>
+      <td>{{ r.device }}</td>
+      <td>
+        <span class="badge {{ 'badge-good' if r.status == 'pass' else 'badge-bad' if r.status == 'fail' else 'badge-warn' }}">
+          {{ r.status }}
+        </span>
+      </td>
+      <td class="num">{{ r.finding_count }}</td>
+      <td>{{ r.checked_at[:16] | replace('T', ' ') }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted">Latest result per device+policy from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}. {{ data.results|length }} result{{ 's' if data.results|length != 1 }}.</p>
+{% if comparison %}
+<h3>vs. previous period</h3>
+<table>
+  <thead><tr><th>Policy</th><th class="num">Pass Δ</th><th class="num">Fail Δ</th></tr></thead>
+  <tbody>
+    {% for s in comparison.deltas.summary %}
+    <tr>
+      <td>{{ s.policy }}</td>
+      <td class="num">{{ '%+d'|format(s.pass_delta) }}</td>
+      <td class="num">{{ '%+d'|format(s.fail_delta) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block content %}
+{% for section in data.sections %}
+<h2>{{ section.title }}</h2>
+{% with data=section.data %}
+{% include section.type ~ "_fragment.html" %}
+{% endwith %}
+{% endfor %}
+{% if not data.sections %}
+<p class="muted">No report types selected for this bundle.</p>
+{% endif %}
+{% endblock %}

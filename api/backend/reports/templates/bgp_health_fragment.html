@@ -1,0 +1,48 @@
+<table>
+  <thead>
+    <tr>
+      <th>Device</th>
+      <th>Peer</th>
+      <th>ASN</th>
+      <th>State</th>
+      <th class="num">Prefixes Rx</th>
+      <th class="num">Prefixes Tx</th>
+      <th class="num">Flaps (all-time)</th>
+      <th class="num">Changes (window)</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in data.sessions %}
+    <tr>
+      <td>{{ s.hostname }}</td>
+      <td class="mono">{{ s.peer_ip }}</td>
+      <td>{{ s.peer_asn or '—' }}</td>
+      <td>
+        <span class="badge {{ 'badge-good' if s.session_state == 'established' else 'badge-bad' }}">
+          {{ s.session_state }}
+        </span>
+      </td>
+      <td class="num">{{ s.prefixes_received }}</td>
+      <td class="num">{{ s.prefixes_advertised }}</td>
+      <td class="num">{{ s.flap_count }}</td>
+      <td class="num">{{ s.state_changes_in_window }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted">{{ data.sessions|length }} BGP session{{ 's' if data.sessions|length != 1 }}. State changes counted from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}.</p>
+{% if comparison %}
+<h3>vs. previous period</h3>
+<table>
+  <thead><tr><th>Device</th><th>Peer</th><th class="num">State Changes Δ</th></tr></thead>
+  <tbody>
+    {% for s in comparison.deltas.sessions %}
+    <tr>
+      <td>{{ s.hostname }}</td>
+      <td class="mono">{{ s.peer_ip }}</td>
+      <td class="num">{{ '%+d'|format(s.state_changes_delta) }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}

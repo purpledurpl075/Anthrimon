@@ -17,9 +17,10 @@ from datetime import datetime, timezone
 
 import structlog
 from fastapi import APIRouter, Depends, File, HTTPException, Request, Response, UploadFile, status
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import get_settings
-from ..dependencies import get_current_principal, require_platform, Principal
+from ..dependencies import get_current_principal, get_db, require_platform, Principal
 from ..licensing import license_info, reload_license, verify_bytes
 from ..licensing.fingerprint import machine_fingerprint
 
@@ -62,6 +63,7 @@ async def upload_license(
     request: Request,
     file: UploadFile = File(...),
     principal: Principal = Depends(require_platform("platform_admin")),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     content_length = request.headers.get("content-length")
     if content_length and int(content_length) > _MAX_LICENSE_BYTES:
@@ -100,6 +102,12 @@ async def upload_license(
 
     logger.info("license_uploaded", lic_id=info.lic_id, modules=info.modules,
                 newly_mounted=newly)
+    from ..audit import audit as _audit
+    await _audit(db, action="update", resource_type="license",
+                 new_value={"lic_id": info.lic_id, "modules": info.modules,
+                            "expires_at": info.expires_at, "newly_mounted": newly},
+                 user=principal.user, request=request)
+    await db.commit()
     out = info.as_dict()
     out["machine_fingerprint"] = machine_fingerprint()
     out["newly_mounted_modules"] = newly
@@ -109,9 +117,12 @@ async def upload_license(
 @router.delete("/platform/license", status_code=status.HTTP_200_OK,
                summary="Remove the installed license (revert to free tier)")
 async def delete_license(
+    request: Request,
     principal: Principal = Depends(require_platform("platform_admin")),
+    db: AsyncSession = Depends(get_db),
 ) -> dict:
     path = get_settings().license_path
+    old_info = license_info()
     if os.path.exists(path):
         try:
             os.remove(path)
@@ -119,6 +130,11 @@ async def delete_license(
             raise HTTPException(status_code=500, detail=f"could not remove license: {exc}")
     info = reload_license()
     logger.info("license_removed")
+    from ..audit import audit as _audit
+    await _audit(db, action="delete", resource_type="license",
+                 old_value={"lic_id": old_info.lic_id, "modules": old_info.modules},
+                 user=principal.user, request=request)
+    await db.commit()
     out = info.as_dict()
     out["machine_fingerprint"] = machine_fingerprint()
     return out

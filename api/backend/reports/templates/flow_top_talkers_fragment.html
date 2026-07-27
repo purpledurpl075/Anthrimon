@@ -1,0 +1,28 @@
+<table>
+  <thead>
+    <tr>
+      <th>Source IP</th>
+      <th>Destination IP</th>
+      <th>Protocol</th>
+      <th class="num">Bytes</th>
+      <th class="num">Packets</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for t in data.talkers %}
+    <tr>
+      <td class="mono">{{ t.src_ip }}</td>
+      <td class="mono">{{ t.dst_ip }}</td>
+      <td>{{ t.protocol }}</td>
+      <td class="num">{{ t.bytes_total | fmt_bytes }}</td>
+      <td class="num">{{ t.packets_total }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted">Top {{ data.talkers|length }} flow{{ 's' if data.talkers|length != 1 }} by bytes from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}.</p>
+{% if comparison %}
+<h3>vs. previous period</h3>
+<p>Total bytes (top {{ data.talkers|length }}): {{ comparison.deltas.total_bytes_delta | fmt_bytes }}
+  {% if comparison.deltas.total_bytes_delta_pct is not none %}({{ '%+.1f%%'|format(comparison.deltas.total_bytes_delta_pct) }}){% endif %}</p>
+{% endif %}

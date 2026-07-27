@@ -776,8 +776,15 @@ def _build_test_email() -> tuple[str, str]:
     return subject, body
 
 
-def _send_smtp(smtp: dict, recipients: list[str], subject: str, body_plain: str, body_html: str = "") -> None:
-    """Blocking SMTP send — always call via run_in_executor."""
+def _send_smtp(
+    smtp: dict, recipients: list[str], subject: str, body_plain: str, body_html: str = "",
+    attachments: Optional[list[tuple[str, bytes, str]]] = None,
+) -> None:
+    """Blocking SMTP send — always call via run_in_executor.
+
+    attachments: list of (filename, content_bytes, mime_subtype) e.g.
+    ("report.pdf", b"...", "pdf").
+    """
     host      = smtp.get("host", "")
     port      = int(smtp.get("port", 587))
     user      = smtp.get("user", "")
@@ -785,7 +792,20 @@ def _send_smtp(smtp: dict, recipients: list[str], subject: str, body_plain: str,
     from_addr = smtp.get("from_addr", "") or smtp.get("user", "anthrimon@localhost")
     use_ssl   = bool(smtp.get("ssl", False))
 
-    if body_html:
+    if attachments:
+        from email.mime.application import MIMEApplication
+
+        msg = MIMEMultipart("mixed")
+        alt = MIMEMultipart("alternative")
+        alt.attach(MIMEText(body_plain, "plain"))
+        if body_html:
+            alt.attach(MIMEText(body_html, "html"))
+        msg.attach(alt)
+        for filename, content, subtype in attachments:
+            part = MIMEApplication(content, _subtype=subtype)
+            part.add_header("Content-Disposition", "attachment", filename=filename)
+            msg.attach(part)
+    elif body_html:
         msg = MIMEMultipart("alternative")
         msg.attach(MIMEText(body_plain, "plain"))
         msg.attach(MIMEText(body_html,  "html"))
@@ -810,3 +830,39 @@ def _send_smtp(smtp: dict, recipients: list[str], subject: str, body_plain: str,
             if user:
                 srv.login(user, password)
             srv.sendmail(from_addr, recipients, msg.as_string())
+
+
+async def send_report_email(
+    db, tenant_id, recipients: list[str], report_type: str, file_path: str, fmt: str,
+    subject: str | None = None, note: str | None = None,
+) -> None:
+    """Email a generated report (backend.reports.generator) as an attachment.
+    Raises on failure — the caller (generator.generate_and_store) logs and
+    swallows it so an email failure doesn't mark an otherwise-successful
+    report run as failed. `subject`/`note` (feature 8) come from the
+    triggering ScheduledReport's email_subject/email_note when set; both
+    fall back to the previous hardcoded defaults."""
+    smtp = await _load_smtp(db)
+    if not smtp:
+        raise RuntimeError("SMTP is not configured")
+
+    platform = await load_platform_defaults(db)
+    platform_name = platform.get("report_company_name") or platform.get("platform_name") or "Anthrimon"
+
+    with open(file_path, "rb") as f:
+        content = f.read()
+    filename = f"{report_type}-report.{fmt}"
+    subtype = "pdf" if fmt == "pdf" else "csv"
+
+    subject = subject or f"[{platform_name}] {report_type.title()} report"
+    body_lines = [f"Your scheduled {report_type} report is attached."]
+    if note:
+        body_lines.append(note)
+    body_lines.append(f"Generated: {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}")
+    body = "\n".join(body_lines)
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(
+        None, _send_smtp, smtp, recipients, subject, body, "",
+        [(filename, content, subtype)],
+    )

@@ -1,0 +1,33 @@
+<table>
+  <thead>
+    <tr>
+      <th>Site</th>
+      <th>Hostname</th>
+      <th>Mgmt IP</th>
+      <th>Vendor</th>
+      <th>Type</th>
+      <th>Platform</th>
+      <th>OS Version</th>
+      <th>Status</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in data.devices %}
+    <tr>
+      <td>{{ d.site }}</td>
+      <td>{{ d.hostname }}</td>
+      <td>{{ d.mgmt_ip }}</td>
+      <td>{{ d.vendor }}</td>
+      <td>{{ d.device_type }}</td>
+      <td>{{ d.platform or '—' }}</td>
+      <td>{{ d.os_version or '—' }}</td>
+      <td>
+        <span class="badge {{ 'badge-good' if d.status == 'up' else 'badge-bad' if d.status == 'down' else 'badge-warn' }}">
+          {{ d.status }}
+        </span>
+      </td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+<p class="muted">{{ data.devices|length }} device{{ 's' if data.devices|length != 1 }} in inventory.</p>

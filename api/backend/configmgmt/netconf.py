@@ -30,6 +30,49 @@ from xml.sax.saxutils import escape as _xml_escape
 
 CONFIRM_TIMEOUT_MIN = 5
 
+# The complete set of verbs valid at the start of a Junos "set"-format
+# configuration statement (what `load-configuration action="set"` accepts —
+# see build_deploy_rpcs). Anything else — operational commands like "show"/
+# "request"/"ping", or interactive-CLI-only navigation like "edit"/"top"/
+# "exit"/"run" — is not valid here: load-configuration would reject it with
+# a real (severity=error) rpc-error, but that error can be buried deep in a
+# 6-step NETCONF transcript. Classifying commands upfront catches this
+# before any network I/O, with a clear per-line message.
+_CONFIG_VERBS = frozenset({
+    "set", "delete", "deactivate", "activate", "annotate",
+    "insert", "rename", "copy", "protect", "unprotect", "wildcard",
+})
+
+
+def classify_command(line: str) -> str:
+    """Classify one command line as "config" (a valid set-format Junos
+    configuration statement), "operational" (a show/request/CLI-navigation
+    command that doesn't belong in a set-format deploy), or "blank"."""
+    stripped = line.strip()
+    if not stripped or stripped.startswith("#"):
+        return "blank"
+    first_word = stripped.split(None, 1)[0].lower()
+    return "config" if first_word in _CONFIG_VERBS else "operational"
+
+
+def validate_config_commands(commands: list[str]) -> list[str]:
+    """Return a list of human-readable problems for any non-config lines
+    (empty list = all lines are valid set-format statements). Blank lines
+    and '#' comments are skipped, not flagged."""
+    problems = []
+    for i, line in enumerate(commands, start=1):
+        kind = classify_command(line)
+        if kind == "operational":
+            stripped = line.strip()
+            first_word = stripped.split(None, 1)[0]
+            problems.append(
+                f'Line {i}: "{stripped}" looks like an operational command '
+                f'(starts with "{first_word}"), not a Junos configuration '
+                f"statement. Deploy only accepts set-format lines — "
+                f'{", ".join(sorted(_CONFIG_VERBS))}.'
+            )
+    return problems
+
 
 def _rpc_has_fatal_error(reply_xml: str) -> bool:
     """True if the reply contains an rpc-error at "error" severity. Junos
@@ -134,19 +177,15 @@ async def deploy_via_collector(*, wg_ip: str, api_key_hash: str, device_ip: str,
     return _interpret_deploy(rpcs, data.get("replies", []), data.get("error"))
 
 
-def deploy_direct_sync(host: str, username: str, password: str, commands: list[str]) -> tuple[str, bool]:
-    """Deploy config to a hub-managed Junos device over NETCONF, opening the
-    SSH "netconf" subsystem directly with paramiko (synchronous — run via
-    loop.run_in_executor, matching the existing _deploy_ssh hub-local path).
-
-    No TOFU host-key pinning here, matching the remote collector's Go NETCONF
-    client (internal/netconf/netconf.go) — same trust-model choice, same
-    reasoning: this port isn't wired into the existing CLI-SSH pinning store.
+def _netconf_exec_sync(host: str, username: str, password: str, rpcs: list[dict]) -> tuple[list[str], str | None]:
+    """Open the SSH "netconf" subsystem directly with paramiko (synchronous
+    — run via loop.run_in_executor), exchange hellos, and send each rpc in
+    sequence. Returns (replies, transport_error). Shared by the deploy and
+    operational-command paths — see deploy_direct_sync's docstring for why
+    there's no TOFU host-key pinning here.
     """
     import socket
     import paramiko
-
-    rpcs = build_deploy_rpcs(commands)
 
     client = paramiko.SSHClient()
     client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
@@ -156,8 +195,10 @@ def deploy_direct_sync(host: str, username: str, password: str, commands: list[s
             timeout=15, look_for_keys=False, allow_agent=False,
         )
     except Exception as exc:
-        return f"!! netconf ssh connect failed: {exc}", False
+        return [], f"netconf ssh connect failed: {exc}"
 
+    replies: list[str] = []
+    transport_error = None
     try:
         transport = client.get_transport()
         chan = transport.open_session()
@@ -190,8 +231,6 @@ def deploy_direct_sync(host: str, username: str, password: str, commands: list[s
         )
         chan.send(my_hello)
 
-        replies: list[str] = []
-        transport_error = None
         for i, rpc in enumerate(rpcs):
             msg_id = i + 1
             req = (
@@ -209,4 +248,90 @@ def deploy_direct_sync(host: str, username: str, password: str, commands: list[s
     finally:
         client.close()
 
+    return replies, transport_error
+
+
+def deploy_direct_sync(host: str, username: str, password: str, commands: list[str]) -> tuple[str, bool]:
+    """Deploy config to a hub-managed Junos device over NETCONF."""
+    rpcs = build_deploy_rpcs(commands)
+    replies, transport_error = _netconf_exec_sync(host, username, password, rpcs)
     return _interpret_deploy(rpcs, replies, transport_error)
+
+
+# ── Operational (read-only "show") commands ─────────────────────────────────
+
+def build_operational_rpcs(commands: list[str], timeout_s: int = 30) -> list[dict]:
+    """Build one <command> RPC per operational command line. format="text"
+    returns human-readable CLI output (what a user would see interactively)
+    rather than structured XML."""
+    return [
+        {"body": f'<command format="text">{_xml_escape(c.strip())}</command>', "timeout_s": timeout_s}
+        for c in commands if c.strip()
+    ]
+
+
+def _extract_command_output(reply_xml: str) -> str:
+    """Pull the <output>...</output> text out of a format="text" op-command
+    rpc-reply. Falls back to the raw reply if the tag isn't present (e.g.
+    the device returned an rpc-error instead of output)."""
+    m = re.search(r"<output>(.*?)</output>", reply_xml, re.DOTALL)
+    if not m:
+        return reply_xml.strip()
+    import html
+    return html.unescape(m.group(1)).strip()
+
+
+def _interpret_operational(
+    commands: list[str], replies: list[str], transport_error: str | None,
+) -> tuple[str, bool]:
+    """Turn raw op-command NETCONF replies into (output_text, success). No
+    lock/commit/confirm dance — each command is independent, so success
+    means every command got a non-fatal reply."""
+    clean = [c.strip() for c in commands if c.strip()]
+    if transport_error:
+        partial = "\n\n".join(
+            f"$ {cmd}\n{_extract_command_output(r)}" for cmd, r in zip(clean, replies)
+        )
+        return (partial + "\n\n" if partial else "") + f"!! transport error: {transport_error}", False
+
+    ok = True
+    parts = []
+    for i, cmd in enumerate(clean):
+        if i >= len(replies):
+            ok = False
+            parts.append(f"$ {cmd}\n!! no reply (sequence stopped early)")
+            continue
+        reply = replies[i]
+        if _rpc_has_fatal_error(reply):
+            ok = False
+        parts.append(f"$ {cmd}\n{_extract_command_output(reply)}")
+    return "\n\n".join(parts), ok
+
+
+async def run_operational_via_collector(*, wg_ip: str, api_key_hash: str, device_ip: str,
+                                        username: str, password: str, commands: list[str]) -> tuple[str, bool]:
+    """Run read-only operational commands on a collector-managed Junos
+    device over NETCONF. Returns (output_text, success)."""
+    from . import proxy as _proxy
+
+    rpcs = build_operational_rpcs(commands)
+    if not rpcs:
+        return "!! no commands given", False
+    try:
+        data = await _proxy.netconf_exec(
+            wg_ip=wg_ip, api_key_hash=api_key_hash, device_ip=device_ip,
+            username=username, password=password, rpcs=rpcs,
+        )
+    except Exception as exc:
+        return f"!! netconf-exec request failed: {exc}", False
+    return _interpret_operational(commands, data.get("replies", []), data.get("error"))
+
+
+def run_operational_direct_sync(host: str, username: str, password: str, commands: list[str]) -> tuple[str, bool]:
+    """Run read-only operational commands on a hub-managed Junos device over
+    NETCONF (synchronous — run via loop.run_in_executor)."""
+    rpcs = build_operational_rpcs(commands)
+    if not rpcs:
+        return "!! no commands given", False
+    replies, transport_error = _netconf_exec_sync(host, username, password, rpcs)
+    return _interpret_operational(commands, replies, transport_error)

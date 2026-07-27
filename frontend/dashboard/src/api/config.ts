@@ -126,6 +126,16 @@ export interface DeployResult {
 export const deployConfig = (deviceId: string, commands: string[], save = true) =>
   api.post<DeployResult>(`/config/deploy/${deviceId}`, { commands, save }).then(r => r.data)
 
+export interface OperationalResult {
+  device_id: string
+  hostname:  string
+  commands:  number
+  output:    string
+}
+
+export const runOperational = (deviceId: string, commands: string[]) =>
+  api.post<OperationalResult>(`/config/operational/${deviceId}`, { commands }).then(r => r.data)
+
 export interface RollbackResult {
   device_id: string
   hostname:  string

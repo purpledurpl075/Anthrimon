@@ -19,11 +19,14 @@ Complete reference for installation, configuration, operation, and extension of 
 11. [BGP Monitoring](#bgp-monitoring)
 12. [Config Management](#config-management)
 13. [Topology](#topology)
-14. [Remote Collectors](#remote-collectors)
-15. [Administration](#administration)
-16. [API Reference](#api-reference)
-17. [Troubleshooting](#troubleshooting)
-18. [Data Retention](#data-retention)
+14. [Advanced Reports](#advanced-reports)
+15. [Remote Collectors](#remote-collectors)
+16. [Administration](#administration)
+17. [Licensing](#licensing)
+18. [Multi-Tenancy](#multi-tenancy)
+19. [API Reference](#api-reference)
+20. [Troubleshooting](#troubleshooting)
+21. [Data Retention](#data-retention)
 
 ---
 
@@ -42,7 +45,9 @@ Anthrimon is a self-hosted network monitoring and orchestration platform. It pro
 - **Topology** — live L2/L3 map from LLDP/CDP with bandwidth sparklines
 - **Path trace** — hop-by-hop network path visualization
 - **Remote collectors** — WireGuard-tunnelled distributed polling agents with local trap collection
+- **Advanced Reports** — scheduled, branded PDF/CSV reports (capacity, SLA, compliance, alerts, config changes, flow, interface health, BGP, syslog security, and multi-type bundles) with period-over-period comparison, preview, and email delivery — licensed module
 - **Multi-tenancy** — tenant isolation with platform admin cross-tenant switching
+- **Licensing** — offline, node-locked license file gates paid add-on modules; core platform is free
 - **Audit log** — full change tracking for compliance
 
 ### Default credentials
@@ -88,7 +93,7 @@ Remote sites (WireGuard 10.100.0.0/24):
 | VictoriaMetrics | 1.96 |
 | ClickHouse | 26.x |
 | Go collectors | 1.26.5 (toolchain-pinned) |
-| nginx | system |
+| nginx | nginx-ee (master branch, `--stable` channel, built from source) |
 
 ### Security review remediation
 
@@ -512,6 +517,12 @@ For devices receiving a full BGP routing table, the prefix count baseline adapts
 
 ProCurve uses direct paramiko `invoke_shell` because Netmiko's hp_procurve driver sends `terminal width 511` which ProCurve 2920 rejects.
 
+**Juniper NETCONF (preferred over SSH-CLI when available)** — if a device has the `junos_netconf` API method enabled and reachable (Device Settings drawer → API Methods), config backup, compliance, and deploy all use structured NETCONF RPCs instead of screen-scraping the CLI. Falls back to the Netmiko SSH path automatically when NETCONF isn't enabled.
+
+### Junos operational ("show") commands
+
+Devices detected as Juniper get a fourth config-tab option, **Operational**, alongside History/Compliance/Deploy — read-only `show ...` commands with no lock/commit/config snapshot. Quick-insert buttons cover common commands (version, BGP summary, interfaces, route summary, alarms, chassis hardware); the Deploy tab rejects anything that isn't a valid `set`/`delete`/... configuration statement (and vice versa for Operational), so config lines and show commands can't be mixed into the wrong tab. Works over both NETCONF (single `<command>` RPC per line, no lock/commit needed) and SSH/Netmiko for devices without NETCONF enabled, and for both hub-managed and remote-collector-managed devices.
+
 ### SSH credentials
 
 Assign an SSH credential to the device in the Device Settings drawer (gear icon) → **Credentials** section. The credential type must be `ssh` with `username` and `password` fields. Optional: `enable_secret` for Cisco enable mode.
@@ -529,11 +540,25 @@ Create policies under **Policies** (Analysis section in the sidebar). Each polic
 
 Run policies manually or wait for the next collection cycle.
 
+### Golden Config
+
+A separate feature from Compliance Policies — Config page → **Golden Config** tab (badge shows drift count). Instead of pass/fail rules, a golden config is a whole reference template (`{{hostname}}`/`{{mgmt_ip}}`/`{{vendor}}`/`{{device_type}}`/`{{fqdn}}` placeholders supported) scored against each matching device's latest backup as a percentage of template lines present (`matched_lines / total_lines`, blank/`!`/`#` lines ignored) — answering "how close is this config to the ideal?" rather than "does it violate a rule?" Runs automatically on every new backup; per-device drift also shows on the Device Detail page with a link back to the Golden Config tab. Missing lines are listed per result.
+
 ### Config deploy
 
 The **Deploy** tab on each device allows pushing config snippets via SSH. Commands wrap in vendor-appropriate `configure terminal` / `end` automatically. Template variables supported: `{{hostname}}`, `{{mgmt_ip}}`, `{{ntp_server}}`, etc.
 
 For multi-device deploy: **Config → Deploy** tab — target by vendor, tag, or specific device selection.
+
+### Config rollback
+
+Device-*pulls* its config back from the hub over HTTP (or SFTP for Aruba CX, whose `copy` syntax rejects embedded passwords over HTTP) — the hub starts a one-shot, IP-locked server bound to the target device, serves the requested backup exactly once, then shuts down. The device applies it via its own native full-replace primitive: `configure replace` (Cisco IOS/IOS-XE, Arista), `commit replace` (IOS-XR), `copy running-config vrf ... overwrite` (Aruba CX), `load override` + `commit confirmed 5` + sanity check + final `commit` (Juniper, auto-reverts if it breaks reachability). Not supported on ProCurve (no HTTP `copy`). Uses a fixed port range (5050–5054, `ANTHRIMON_ROLLBACK_PORTS`) opened by the installer, and is VRF-aware (resolves the correct routing table for the fetch automatically).
+
+Trigger from a backup snapshot's "⟲ Rollback" button (Device Detail → config history — only shown for supported vendors). The confirmation dialog shows a diff preview of what will change, requires a free-text audit-logged reason, and requires typing the device's exact hostname to confirm — "the only safeguard against rolling back the wrong device." A fresh backup is captured automatically afterward.
+
+### Git config archive
+
+Every tenant gets a local git repo (`/var/lib/anthrimon/config-archive/<tenant_id>/`) with one file per device. Every backup that changes content is committed automatically, with the actor (from a recent audit-log match) and source noted in the commit body — an independent, `git log`-browsable history alongside the Postgres-stored diffs. An optional remote (Config page → **Git Archive** tab) mirrors every commit to GitHub/GitLab/etc. for off-box backup; push failures are logged but never block the backup path itself.
 
 ---
 
@@ -546,6 +571,48 @@ LLDP and CDP neighbor data is collected each poll cycle. The topology endpoint c
 ### Layout
 
 The topology uses a hierarchical BFS layout. Drag nodes to reposition — positions are saved per-session. Click an edge to open the link panel showing port names, speed, and 30-minute bandwidth sparkline.
+
+---
+
+## Advanced Reports
+
+Licensed module (`license_key: reports`). Scheduled or on-demand, branded PDF/CSV reports drawing on the same data as the rest of the platform. Navigate to **Reports** in the sidebar.
+
+### Report types
+
+| Type | Contents |
+|---|---|
+| Capacity & Utilisation | Avg/peak interface utilisation and CPU per device |
+| SLA / Uptime | Per-device downtime and uptime % from device-down alert history |
+| Inventory | Full device inventory snapshot (no date range — always current) |
+| Config Compliance | Pass/fail summary by policy, latest per-device result |
+| Alert Summary / MTTR | Alert counts and mean-time-to-ack/resolve by severity, noisiest devices |
+| Config Change History | Config diffs with actor attribution (who deployed, or "periodic poll") |
+| Top Talkers / Flow | Top bandwidth consumers by source/destination/protocol |
+| Interface Errors / Health | Interface errors, discards, and link-state flaps |
+| BGP / Routing Health | Session state, flap counts, prefix counts, state changes |
+| Syslog / Security Events | Severity trend plus match counts for configured syslog-match alert rules |
+| Bundle | Combines any of the above into a single PDF/CSV, one section per type |
+
+### Filters
+
+Every report (except Inventory, which has no time axis) accepts a date range — a relative preset (7/30/90 days) or a custom start/end — plus an optional site scope. The 8 metric-heavy types (all but Inventory and Syslog/Security) also support **"Compare to previous period"**, adding a delta table against the immediately preceding period of equal length.
+
+### Scheduling
+
+Create a recurring schedule with a cron expression, one or more output formats (PDF/CSV), and email recipients. Each schedule can set a custom email subject/intro note. A schedule that fails 3 times in a row (configurable via **Platform Admin** → report schedule failure threshold) fires a notification through the normal alerting/channel system — create an alert rule with metric **"Scheduled report failure"** and attach the channels you want notified. Failed runs retry automatically (3 attempts, exponential backoff) before counting as a failure.
+
+### Preview
+
+Both the on-demand "Run now" form and the schedule editor have a **Preview** button — renders the report as HTML in a modal without saving a run or sending email, so filters can be sanity-checked before committing to a schedule.
+
+### Branding
+
+**Platform Admin** → Report Branding sets a company name and logo shown in the PDF header/footer; defaults to Anthrimon's own mark until configured. Every generated PDF also shows who generated it (the triggering user, or the schedule name for scheduled runs) and, for on-demand runs and downloads, both actions are audit-logged.
+
+### Retention
+
+Saved report runs (files + history rows) are pruned automatically — configurable retention window under **Platform Admin** → data settings (default 90 days). Individual saved reports can also be deleted manually from the Reports page.
 
 ---
 
@@ -642,7 +709,55 @@ Configured under **Platform Admin** (platform admins only) or **Administration**
 | Syslog messages | 90 days | ClickHouse TTL |
 | Config backups | Unlimited | PostgreSQL |
 
-Changing ClickHouse TTLs takes effect on next background merge.
+Changing ClickHouse TTLs takes effect on next background merge. See the [Data Retention](#data-retention) section below for the additional Postgres/VictoriaMetrics/journald knobs.
+
+### Two-factor authentication (TOTP)
+
+Optional, per-user (not enforced platform-wide). Enable under **Account** → Security: scan a QR code with an authenticator app, confirm with a 6-digit code, save the one-time-display backup codes. Login then requires the TOTP code (or a backup code) in addition to the password. Backup codes can be regenerated and 2FA disabled from the same page, both requiring a current code to confirm.
+
+### Backup and restore
+
+CLI tools `anthrimon-backup` / `anthrimon-restore` (installed by the installer) cover PostgreSQL (full dump), ClickHouse (optional — can be excluded to keep archives small), `/etc/anthrimon/` (env, TLS, WireGuard keys), `/var/lib/anthrimon/` (config snapshots), and systemd units, packaged into one optionally-encrypted `tar.zst`. Trigger from **Platform Admin** → **Platform Health** page ("Backup & download", with an option to upload a backup for later restore) or run the CLI directly on the server. Restore is destructive and CLI-only by design (`sudo anthrimon-restore <path>`) — the UI shows the exact command rather than a one-click button.
+
+---
+
+## Licensing
+
+Core platform features require no license. Add-on modules (currently **Advanced Reports**, plus a no-op `hello` sample module) are gated behind an offline, RS256-signed license file — see `api/backend/licensing/__init__.py` and `api/backend/modules/loader.py`. A module's router is only mounted if `is_licensed(license_key)`; if a license is later revoked, already-mounted routes 402 rather than being unmounted live.
+
+### Applying a license
+
+**Platform** → **License** tab: "Download license request" exports this machine's fingerprint; send it in, then "Apply a license" to upload the signed file you receive back. "Remove license" reverts to free tier. No restart needed either way.
+
+### Node-locking
+
+Licenses can bind to specific machine fingerprints (`machine_ids` claim), derived from `/etc/machine-id` (preferred), the DMI product UUID, or the first physical MAC, hashed with a fixed salt. Moving the install to new hardware changes the fingerprint — the license silently degrades to free tier (a logged warning, not an error) unless `license_strict` is set, in which case a mismatched license hard-fails startup instead. A license can also grant `"*"` to unlock every module, and can cap `max_devices` (0 = unlimited).
+
+### Frontend gating
+
+`frontend/dashboard/src/features.ts`'s `PAID_FEATURES` array drives the sidebar — unlicensed paid features render locked with a link to request a license instead of the real page. (Currently lists `reports` and `ai_insights`; the latter has no backend module yet.)
+
+---
+
+## Multi-Tenancy
+
+Every `User` and `Device` belongs to exactly one `Tenant` (name, slug, JSONB settings). Devices, sites, remote collectors, alerts/alert rules, credentials, and users are fully isolated per tenant. Shared platform-wide: the license, platform-default settings, and the module/licensing system.
+
+### Creating tenants and users
+
+Platform admins only: **Platform Admin** → **Tenants** tab to create a tenant (name + slug); **Platform Admin** → **Users** to create users inside it.
+
+### Cross-tenant switching
+
+The sidebar's tenant switcher lets a platform admin act as *any* tenant (shown via an "Acting as another tenant" banner with a one-click way back). A regular user can only switch into tenants where a `UserTenantAccess` grant exists (managed by platform admins) — every user always has implicit access to their own home tenant.
+
+### Site-scoped roles
+
+`UserSiteRole` grants a role (`readonly`/`operator`/`admin`) scoped to one site within a user's tenant — narrower access than their tenant-wide role, without changing what they can do elsewhere.
+
+### Sites
+
+**Admin** → **Sites** tab: create/name/describe sites and assign devices to them (bulk "change site" also available from the device list). A device's site is independent of which remote collector it uses — the two don't have to match.
 
 ---
 
@@ -739,6 +854,16 @@ If writing custom queries: never alias a column with the same name as the origin
 
 **Config backups** — no automatic retention. Delete old backups manually via the Config tab on each device.
 
+**Report runs** — via Platform Admin → Data settings. Saved Advanced Reports files + history pruned automatically (default 90 days), or delete individually from the Reports page.
+
+**Additional Postgres housekeeping tables** — `interface_status_log`, `bgp_session_events`, `notification_send_log`, `trap_events` each have their own retention-in-days setting, all on one combined form (Platform Admin → Data → Housekeeping retention).
+
+**VictoriaMetrics** — retention in months (1–120), Platform Admin → Data → Metrics retention. Requires root; applies by rewriting the VictoriaMetrics systemd unit and restarting the service (`apply-vm-retention.sh`).
+
+**journald** — log size cap in MB (64–16384), Platform Admin → Data → Journal retention. Also requires root/service restart (`apply-journald-limit.sh`).
+
+**ClickHouse diagnostic logs** — the ClickHouse server's own internal `system.*` logs (query_log, part_log, etc.) and collector operational logs have separate short TTLs (1–90 days), same Data settings page.
+
 ### Disk estimation
 
 | Data | Per device/day | 10 devices, 90 days |
@@ -752,4 +877,4 @@ VictoriaMetrics compresses aggressively — real usage is typically 30–50% low
 
 ---
 
-*This wiki covers Anthrimon as of Phase 11 (custom dashboards) complete.*
+*This wiki covers Anthrimon through the Advanced Reports module, licensing, multi-tenancy/sites, and the nginx-ee installer migration.*

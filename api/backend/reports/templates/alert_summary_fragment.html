@@ -1,0 +1,56 @@
+<table>
+  <thead>
+    <tr>
+      <th>Severity</th>
+      <th class="num">Alerts</th>
+      <th class="num">MTTA</th>
+      <th class="num">MTTR</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for s in data.by_severity %}
+    <tr>
+      <td>{{ s.severity | capitalize }}</td>
+      <td class="num">{{ s.alert_count }}</td>
+      <td class="num">{{ s.mtta_seconds | fmt_duration if s.mtta_seconds is not none else '—' }}</td>
+      <td class="num">{{ s.mttr_seconds | fmt_duration if s.mttr_seconds is not none else '—' }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% if data.top_devices %}
+<table>
+  <thead>
+    <tr>
+      <th>Noisiest devices</th>
+      <th class="num">Alerts</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for d in data.top_devices %}
+    <tr>
+      <td>{{ d.hostname }}</td>
+      <td class="num">{{ d.alert_count }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+<p class="muted">{{ data.total_alerts }} alert{{ 's' if data.total_alerts != 1 }} from {{ data.period_start | fmt_date }} to {{ data.period_end | fmt_date }}.</p>
+{% if comparison %}
+<h3>vs. previous period</h3>
+<p>Total alerts: {{ '%+d'|format(comparison.deltas.total_alerts_delta) }}
+  {% if comparison.deltas.total_alerts_delta_pct is not none %}({{ '%+.1f%%'|format(comparison.deltas.total_alerts_delta_pct) }}){% endif %}</p>
+<table>
+  <thead><tr><th>Severity</th><th class="num">Alerts Δ</th></tr></thead>
+  <tbody>
+    {% for s in comparison.deltas.by_severity %}
+    <tr>
+      <td>{{ s.severity | capitalize }}</td>
+      <td class="num">{{ '%+d'|format(s.alert_count_delta) }}
+        {% if s.alert_count_delta_pct is not none %}({{ '%+.1f%%'|format(s.alert_count_delta_pct) }}){% endif %}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}

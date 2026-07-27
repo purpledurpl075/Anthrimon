@@ -9,7 +9,7 @@ from textwrap import dedent
 
 import httpx
 import structlog
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from typing import Optional
 
 from pydantic import BaseModel
@@ -153,7 +153,8 @@ async def get_smtp_settings(
 @router.put("/settings/smtp", response_model=SmtpSettingsRead)
 async def update_smtp_settings(
     body: SmtpSettingsWrite,
-    _: User = Depends(require_tenant_user("tenant_admin")),
+    request: Request,
+    current_user: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> SmtpSettingsRead:
     row = await _get_smtp_row(db)
@@ -184,6 +185,12 @@ async def update_smtp_settings(
         row.value = new_value
         row.updated_at = datetime.now(timezone.utc)
 
+    from ..audit import audit as _audit
+    await _audit(db, action="update", resource_type="smtp_settings",
+                 new_value={"host": new_value["host"], "port": new_value["port"],
+                            "user": new_value["user"], "ssl": new_value["ssl"],
+                            "password_changed": bool(body.password)},
+                 user=current_user, request=request)
     await db.commit()
     logger.info("smtp_settings_updated", host=body.host, port=body.port)
 
@@ -685,6 +692,7 @@ async def list_sites(
 @router.post("/sites", response_model=SiteRead, status_code=201, summary="Create a site")
 async def create_site(
     body: SiteWrite,
+    request: Request,
     current_user: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> SiteRead:
@@ -695,6 +703,12 @@ async def create_site(
         location=body.location or None,
     )
     db.add(site)
+    await db.flush()
+    from ..audit import audit as _audit
+    await _audit(db, action="create", resource_type="site",
+                 resource_id=site.id,
+                 new_value={"name": site.name, "location": site.location},
+                 user=current_user, request=request)
     await db.commit()
     await db.refresh(site)
     return SiteRead(id=site.id, name=site.name, description=site.description,
@@ -705,6 +719,7 @@ async def create_site(
 async def update_site(
     site_id: _uuid.UUID,
     body: SiteWrite,
+    request: Request,
     current_user: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> SiteRead:
@@ -713,9 +728,15 @@ async def update_site(
     )).scalar_one_or_none()
     if not site:
         raise HTTPException(status_code=404, detail="Site not found")
+    before = {"name": site.name, "description": site.description, "location": site.location}
     site.name = body.name.strip()
     site.description = body.description or None
     site.location = body.location or None
+    from ..audit import audit as _audit
+    await _audit(db, action="update", resource_type="site",
+                 resource_id=site.id, old_value=before,
+                 new_value={"name": site.name, "description": site.description, "location": site.location},
+                 user=current_user, request=request)
     await db.commit()
     await db.refresh(site)
     count = (await db.execute(
@@ -728,6 +749,7 @@ async def update_site(
 @router.delete("/sites/{site_id}", status_code=204, response_model=None, summary="Delete a site")
 async def delete_site(
     site_id: _uuid.UUID,
+    request: Request,
     current_user: User = Depends(require_tenant_user("tenant_admin")),
     db: AsyncSession = Depends(get_db),
 ) -> None:
@@ -736,6 +758,10 @@ async def delete_site(
     )).scalar_one_or_none()
     if not site:
         raise HTTPException(status_code=404, detail="Site not found")
+    from ..audit import audit as _audit
+    await _audit(db, action="delete", resource_type="site",
+                 resource_id=site.id, old_value={"name": site.name},
+                 user=current_user, request=request)
     await db.delete(site)
     await db.commit()
 
@@ -852,6 +878,7 @@ async def data_stats(
         ("bgp_session_events",   "bgp_session_events_days"),
         ("notification_send_log", "notification_send_log_days"),
         ("trap_events",          "trap_events_days"),
+        ("report_runs",          "report_runs_retention_days"),
     ]
     housekeeping_stats: dict = {}
     for table, _ in housekeeping_tables:
@@ -994,6 +1021,8 @@ async def data_stats(
                                        "retention_days": platform.get("notification_send_log_days", 90)},
             "trap_events":           {**housekeeping_stats["trap_events"],
                                        "retention_days": platform.get("trap_events_days", 30)},
+            "report_runs":           {**housekeeping_stats["report_runs"],
+                                       "retention_days": platform.get("report_runs_retention_days", 90)},
             "config_backups_keep_per_device":   platform.get("config_backups_keep_per_device", 50),
             "compliance_results_keep_per_pair": platform.get("compliance_results_keep_per_pair", 20),
         },
@@ -1045,6 +1074,7 @@ class HousekeepingRetentionUpdate(BaseModel):
     trap_events_days: int
     config_backups_keep_per_device: int
     compliance_results_keep_per_pair: int
+    report_runs_retention_days: int
 
 
 @router.put("/data/retention/housekeeping", summary="Set Postgres housekeeping retention windows")

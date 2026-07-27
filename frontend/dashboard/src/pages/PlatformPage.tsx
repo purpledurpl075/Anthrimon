@@ -31,6 +31,8 @@ interface PlatformSettings {
   business_days:                  number[]
   abuseipdb_api_key:              string
   wg_public_endpoint:             string
+  report_company_name:           string
+  report_logo_data_uri:          string
 }
 
 
@@ -338,6 +340,38 @@ function SettingsTab() {
         <SettingRow label="WireGuard public endpoint"
           description="Override the endpoint given to remote collectors during bootstrap. Required when this hub is behind NAT — external collectors cannot reach a private LAN address. Use your public IP or hostname, e.g. 203.0.113.5:51820. Leave blank to auto-detect.">
           {txt('wg_public_endpoint', 'e.g. 203.0.113.5 or 203.0.113.5:51820')}
+        </SettingRow>
+      </div>
+
+      <div className="bg-white rounded-2xl border border-slate-200 px-6 mb-6">
+        <h3 className="text-xs font-semibold text-slate-400 uppercase tracking-wide pt-4 pb-2">Report Branding</h3>
+        <SettingRow label="Company name"
+          description="Shown in generated PDF report headers. Leave blank to use the platform name above.">
+          {txt('report_company_name', f.platform_name)}
+        </SettingRow>
+        <SettingRow label="Logo"
+          description="Shown next to the company name in PDF report headers. PNG/JPG/SVG, ideally on a transparent or white background. Leave unset for Anthrimon's own mark.">
+          <div className="flex items-center gap-3">
+            {f.report_logo_data_uri && (
+              <img src={f.report_logo_data_uri} alt="Report logo" className="h-8 w-auto max-w-[120px] object-contain border border-slate-100 rounded" />
+            )}
+            <label className="text-xs font-medium text-blue-600 hover:text-blue-700 cursor-pointer">
+              {f.report_logo_data_uri ? 'Replace…' : 'Upload…'}
+              <input type="file" accept="image/png,image/jpeg,image/svg+xml" className="hidden"
+                onChange={e => {
+                  const file = e.target.files?.[0]
+                  if (!file) return
+                  const reader = new FileReader()
+                  reader.onload = () => set('report_logo_data_uri', String(reader.result))
+                  reader.readAsDataURL(file)
+                  e.target.value = ''
+                }} />
+            </label>
+            {f.report_logo_data_uri && (
+              <button type="button" onClick={() => set('report_logo_data_uri', '')}
+                className="text-xs text-slate-400 hover:text-red-500">Remove</button>
+            )}
+          </div>
         </SettingRow>
       </div>
 
