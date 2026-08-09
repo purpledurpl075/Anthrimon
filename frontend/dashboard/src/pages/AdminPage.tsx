@@ -784,6 +784,7 @@ function SitesTab() {
 
 interface TenantAlertingSettings {
   device_down_stale_min_s:        number
+  device_down_stale_multiplier:   number
   max_alerts_per_device_per_hour: number
   auto_close_stale_days:          number
   alert_retention_days:           number
@@ -913,8 +914,12 @@ function AlertingSettingsTab() {
           {num('max_alerts_per_device_per_hour', '/hr')}
         </SettingRow>
         <SettingRow label="Device-down stale floor"
-          description="Minimum seconds without a successful poll before a device is considered unreachable. Actual threshold is max(this, 2.5× poll interval).">
+          description="Minimum seconds without a successful poll before a device is considered unreachable. Actual threshold is max(this, stale multiplier × poll interval).">
           {num('device_down_stale_min_s', 's')}
+        </SettingRow>
+        <SettingRow label="Device-down stale multiplier"
+          description="Multiplier applied to a device's own poll interval when computing the stale threshold above. Guards against a normal SNMP reconnect (up to 60s backoff) being mistaken for Device Down.">
+          {num('device_down_stale_multiplier', '×')}
         </SettingRow>
         <SettingRow label="Stale alert auto-close"
           description="Auto-close open/acknowledged alerts with no activity after this many days. Set to 0 to disable.">

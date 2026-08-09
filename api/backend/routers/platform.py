@@ -39,7 +39,8 @@ class PlatformGlobalSettingsRead(BaseModel):
     base_url:                       str           = ""
     platform_name:                  str           = "Anthrimon"
     timezone:                       str           = "UTC"
-    device_down_stale_min_s:        int           = 45
+    device_down_stale_min_s:        int           = 90
+    device_down_stale_multiplier:   float         = 6.0
     max_alerts_per_device_per_hour: int           = 0
     auto_close_stale_days:          int           = 0
     alert_retention_days:           int           = 90

@@ -580,6 +580,7 @@ async def save_tenant_settings(
 
 class TenantAlertingSettings(BaseModel):
     device_down_stale_min_s:        int
+    device_down_stale_multiplier:   float
     max_alerts_per_device_per_hour: int
     auto_close_stale_days:          int
     alert_retention_days:           int

@@ -2,7 +2,7 @@
 # ─────────────────────────────────────────────────────────────────────────────
 # Anthrimon Update Script
 #
-# Stops all services, pulls latest code, rebuilds everything (Python deps,
+# Pulls latest code, stops all services, rebuilds everything (Python deps,
 # Go collectors, frontend), applies new migrations, and restarts services.
 #
 # Usage:  sudo bash infra/scripts/update.sh
@@ -56,7 +56,36 @@ echo ""
 ERRORS=0
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 1: Stop all services
+# PHASE 1: Pull latest code
+# ══════════════════════════════════════════════════════════════════════════════
+# Runs before anything is stopped — if this fails (diverged branch, network),
+# we bail out with services still running instead of causing downtime for a
+# no-op update.
+
+hdr "Pulling latest code"
+
+if [[ ! -d "${REPO_DIR}/.git" ]]; then
+    warn "${REPO_DIR} is not a git checkout — skipping pull"
+else
+    if ! sudo -u "${REAL_USER}" git -C "${REPO_DIR}" diff --quiet -- \
+        || ! sudo -u "${REAL_USER}" git -C "${REPO_DIR}" diff --cached --quiet --; then
+        die "Uncommitted local changes in ${REPO_DIR} — commit or stash them first, then re-run"
+    fi
+    BEFORE_REV=$(sudo -u "${REAL_USER}" git -C "${REPO_DIR}" rev-parse --short HEAD)
+    sudo -u "${REAL_USER}" git -C "${REPO_DIR}" fetch --quiet
+    if ! sudo -u "${REAL_USER}" git -C "${REPO_DIR}" pull --ff-only --quiet; then
+        die "git pull --ff-only failed — local branch has diverged from upstream; resolve manually and re-run"
+    fi
+    AFTER_REV=$(sudo -u "${REAL_USER}" git -C "${REPO_DIR}" rev-parse --short HEAD)
+    if [[ "${BEFORE_REV}" == "${AFTER_REV}" ]]; then
+        ok "Already up to date (${AFTER_REV})"
+    else
+        ok "Updated ${BEFORE_REV} → ${AFTER_REV}"
+    fi
+fi
+
+# ══════════════════════════════════════════════════════════════════════════════
+# PHASE 2: Stop all services
 # ══════════════════════════════════════════════════════════════════════════════
 
 hdr "Stopping services"
@@ -73,7 +102,7 @@ for svc in "${SERVICES[@]}"; do
 done
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 2: Update Python dependencies
+# PHASE 3: Update Python dependencies
 # ══════════════════════════════════════════════════════════════════════════════
 
 hdr "Python dependencies"
@@ -90,7 +119,7 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 3: Database migrations
+# PHASE 4: Database migrations
 # ══════════════════════════════════════════════════════════════════════════════
 
 hdr "PostgreSQL migrations"
@@ -138,7 +167,7 @@ for f in "${CH_MIGRATIONS}"/*.sql; do
 done
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 4: Rebuild Go collectors
+# PHASE 5: Rebuild Go collectors
 # ══════════════════════════════════════════════════════════════════════════════
 
 hdr "Go collectors"
@@ -223,7 +252,7 @@ if [[ "$BUILD_OK" == true ]]; then
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 5: Rebuild frontend
+# PHASE 6: Rebuild frontend
 # ══════════════════════════════════════════════════════════════════════════════
 
 hdr "Frontend"
@@ -240,7 +269,7 @@ else
 fi
 
 # ══════════════════════════════════════════════════════════════════════════════
-# PHASE 6: Restart services (only if no errors)
+# PHASE 7: Restart services (only if no errors)
 # ══════════════════════════════════════════════════════════════════════════════
 
 hdr "Starting services"

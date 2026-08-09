@@ -20,6 +20,7 @@ interface PlatformSettings {
   platform_name:                  string
   timezone:                       string
   device_down_stale_min_s:        number
+  device_down_stale_multiplier:   number
   max_alerts_per_device_per_hour: number
   auto_close_stale_days:          number
   alert_retention_days:           number
@@ -241,10 +242,17 @@ function SettingsTab() {
           </div>
         </SettingRow>
         <SettingRow label="Device-down stale floor"
-          description="Minimum seconds without a successful poll before a device is considered unreachable. Actual threshold is max(this, 2.5× poll interval).">
+          description="Minimum seconds without a successful poll before a device is considered unreachable. Actual threshold is max(this, stale multiplier × poll interval).">
           <div className="flex items-center gap-2">
             {num('device_down_stale_min_s')}
             <span className="text-xs text-slate-400 shrink-0">seconds</span>
+          </div>
+        </SettingRow>
+        <SettingRow label="Device-down stale multiplier"
+          description="Multiplier applied to a device's own poll interval when computing the stale threshold above. Guards against a normal SNMP reconnect (up to 60s backoff) being mistaken for Device Down.">
+          <div className="flex items-center gap-2">
+            {num('device_down_stale_multiplier')}
+            <span className="text-xs text-slate-400 shrink-0">× poll interval</span>
           </div>
         </SettingRow>
         <SettingRow label="Stale alert auto-close"

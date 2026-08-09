@@ -171,8 +171,9 @@ async def eval_mem(db: AsyncSession, device: dict, condition: str, threshold: fl
 async def eval_device_down(db: AsyncSession, device: dict, platform: dict | None = None) -> Optional[Breach]:
     """Fire if the device status is not 'up' or last_polled is stale.
 
-    Stale threshold = 2.5× the device's own poll interval, floored at
-    device_down_stale_min_s (platform setting, default 45 s).
+    Stale threshold = device_down_stale_multiplier× the device's own poll
+    interval, floored at device_down_stale_min_s (platform settings,
+    default 6× and 90 s respectively).
     """
     row = (await db.execute(
         text("SELECT status, last_polled FROM devices WHERE id = :did"),
@@ -184,10 +185,12 @@ async def eval_device_down(db: AsyncSession, device: dict, platform: dict | None
     last_polled = row["last_polled"]
     poll_interval = int(device.get("polling_interval_s") or 15)
     stale_min = int((platform or {}).get("device_down_stale_min_s", 90))
-    # 6× the poll interval: generous enough that an SNMP reconnect (up to 60s
-    # max backoff) doesn't trigger a false Device Down during the reconnect
-    # window, while still detecting a genuinely unreachable device promptly.
-    stale_seconds = max(stale_min, int(poll_interval * 6))
+    # Multiplier applied to the poll interval: generous enough by default that
+    # an SNMP reconnect (up to 60s max backoff) doesn't trigger a false Device
+    # Down during the reconnect window, while still detecting a genuinely
+    # unreachable device promptly. Configurable — see device_down_stale_multiplier.
+    stale_multiplier = float((platform or {}).get("device_down_stale_multiplier", 6))
+    stale_seconds = max(stale_min, int(poll_interval * stale_multiplier))
     stale = (
         last_polled is None or
         (datetime.now(timezone.utc) - last_polled).total_seconds() > stale_seconds

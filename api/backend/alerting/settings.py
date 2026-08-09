@@ -31,6 +31,7 @@ PLATFORM_DEFAULTS: dict = {
     # Alerting engine — platform-wide defaults; tenants may override the
     # subset in TENANT_OVERRIDABLE_KEYS via /admin/settings/alerting
     "device_down_stale_min_s":        90,
+    "device_down_stale_multiplier":   6.0,
     "max_alerts_per_device_per_hour": 0,
     "auto_close_stale_days":          0,
     "alert_retention_days":           90,
@@ -68,6 +69,7 @@ PLATFORM_DEFAULTS: dict = {
 # AbuseIPDB key) are truly global and apply to every tenant.
 TENANT_OVERRIDABLE_KEYS: frozenset[str] = frozenset({
     "device_down_stale_min_s",
+    "device_down_stale_multiplier",
     "max_alerts_per_device_per_hour",
     "auto_close_stale_days",
     "alert_retention_days",
