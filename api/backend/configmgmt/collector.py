@@ -584,7 +584,6 @@ async def store_config_backup(
             prev_lines, curr_lines,
             fromfile=f"previous ({prev.collected_at.strftime('%Y-%m-%d %H:%M')})",
             tofile=f"current ({now.strftime('%Y-%m-%d %H:%M')})",
-            lineterm="",
         ))
         diff_text     = "".join(diff_lines)
         lines_added   = sum(1 for l in diff_lines if l.startswith("+") and not l.startswith("+++"))
@@ -734,6 +733,12 @@ _BANNER_NOISE = re.compile(
     r"|^[!#]+\s*Startup database"
     # Juniper: timestamp in hierarchical format (display set has no headers)
     r"|^#+\s*Last changed:"
+    # Juniper: RE-mastership banner and the underlying FreeBSD shell prompt —
+    # both bleed into the captured buffer inconsistently depending on whether
+    # _ensure_junos_cli had to re-enter CLI mode that session, producing a
+    # spurious config diff every time the capture happens to differ.
+    r"|^\{(master|backup|primary|secondary)(:\d+)?\}\s*$"
+    r"|^root@\S+(:RE:\d+)?%\s*$"
     # HP ProCurve: model/firmware header lines
     r"|^;\s*[A-Z]\w+\s+Configuration Editor"
     r"|^;\s*Ver\s+#"
