@@ -271,6 +271,49 @@ export default function AlertDetailPage() {
             </div>
           )}
 
+          {/* Mass-failure grouping callout — informational only, never suppresses.
+              This alert is still real and independently actionable; it just shares
+              a correlation_id with other devices that went down in the same window. */}
+          {alert.mass_failure_siblings && alert.mass_failure_siblings.length > 0 && (
+            <div className="mb-4 bg-amber-50 border border-amber-200 rounded-xl px-4 py-3">
+              <div className="flex items-start gap-3">
+                <span className="text-lg leading-none mt-0.5">⚠</span>
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold text-amber-700">
+                    {alert.mass_failure_siblings.length} other device{alert.mass_failure_siblings.length === 1 ? '' : 's'} also went down in this same window
+                  </p>
+                  <p className="text-[11px] text-amber-600 mt-0.5">
+                    This device is genuinely down and this alert is fully independent — but the timing suggests
+                    a possible shared/systemic cause (collector hiccup, shared uplink or power, etc.).
+                  </p>
+                </div>
+              </div>
+              <div className="mt-3 border-t border-amber-100 pt-2.5 space-y-1.5">
+                {alert.mass_failure_siblings.map(c => (
+                  <div
+                    key={c.id}
+                    onClick={() => navigate(`/alerts/${c.id}`)}
+                    className="flex items-center gap-2 text-xs cursor-pointer hover:bg-amber-100/60 rounded-md px-2 py-1.5 transition-colors"
+                  >
+                    <span
+                      className="w-1.5 h-1.5 rounded-full shrink-0"
+                      style={{
+                        backgroundColor:
+                          c.severity === 'critical' ? '#dc2626' :
+                          c.severity === 'major'    ? '#ea580c' :
+                          c.severity === 'minor'    ? '#d97706' :
+                          c.severity === 'warning'  ? '#ca8a04' :
+                                                      '#0891b2',
+                      }}
+                    />
+                    <span className="text-slate-700 truncate flex-1">{c.title}</span>
+                    <span className="text-[10px] text-amber-500 shrink-0">view →</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
           {/* Value / threshold */}
           {value !== undefined && (
             <div className="flex flex-wrap gap-3 mt-3">

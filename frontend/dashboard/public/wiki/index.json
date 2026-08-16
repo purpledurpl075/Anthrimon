@@ -316,5 +316,11 @@
     "title": "Credential Types Reference",
     "category": "Reference",
     "description": "All credential types — snmp_v2c, snmp_v3, ssh, eapi, api_token, gnmi, netconf"
+  },
+  {
+    "slug": "trap-catalog-reference",
+    "title": "SNMP Trap & Varbind Catalog Reference",
+    "category": "Reference",
+    "description": "How trap types and varbind OIDs get human-readable labels, and how to catalog ones that aren't recognized yet"
   }
 ]

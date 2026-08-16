@@ -7,8 +7,10 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"math/rand"
 	"net"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -150,74 +152,123 @@ const (
 
 // ─── SNMPCollector ────────────────────────────────────────────────────────────
 
+// deviceHandle tracks one device's independent polling goroutine.
+type deviceHandle struct {
+	cancel  context.CancelFunc
+	dev     hub.Device    // struct this goroutine was started with, for change detection
+	pollNow chan struct{} // buffered(1); trap-triggered immediate poll for this device
+}
+
 // SNMPCollector polls assigned devices via SNMP and forwards Prometheus text
-// metrics to the hub.
+// metrics to the hub. Each device is polled on its own goroutine and ticker,
+// derived from that device's own PollingIntervalS — see SetDevices/runDevice.
 type SNMPCollector struct {
 	hub *hub.Client
 	cfg config.SNMPConfig
 	log zerolog.Logger
 
-	mu      sync.RWMutex
-	devices []hub.Device
+	sem chan struct{} // collector-wide concurrency bound across all device goroutines
 
-	pollNowCh chan string // device ID to repoll immediately; "" = all devices
+	mu      sync.Mutex
+	running map[string]*deviceHandle // device_id → handle
+
 	reachMu   sync.Mutex
 	reachable map[string]bool // device_id → last-known reachability
 }
 
 // NewSNMPCollector creates a new SNMPCollector.
 func NewSNMPCollector(hubClient *hub.Client, cfg config.SNMPConfig, log zerolog.Logger) *SNMPCollector {
+	maxConcurrent := cfg.MaxConcurrent
+	if maxConcurrent <= 0 {
+		maxConcurrent = 20
+	}
 	return &SNMPCollector{
 		hub:       hubClient,
 		cfg:       cfg,
 		log:       log.With().Str("component", "snmp_collector").Logger(),
-		pollNowCh: make(chan string, 16),
+		sem:       make(chan struct{}, maxConcurrent),
+		running:   make(map[string]*deviceHandle),
 		reachable: make(map[string]bool),
 	}
 }
 
-// TriggerPoll queues an immediate SNMP poll for one device (by ID) or all
-// devices (empty string).  Non-blocking: if the channel is full the trigger
-// is silently dropped since a poll is already queued.
+// TriggerPoll requests an immediate SNMP poll for one device (by ID) or every
+// running device (empty string), outside its normal ticker cadence — used for
+// trap-triggered re-polls. Non-blocking: if a poll is already queued for a
+// device the trigger is silently dropped.
 func (c *SNMPCollector) TriggerPoll(deviceID string) {
-	select {
-	case c.pollNowCh <- deviceID:
-	default:
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if deviceID == "" {
+		for _, h := range c.running {
+			select {
+			case h.pollNow <- struct{}{}:
+			default:
+			}
+		}
+		return
+	}
+	if h, ok := c.running[deviceID]; ok {
+		select {
+		case h.pollNow <- struct{}{}:
+		default:
+		}
 	}
 }
 
-// SetDevices replaces the device list used by the poller.
-func (c *SNMPCollector) SetDevices(devices []hub.Device) {
+// SetDevices reconciles the set of running per-device poller goroutines
+// against the current device list: starts one for any new device, restarts
+// one whose configuration changed (interval, credentials, IP — anything),
+// and stops one that's no longer assigned to this collector. Restarting on
+// any change (not just add/remove) is what lets an edited polling interval
+// or credential take effect without a process restart.
+func (c *SNMPCollector) SetDevices(ctx context.Context, devices []hub.Device) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.devices = devices
+
+	seen := make(map[string]bool, len(devices))
+	for _, dev := range devices {
+		seen[dev.ID] = true
+		existing, ok := c.running[dev.ID]
+		if ok && reflect.DeepEqual(existing.dev, dev) {
+			continue
+		}
+		if ok {
+			existing.cancel()
+		}
+		devCtx, cancel := context.WithCancel(ctx)
+		h := &deviceHandle{cancel: cancel, dev: dev, pollNow: make(chan struct{}, 1)}
+		c.running[dev.ID] = h
+		go c.runDevice(devCtx, dev, h.pollNow)
+	}
+
+	for id, h := range c.running {
+		if !seen[id] {
+			h.cancel()
+			delete(c.running, id)
+		}
+	}
+
 	c.log.Info().Int("count", len(devices)).Msg("device list updated")
 }
 
-// Run starts periodic SNMP polling.  It blocks until ctx is cancelled.
+// Run blocks until ctx is cancelled, then stops every running device goroutine.
+// Polling itself is entirely driven by the per-device goroutines started by
+// SetDevices — Run does no scheduling of its own.
 func (c *SNMPCollector) Run(ctx context.Context) {
-	interval := time.Duration(c.cfg.PollingIntervalS) * time.Second
-	if interval <= 0 {
-		interval = 60 * time.Second
-	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	c.log.Info().Msg("snmp poller started")
+	<-ctx.Done()
+	c.stopAll()
+	c.log.Info().Msg("snmp poller stopped")
+}
 
-	c.log.Info().Dur("interval", interval).Msg("snmp poller started")
-
-	c.pollAll(ctx)
-
-	for {
-		select {
-		case <-ctx.Done():
-			c.log.Info().Msg("snmp poller stopped")
-			return
-		case <-ticker.C:
-			c.pollAll(ctx)
-		case deviceID := <-c.pollNowCh:
-			c.log.Debug().Str("device_id", deviceID).Msg("trap-triggered immediate re-poll")
-			go c.pollOneByID(ctx, deviceID)
-		}
+// stopAll cancels every running device goroutine. Called on shutdown.
+func (c *SNMPCollector) stopAll() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for id, h := range c.running {
+		h.cancel()
+		delete(c.running, id)
 	}
 }
 
@@ -235,131 +286,99 @@ func (c *SNMPCollector) logReachability(deviceID, ip string, nowReachable bool) 
 	}
 }
 
-// pollOneByID polls a single device by ID and posts its metrics immediately.
-// Used for trap-triggered re-polls.
-func (c *SNMPCollector) pollOneByID(ctx context.Context, deviceID string) {
-	c.mu.RLock()
-	var dev *hub.Device
-	for i := range c.devices {
-		if c.devices[i].ID == deviceID {
-			d := c.devices[i]
-			dev = &d
-			break
+// runDevice is the long-running goroutine for a single device: it polls once
+// immediately, then on its own ticker derived from dev.PollingIntervalS,
+// until ctx is cancelled (device removed or its config changed).
+func (c *SNMPCollector) runDevice(ctx context.Context, dev hub.Device, pollNow <-chan struct{}) {
+	interval := time.Duration(dev.PollingIntervalS) * time.Second
+	if interval <= 0 {
+		interval = time.Duration(c.cfg.PollingIntervalS) * time.Second
+	}
+	if interval <= 0 {
+		interval = 60 * time.Second
+	}
+
+	// Stagger startup across the interval so a bulk device-list refresh
+	// (e.g. many devices reassigned to this collector at once) doesn't poll
+	// them all in the same instant.
+	stagger := time.Duration(rand.Int63n(int64(interval)))
+	select {
+	case <-time.After(stagger):
+	case <-ctx.Done():
+		return
+	}
+
+	c.pollOne(ctx, dev)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.pollOne(ctx, dev)
+		case <-pollNow:
+			c.pollOne(ctx, dev)
+			ticker.Reset(interval) // this cycle's poll already happened — don't double-fire
 		}
 	}
-	c.mu.RUnlock()
+}
 
-	if dev == nil {
-		c.log.Warn().Str("device_id", deviceID).Msg("trap repoll: device not found")
+// pollOne polls a single device and posts its own metrics/routes immediately
+// — no batching with other devices, so one slow device never delays another
+// device's last_polled timestamp. Bounded by the collector-wide semaphore so
+// concurrent outbound SNMP sessions across all device goroutines stay capped.
+func (c *SNMPCollector) pollOne(ctx context.Context, dev hub.Device) {
+	select {
+	case c.sem <- struct{}{}:
+		defer func() { <-c.sem }()
+	case <-ctx.Done():
 		return
 	}
 
 	pollStart := time.Now()
-	lines, _, err := c.pollDevice(ctx, *dev)
+	lines, devRoutes, err := c.pollDevice(ctx, dev)
 	pollDur := time.Since(pollStart)
-	ts := time.Now().UnixMilli()
 	success := err == nil && len(lines) > 0
+
+	c.logReachability(dev.ID, dev.MgmtIP, success)
+	c.log.Debug().Str("device_id", dev.ID).Str("ip", dev.MgmtIP).Dur("poll_duration", pollDur).Bool("success", success).Int("metrics", len(lines)).Msg("poll cycle complete")
+
 	if !success {
 		if err != nil {
-			c.log.Warn().Err(err).Str("device_id", deviceID).Str("ip", dev.MgmtIP).Msg("trap repoll failed")
+			c.log.Warn().Err(err).Str("device_id", dev.ID).
+				Str("ip", dev.MgmtIP).Msg("snmp poll failed")
+		} else {
+			c.log.Warn().Str("device_id", dev.ID).
+				Str("ip", dev.MgmtIP).Msg("snmp poll returned no metrics")
 		}
-		lines = []string{fmt.Sprintf(`anthrimon_device_unreachable{device_id=%q} 1 %d`, deviceID, ts)}
-	}
-	c.logReachability(deviceID, dev.MgmtIP, success)
-	c.log.Debug().Str("device_id", deviceID).Str("ip", dev.MgmtIP).Dur("poll_duration", pollDur).Bool("success", success).Msg("trap repoll cycle complete")
-
-	text := strings.Join(lines, "\n") + "\n"
-	if err := c.hub.PostMetrics(ctx, text); err != nil {
-		c.log.Error().Err(err).Str("device_id", deviceID).Msg("trap repoll: failed to post metrics")
-	}
-}
-
-// pollAll polls every device using a bounded goroutine pool.
-func (c *SNMPCollector) pollAll(ctx context.Context) {
-	c.mu.RLock()
-	devices := make([]hub.Device, len(c.devices))
-	copy(devices, c.devices)
-	c.mu.RUnlock()
-
-	if len(devices) == 0 {
-		return
-	}
-
-	sem := make(chan struct{}, c.cfg.MaxConcurrent)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var lines []string
-
-outer:
-	for _, dev := range devices {
-		dev := dev
-		select {
-		case sem <- struct{}{}:
-		case <-ctx.Done():
-			break outer
-		}
-		wg.Add(1)
-
-		go func() {
-			defer wg.Done()
-			defer func() { <-sem }()
-
-			pollStart := time.Now()
-			devLines, devRoutes, err := c.pollDevice(ctx, dev)
-			pollDur := time.Since(pollStart)
-			success := err == nil && len(devLines) > 0
-
-			c.logReachability(dev.ID, dev.MgmtIP, success)
-			c.log.Debug().Str("device_id", dev.ID).Str("ip", dev.MgmtIP).Dur("poll_duration", pollDur).Bool("success", success).Int("metrics", len(devLines)).Msg("poll cycle complete")
-
-			mu.Lock()
-			defer mu.Unlock()
-
-			if !success {
-				if err != nil {
-					c.log.Warn().Err(err).Str("device_id", dev.ID).
-						Str("ip", dev.MgmtIP).Msg("snmp poll failed")
-				} else {
-					c.log.Warn().Str("device_id", dev.ID).
-						Str("ip", dev.MgmtIP).Msg("snmp poll returned no metrics")
-				}
-				lines = append(lines,
-					fmt.Sprintf(`anthrimon_device_unreachable{device_id=%q} 1 %d`,
-						dev.ID, time.Now().UnixMilli()))
-				return
-			}
-
-			lines = append(lines, devLines...)
-
-			// Routes: SNMP is not the source of truth for Arista-eAPI or
-			// Aruba-CX-REST devices (their routes come from those
-			// collectors' own per-device PostRoutes calls) -- skip posting
-			// here so we don't tell the hub "zero routes, purge" for a
-			// device whose routes are maintained elsewhere. For all other
-			// devices, post unconditionally (even when devRoutes is empty)
-			// so the hub can purge a now-empty table.
-			routeSourceIsSNMP := !routingIsVendorAPI(dev)
-			if routeSourceIsSNMP {
-				if err := c.hub.PostRoutes(ctx, dev.ID, devRoutes); err != nil {
-					c.log.Error().Err(err).Str("device_id", dev.ID).Msg("failed to post routes to hub")
-				} else {
-					c.log.Debug().Str("device_id", dev.ID).Int("routes", len(devRoutes)).Msg("routes posted")
-				}
-			}
-		}()
-	}
-
-	wg.Wait()
-
-	if len(lines) == 0 {
-		return
+		lines = []string{fmt.Sprintf(`anthrimon_device_unreachable{device_id=%q} 1 %d`,
+			dev.ID, time.Now().UnixMilli())}
 	}
 
 	text := strings.Join(lines, "\n") + "\n"
 	if err := c.hub.PostMetrics(ctx, text); err != nil {
-		c.log.Error().Err(err).Msg("failed to post metrics to hub")
-	} else {
-		c.log.Debug().Int("lines", len(lines)).Msg("metrics posted")
+		c.log.Error().Err(err).Str("device_id", dev.ID).Msg("failed to post metrics to hub")
+	}
+
+	if !success {
+		return
+	}
+
+	// Routes: SNMP is not the source of truth for Arista-eAPI or Aruba-CX-REST
+	// devices (their routes come from those collectors' own per-device
+	// PostRoutes calls) -- skip posting here so we don't tell the hub "zero
+	// routes, purge" for a device whose routes are maintained elsewhere. For
+	// all other devices, post unconditionally (even when devRoutes is empty)
+	// so the hub can purge a now-empty table.
+	if !routingIsVendorAPI(dev) {
+		if err := c.hub.PostRoutes(ctx, dev.ID, devRoutes); err != nil {
+			c.log.Error().Err(err).Str("device_id", dev.ID).Msg("failed to post routes to hub")
+		} else {
+			c.log.Debug().Str("device_id", dev.ID).Int("routes", len(devRoutes)).Msg("routes posted")
+		}
 	}
 }
 
@@ -2483,21 +2502,14 @@ type LiveSample struct {
 // The returned channel is closed when ctx is cancelled, max samples (100) are
 // reached, or an SNMP error occurs.  Callers compute rates from successive samples.
 func (c *SNMPCollector) LiveInterface(ctx context.Context, deviceID string, ifIndex int) (<-chan LiveSample, error) {
-	c.mu.RLock()
-	var found hub.Device
-	var ok bool
-	for _, d := range c.devices {
-		if d.ID == deviceID {
-			found = d
-			ok = true
-			break
-		}
-	}
-	c.mu.RUnlock()
+	c.mu.Lock()
+	h, ok := c.running[deviceID]
+	c.mu.Unlock()
 
 	if !ok {
 		return nil, fmt.Errorf("device %s not known to snmp collector", deviceID)
 	}
+	found := h.dev
 
 	cred := pickSNMPCredential(found.Credentials)
 	if cred == nil {

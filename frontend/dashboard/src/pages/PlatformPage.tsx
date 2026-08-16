@@ -24,6 +24,8 @@ interface PlatformSettings {
   max_alerts_per_device_per_hour: number
   auto_close_stale_days:          number
   alert_retention_days:           number
+  mass_failure_min_devices:       number
+  mass_failure_window_s:          number
   notifications_paused:           boolean
   notifications_paused_until:     string | null
   business_hours_enabled:         boolean
@@ -266,6 +268,20 @@ function SettingsTab() {
           <div className="flex items-center gap-2">
             {num('alert_retention_days')}
             <span className="text-xs text-slate-400 shrink-0">days</span>
+          </div>
+        </SettingRow>
+        <SettingRow label="Mass-failure grouping threshold"
+          description="Minimum number of topologically-unrelated devices that must go down within the window below to be flagged as a possible shared/systemic event. Set to 0 to disable.">
+          <div className="flex items-center gap-2">
+            {num('mass_failure_min_devices', '0 = disabled')}
+            <span className="text-xs text-slate-400 shrink-0">devices</span>
+          </div>
+        </SettingRow>
+        <SettingRow label="Mass-failure grouping window"
+          description="Rolling window used by the threshold above — devices whose device_down alerts first-fire within this many seconds of each other are grouped.">
+          <div className="flex items-center gap-2">
+            {num('mass_failure_window_s')}
+            <span className="text-xs text-slate-400 shrink-0">seconds</span>
           </div>
         </SettingRow>
       </div>

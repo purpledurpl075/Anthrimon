@@ -63,7 +63,7 @@ class Device(Base):
     snmp_port: Mapped[int] = mapped_column(Integer, nullable=False, default=161)
     gnmi_port: Mapped[int] = mapped_column(Integer, nullable=False, default=57400)
     gnmi_tls: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    polling_interval_s: Mapped[int] = mapped_column(Integer, nullable=False, default=300)
+    polling_interval_s: Mapped[int] = mapped_column(Integer, nullable=False, default=15)
 
     status: Mapped[str] = mapped_column(
         PgEnum("up", "down", "degraded", "unreachable", "maintenance", "unknown",

@@ -82,6 +82,17 @@ TRAP_CATALOG: dict[str, TrapCatalogEntry] = {
         "is_cataloged": True,
     },
 
+    # ── ENTITY-MIB (RFC 4133) ────────────────────────────────────────────────
+    "entity.configChange": {
+        "label": "Entity Configuration Change",
+        "description": "The physical entity table (entPhysicalTable) changed — a module, "
+                        "power supply, fan, or other FRU was inserted or removed, or a "
+                        "software-visible hardware inventory change occurred. Correlate "
+                        "with recent hardware maintenance.",
+        "category": "standard",
+        "is_cataloged": True,
+    },
+
     # ── BGP4-MIB traps ───────────────────────────────────────────────────────
     "bgp.backwardTransition": {
         "label": "BGP Backward Transition",
@@ -192,6 +203,15 @@ TRAP_CATALOG: dict[str, TrapCatalogEntry] = {
         "description": "An IS-IS adjacency to a neighbor came up or went down. A drop to "
                         "'down' indicates a lost neighbor relationship — check the link "
                         "and neighbor's IS-IS state.",
+        "category": "isis",
+        "is_cataloged": True,
+    },
+    "isis.rejectedAdjacency": {
+        "label": "IS-IS Rejected Adjacency",
+        "description": "IS-IS received a Hello PDU from a neighbor but did not form an "
+                        "adjacency — usually a mismatch (area, IS-IS level, MTU, "
+                        "authentication) preventing the two routers from agreeing to "
+                        "become neighbors. Check the Hello parameters on both sides.",
         "category": "isis",
         "is_cataloged": True,
     },
@@ -347,6 +367,16 @@ TRAP_CATALOG: dict[str, TrapCatalogEntry] = {
         "category": "aruba_cx",
         "is_cataloged": True,
     },
+    "aruba_cx.rmonEvent": {
+        "label": "Aruba CX Event Log Notification",
+        "description": "ARUBAWIRED-MGMD-RMON-TRAP-MIB's generic RMON event notification — "
+                        "Aruba CX's mechanism for exporting internal event-log entries (e.g. "
+                        "\"audit-log buffer wrapped\") over SNMP. Check the eventDescription "
+                        "varbind for the actual message; severity depends entirely on what "
+                        "that message says.",
+        "category": "aruba_cx",
+        "is_cataloged": True,
+    },
     "aruba_cx.trap": {
         "label": "Aruba CX Notification",
         "description": _GENERIC.format(vendor="Aruba CX"),
@@ -395,6 +425,63 @@ TRAP_CATALOG: dict[str, TrapCatalogEntry] = {
         "category": "cisco",
         "is_cataloged": True,
     },
+    "cisco.syslogMessage": {
+        "label": "Cisco Syslog-over-SNMP Message",
+        "description": "CISCO-SYSLOG-MIB's clogMessageGenerated — the device mirrored a "
+                        "local syslog message as an SNMP trap (clogNotificationsEnabled). "
+                        "The varbinds carry the same facility/severity/message the syslog "
+                        "line would show; check clogHistSeverity for how urgent it is.",
+        "category": "cisco",
+        "is_cataloged": True,
+    },
+    "cisco.rfSwitchover": {
+        "label": "Cisco Redundancy Framework Switchover",
+        "description": "CISCO-RF-MIB's ciscoRFSwactNotif — an actual active/standby "
+                        "switchover occurred on a redundant unit (dual supervisor/RE, or "
+                        "an HA pair). This is the fault-relevant sibling of "
+                        "cisco.rfProgression — investigate why the previously-active unit "
+                        "yielded control.",
+        "category": "cisco",
+        "is_cataloged": True,
+    },
+    "cisco.rfProgression": {
+        "label": "Cisco Redundancy Framework Progression",
+        "description": "CISCO-RF-MIB's ciscoRFProgressionNotif — a redundant unit (dual "
+                        "supervisor/RE, or an HA pair) advanced through the Redundancy "
+                        "Framework state machine toward active/standby. Check "
+                        "cRFStatusUnitState / cRFStatusPeerUnitState for the resulting "
+                        "roles; frequent progression events can indicate flapping "
+                        "redundancy hardware.",
+        "category": "cisco",
+        "is_cataloged": True,
+    },
+    "cisco.tcpConnectionClose": {
+        "label": "Cisco TTY/VTY Session Closed",
+        "description": "Legacy Cisco enterprise trap #1 (CISCOTRAP-MIB) — a TCP connection "
+                        "backing a terminal/VTY management session (SSH/Telnet) closed. "
+                        "This fires on ordinary session teardown, including from our own "
+                        "SSH-based polling/config-collection — informational, not itself "
+                        "a fault.",
+        "category": "cisco",
+        "is_cataloged": True,
+    },
+    "cisco.ipsecCryptomapAdded": {
+        "label": "Cisco IPsec Cryptomap Added",
+        "description": "CISCO-IPSEC-MIB's cipsCryptomapAdded — a new IPsec cryptomap "
+                        "entry was added to a cryptomap set, usually from a config change "
+                        "enabling or extending a VPN.",
+        "category": "cisco",
+        "is_cataloged": True,
+    },
+    "cisco.ipsecCryptomapDeleted": {
+        "label": "Cisco IPsec Cryptomap Deleted",
+        "description": "CISCO-IPSEC-MIB's cipsCryptomapDeleted — an IPsec cryptomap entry "
+                        "was removed from a cryptomap set. Confirm this was an intentional "
+                        "config change — an unexpected removal will drop the associated "
+                        "VPN traffic.",
+        "category": "cisco",
+        "is_cataloged": True,
+    },
     "cisco.trap": {
         "label": "Cisco Notification",
         "description": _GENERIC.format(vendor="Cisco"),
@@ -408,6 +495,17 @@ TRAP_CATALOG: dict[str, TrapCatalogEntry] = {
         "description": _GENERIC.format(vendor="Juniper"),
         "category": "juniper",
         "is_cataloged": False,
+    },
+
+    # ── Net-SNMP agent (1.3.6.1.4.1.8072) ───────────────────────────────────
+    "netsnmp.agentStart": {
+        "label": "Net-SNMP Agent Started",
+        "description": "NET-SNMP-AGENT-MIB's nsNotifyStart — a device's Net-SNMP-based "
+                        "agent process started. Expected after an agent restart or device "
+                        "reboot; unexpected occurrences may indicate the SNMP agent "
+                        "crashed and was restarted by a supervisor process.",
+        "category": "netsnmp",
+        "is_cataloged": True,
     },
 
     # ── Fallback ─────────────────────────────────────────────────────────────

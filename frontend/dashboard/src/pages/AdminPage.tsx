@@ -788,6 +788,8 @@ interface TenantAlertingSettings {
   max_alerts_per_device_per_hour: number
   auto_close_stale_days:          number
   alert_retention_days:           number
+  mass_failure_min_devices:       number
+  mass_failure_window_s:          number
   notifications_paused:           boolean
   notifications_paused_until:     string | null
   business_hours_enabled:         boolean
@@ -928,6 +930,14 @@ function AlertingSettingsTab() {
         <SettingRow label="Alert retention"
           description="How long resolved/expired/suppressed alerts are kept before being purged.">
           {num('alert_retention_days', 'd')}
+        </SettingRow>
+        <SettingRow label="Mass-failure grouping threshold"
+          description="Minimum number of topologically-unrelated devices that must go down within the window below to be flagged as a possible shared/systemic event. Set to 0 to disable.">
+          {num('mass_failure_min_devices', ' devices')}
+        </SettingRow>
+        <SettingRow label="Mass-failure grouping window"
+          description="Rolling window used by the threshold above — devices whose device_down alerts first-fire within this many seconds of each other are grouped.">
+          {num('mass_failure_window_s', 's')}
         </SettingRow>
       </div>
 

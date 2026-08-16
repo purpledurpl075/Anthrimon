@@ -64,7 +64,7 @@ class DeviceUpdate(BaseModel):
     snmp_port: Optional[int] = None
     gnmi_port: Optional[int] = None
     gnmi_tls: Optional[bool] = None
-    polling_interval_s: Optional[int] = None
+    polling_interval_s: Optional[int] = Field(default=None, ge=10, le=86400)
     site_id: Optional[uuid.UUID] = None
     collector_id: Optional[uuid.UUID] = None
     tags: Optional[list[str]] = None

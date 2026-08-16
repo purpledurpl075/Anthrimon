@@ -39,7 +39,7 @@ const ALERT_STATUS_BG: Record<string, string> = {
 const CATEGORY_LABEL: Record<string, string> = {
   standard: 'Standard', bgp: 'BGP', ospf: 'OSPF', isis: 'IS-IS', mpls: 'MPLS',
   stp: 'STP', lldp: 'LLDP', vrrp: 'VRRP', arista: 'Arista', aruba_cx: 'Aruba CX',
-  hp: 'HP', cisco: 'Cisco', juniper: 'Juniper', unknown: 'Unknown',
+  hp: 'HP', cisco: 'Cisco', juniper: 'Juniper', netsnmp: 'Net-SNMP', unknown: 'Unknown',
 }
 
 // ── Trap rate mini chart ──────────────────────────────────────────────────────
@@ -424,9 +424,23 @@ function TrapTable({ minutes, deviceId, severity, trapType, query }: {
                       {trap.varbinds && trap.varbinds.length > 0 && (
                         <div className="mt-1">
                           <p className="text-[10px] text-slate-400 mb-1">Varbinds</p>
-                          <div className="bg-slate-900 text-green-400 font-mono text-[11px] rounded-lg px-3 py-2 space-y-0.5">
+                          <div className="bg-slate-900 font-mono text-[11px] rounded-lg px-3 py-2 space-y-2">
                             {trap.varbinds.map((v, i) => (
-                              <div key={i}><span className="text-slate-400" title={v.name ? v.oid : undefined}>{v.name ?? v.oid}</span> <span className="text-slate-300">=</span> {String(v.value)}</div>
+                              <div key={i}>
+                                {/* Original, unmodified wire form — always shown */}
+                                <div className="text-green-400">
+                                  <span className="text-slate-500">.{v.oid}</span> <span className="text-slate-600">({v.type})</span> = {String(v.value)}
+                                </div>
+                                {/* Human-readable reading — always shown, even when uncatalogued */}
+                                <div className="flex items-center gap-1.5 mt-0.5">
+                                  <span className="text-slate-400">{v.message}</span>
+                                  {!v.name && (
+                                    <span className="shrink-0 text-[9px] font-bold px-1 py-px rounded bg-amber-100 text-amber-700" title="This varbind's OID isn't in the catalog yet">
+                                      uncatalogued OID
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
                             ))}
                           </div>
                         </div>

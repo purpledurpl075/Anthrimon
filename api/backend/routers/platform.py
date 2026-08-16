@@ -44,6 +44,8 @@ class PlatformGlobalSettingsRead(BaseModel):
     max_alerts_per_device_per_hour: int           = 0
     auto_close_stale_days:          int           = 0
     alert_retention_days:           int           = 90
+    mass_failure_min_devices:       int           = 3
+    mass_failure_window_s:          int           = 30
     notifications_paused:           bool          = False
     notifications_paused_until:     Optional[str] = None
     business_hours_enabled:         bool          = False

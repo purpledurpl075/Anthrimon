@@ -170,6 +170,28 @@ async def get_alert(
     read = AlertRead.model_validate(alert)
     read.suppressed_child_count = len(child_rows)
     read.suppressed_children = children
+
+    if alert.correlation_id is not None:
+        sibling_rows = (await db.execute(text("""
+            SELECT a.id, a.title, a.severity, a.triggered_at,
+                   ar.metric, d.hostname
+              FROM alerts a
+         LEFT JOIN alert_rules ar ON ar.id = a.rule_id
+         LEFT JOIN devices d      ON d.id  = a.device_id
+             WHERE a.correlation_id = :cid
+               AND a.id != :aid
+             ORDER BY a.triggered_at DESC
+             LIMIT 50
+        """), {"cid": alert.correlation_id, "aid": alert.id})).all()
+        read.mass_failure_siblings = [
+            SuppressedChildSummary(
+                id=row.id, title=row.title, severity=row.severity,
+                metric=row.metric, device_name=row.hostname,
+                triggered_at=row.triggered_at,
+            )
+            for row in sibling_rows
+        ]
+
     return read
 
 

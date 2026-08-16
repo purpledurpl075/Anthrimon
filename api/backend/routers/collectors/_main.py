@@ -3512,18 +3512,28 @@ async def _collect_v3_users_for_collector(collector_id: str | None, tenant_id: s
 
     rows = (await db.execute(q)).all()
 
-    seen: set[str] = set()
+    # Keyed by (username, engine_id), not just username: SNMPv3 traps are
+    # authenticated per-engine (each device localizes the same passphrase
+    # against its own local engine ID), so a credential shared by several
+    # devices — the normal case for a fleet polled under one username —
+    # legitimately needs one createUser line per distinct engine ID. Deduping
+    # on username alone silently dropped every device but the first one
+    # returned by the join, so only one device's traps would ever validate.
+    seen: set[tuple[str, str]] = set()
     users: list[dict] = []
     for cred, device_engine_id in rows:
         cd = cred.data if isinstance(cred.data, dict) else {}
         cd = _crypto.decrypt_credential_data(cd)
         username = cd.get("username", "")
-        if not username or username in seen:
+        if not username:
             continue
-        seen.add(username)
         # Device record takes precedence; fall back to credential JSON for
         # trap-only credentials that have no device link.
         engine_id = device_engine_id or cd.get("engine_id", "")
+        dedup_key = (username, engine_id)
+        if dedup_key in seen:
+            continue
+        seen.add(dedup_key)
         users.append({
             "username":   username,
             "auth_proto": _AUTH_PROTO_MAP.get(cd.get("auth_protocol", "sha256").lower(), "SHA-256"),

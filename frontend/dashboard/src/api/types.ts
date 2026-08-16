@@ -77,6 +77,8 @@ export interface Alert {
   suppressed_by_alert_id: string | null
   suppressed_child_count: number
   suppressed_children?: SuppressedChildSummary[]
+  correlation_id: string | null
+  mass_failure_siblings?: SuppressedChildSummary[]
   created_at: string
   updated_at: string
 }
@@ -109,7 +111,6 @@ export interface AlertRule {
   escalation_seconds: number | null
   stable_for_seconds: number
   notify_on_resolve: boolean
-  suppress_if_parent_down: boolean
   custom_oid: string | null
   created_at: string
   updated_at: string

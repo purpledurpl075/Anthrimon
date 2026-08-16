@@ -35,6 +35,11 @@ PLATFORM_DEFAULTS: dict = {
     "max_alerts_per_device_per_hour": 0,
     "auto_close_stale_days":          0,
     "alert_retention_days":           90,
+    # Mass-simultaneous-failure heuristic — groups N unrelated device_down
+    # alerts that first-fire within the same short window under one
+    # correlation_id for operator clarity, without suppressing any of them.
+    "mass_failure_min_devices": 3,
+    "mass_failure_window_s":    30,
     # Notifications
     "notifications_paused":       False,
     "notifications_paused_until": None,
@@ -79,6 +84,8 @@ TENANT_OVERRIDABLE_KEYS: frozenset[str] = frozenset({
     "business_hours_start",
     "business_hours_end",
     "business_days",
+    "mass_failure_min_devices",
+    "mass_failure_window_s",
 })
 
 

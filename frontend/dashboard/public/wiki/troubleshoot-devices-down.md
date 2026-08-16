@@ -47,4 +47,4 @@ After changing the DB password, all collectors must be updated and restarted. Un
 
 ## Device is up but showing unreachable
 
-The alert engine marks a device unreachable when `last_polled` is older than `2.5 × poll_interval` (default: 37.5 seconds). If the device responds to SNMP but `last_polled` is not updating, the collector is polling but failing to write to the database.
+The alert engine marks a device unreachable when `last_polled` is older than `max(90s, poll_interval × 6)` — 90 seconds by default. If the device responds to SNMP but `last_polled` is not updating, the collector is polling but failing to write to the database.

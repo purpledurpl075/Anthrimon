@@ -278,7 +278,7 @@ export interface TrapEvent {
   oid:            string
   oid_name:       string | null
   severity:       string
-  varbinds:       { oid: string; type: string; value: string; name: string | null }[]
+  varbinds:       { oid: string; type: string; value: string; name: string | null; value_name: string | null; message: string }[]
   snmp_version:   string
   received_at:    string
   label:          string

@@ -584,6 +584,8 @@ class TenantAlertingSettings(BaseModel):
     max_alerts_per_device_per_hour: int
     auto_close_stale_days:          int
     alert_retention_days:           int
+    mass_failure_min_devices:       int
+    mass_failure_window_s:          int
     notifications_paused:           bool
     notifications_paused_until:     Optional[str] = None
     business_hours_enabled:         bool

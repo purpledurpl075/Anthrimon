@@ -97,9 +97,6 @@ class AlertRule(Base):
     escalation_seconds: Mapped[Optional[int]] = mapped_column(Integer)
     # Flap suppression
     stable_for_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
-    # Correlated suppression
-    suppress_if_parent_down: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    parent_device_id: Mapped[Optional[uuid.UUID]] = mapped_column(UUID(as_uuid=True), ForeignKey("devices.id"))
     # Baseline deviation
     baseline_enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     baseline_deviation_pct: Mapped[Optional[float]] = mapped_column()

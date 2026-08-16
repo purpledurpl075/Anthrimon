@@ -317,7 +317,6 @@ const DEFAULT_FORM = {
   escalation_severity: '', escalation_seconds: '',
   stable_for_seconds: '0',
   notify_on_resolve: 'true',
-  suppress_if_parent_down: 'false',
   renotify_seconds: '3600',
   custom_oid: '',
   scope: 'all',
@@ -342,7 +341,6 @@ function RuleModal({ editing, onClose }: { editing: AlertRule | null; onClose: (
     escalation_seconds: String(editing.escalation_seconds ?? ''),
     stable_for_seconds: String(editing.stable_for_seconds ?? '0'),
     notify_on_resolve: String(editing.notify_on_resolve ?? true),
-    suppress_if_parent_down: String(editing.suppress_if_parent_down ?? false),
     renotify_seconds: String(editing.renotify_seconds ?? 3600),
     custom_oid: editing.custom_oid ?? '',
     scope: !editing.device_selector || Object.keys(editing.device_selector).length === 0
@@ -408,7 +406,6 @@ function RuleModal({ editing, onClose }: { editing: AlertRule | null; onClose: (
         escalation_seconds: f.escalation_seconds ? Number(f.escalation_seconds) : null,
         stable_for_seconds: Number(f.stable_for_seconds) || 0,
         notify_on_resolve: f.notify_on_resolve === 'true',
-        suppress_if_parent_down: f.suppress_if_parent_down === 'true',
         renotify_seconds: Number(f.renotify_seconds) || 3600,
         device_selector: buildSelector(),
         channel_ids: f.channel_ids,
@@ -608,12 +605,6 @@ function RuleModal({ editing, onClose }: { editing: AlertRule | null; onClose: (
                   onChange={e => set('notify_on_resolve', String(e.target.checked))}
                   className="rounded border-slate-300 text-blue-600" />
                 Notify when alert auto-resolves
-              </label>
-              <label className="flex items-center gap-2 text-sm text-slate-700 cursor-pointer">
-                <input type="checkbox" checked={f.suppress_if_parent_down === 'true' || f.suppress_if_parent_down === true as any}
-                  onChange={e => set('suppress_if_parent_down', String(e.target.checked))}
-                  className="rounded border-slate-300 text-blue-600" />
-                Suppress if parent device is unreachable
               </label>
             </div>
 

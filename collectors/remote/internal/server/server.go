@@ -439,6 +439,7 @@ type trapV3User struct {
 	AuthKey   string `json:"auth_key"`
 	PrivProto string `json:"priv_proto"` // AES, AES-256, DES, etc.
 	PrivKey   string `json:"priv_key"`
+	EngineID  string `json:"engine_id"` // hex, no "0x" prefix — the sending device's own SNMP engine ID
 }
 
 type trapConfigReq struct {
@@ -476,14 +477,22 @@ func buildSnmptrapConf(users []trapV3User) string {
 		}
 		b.WriteString("\n# SNMPv3 users (plaintext; snmptrapd localizes keys on restart)\n")
 		for _, u := range users {
+			// -e binds this createUser to the SENDING device's own engine ID.
+			// Without it, snmptrapd localizes the key against its own local
+			// engine instead of the remote device's — the entry is created
+			// but can never authenticate an incoming trap from that device.
+			eFlag := ""
+			if u.EngineID != "" {
+				eFlag = fmt.Sprintf("-e 0x%s ", u.EngineID)
+			}
 			if u.PrivProto != "" && u.PrivKey != "" {
-				fmt.Fprintf(&b, "createUser %s %s \"%s\" %s \"%s\"\n",
-					u.Username, u.AuthProto, u.AuthKey, u.PrivProto, u.PrivKey)
+				fmt.Fprintf(&b, "createUser %s%s %s \"%s\" %s \"%s\"\n",
+					eFlag, u.Username, u.AuthProto, u.AuthKey, u.PrivProto, u.PrivKey)
 			} else if u.AuthProto != "" && u.AuthKey != "" {
-				fmt.Fprintf(&b, "createUser %s %s \"%s\"\n",
-					u.Username, u.AuthProto, u.AuthKey)
+				fmt.Fprintf(&b, "createUser %s%s %s \"%s\"\n",
+					eFlag, u.Username, u.AuthProto, u.AuthKey)
 			} else {
-				fmt.Fprintf(&b, "createUser %s\n", u.Username)
+				fmt.Fprintf(&b, "createUser %s%s\n", eFlag, u.Username)
 			}
 		}
 	}
@@ -517,9 +526,16 @@ func (s *Server) handleTrapConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remove localized key DB so snmptrapd re-derives keys from the new createUser entries.
-	if err := os.Remove(persistPath); err != nil && !os.IsNotExist(err) {
-		s.log.Warn().Err(err).Str("path", persistPath).Msg("trap-config: could not remove persistent user DB")
+	// Clear the localized key DB so snmptrapd re-derives keys from the new
+	// createUser entries instead of merging stale ones from a prior config.
+	// Truncate in place rather than unlink: deleting a file needs write
+	// permission on its *directory* (usually root-owned, e.g. /var/lib/snmp),
+	// but the file itself may be group-writable to this process even when
+	// the directory isn't — truncating only needs the latter.
+	if f, err := os.OpenFile(persistPath, os.O_WRONLY|os.O_TRUNC, 0); err != nil && !os.IsNotExist(err) {
+		s.log.Warn().Err(err).Str("path", persistPath).Msg("trap-config: could not clear persistent user DB")
+	} else if f != nil {
+		_ = f.Close()
 	}
 
 	if err := exec.Command("systemctl", "restart", "snmptrapd").Run(); err != nil {

@@ -217,6 +217,7 @@ def _build_ctx(alert: Alert, rule: AlertRule, resolved: bool, platform: Optional
         "platform_name":  platform.get("platform_name", "Anthrimon"),
         "base_url":       base_url,
         "revived_child_count": int(alert_ctx.get("revived_child_count", 0)) if resolved else 0,
+        "mass_failure_group_size": int((alert_ctx.get("mass_failure") or {}).get("group_size", 0)),
     }
 
 
@@ -706,6 +707,10 @@ def _build_email(
         _extra.append(f'<tr><td {_lbl}>Neighbor</td><td {_mono}>{ctx["neighbor"]}</td></tr>')
     if alert_ctx.get("ospf_state"):
         _extra.append(f'<tr><td {_lbl}>OSPF State</td><td {_mono}>{ctx["ospf_state"]}</td></tr>')
+    if ctx.get("mass_failure_group_size"):
+        n = ctx["mass_failure_group_size"]
+        _extra.append(f'<tr><td {_lbl}>Note</td><td {_cell}>{n - 1} other device{"s" if n != 2 else ""} '
+                       f'also went down in this same window — possible shared/systemic event.</td></tr>')
     extra_rows = "\n        ".join(_extra)
 
     if resolved:
@@ -744,6 +749,10 @@ def _build_email(
         plain_lines.append(f"Neighbor:  {ctx['neighbor']}")
     if alert_ctx.get("ospf_state"):
         plain_lines.append(f"OSPF State:{ctx['ospf_state']}")
+    if ctx.get("mass_failure_group_size"):
+        n = ctx["mass_failure_group_size"]
+        plain_lines.append(f"Note:      {n - 1} other device{'s' if n != 2 else ''} also went down in this "
+                            f"same window — possible shared/systemic event")
     if resolved:
         dur_txt = f" ({duration})" if duration else ""
         plain_lines.append(f"Resolved:  {ctx['resolved_at']}{dur_txt}")

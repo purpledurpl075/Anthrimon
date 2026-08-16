@@ -515,8 +515,56 @@ class AlertEngine:
                 await sp.rollback()
                 logger.error("rule_eval_error", rule_id=rule_id_str, error=str(exc), exc_info=True)
 
+        await self._detect_mass_failure_groups(db, tenant_ids, settings_by_tenant, dirty_tenants)
         await self._purge_expired_windows(db)
         return pending, dirty_tenants
+
+    async def _detect_mass_failure_groups(
+        self, db: AsyncSession, tenant_ids: set[str],
+        settings_by_tenant: dict[str, dict], dirty_tenants: set[uuid.UUID],
+    ) -> None:
+        """Tag N topologically-unrelated device_down alerts that all first-fired
+        within the same short window with a shared correlation_id, so operators
+        can see they likely share a cause (collector hiccup, shared uplink/PDU,
+        a monitoring-restart artifact) without suppressing any of them — each
+        device is still genuinely down and must remain individually findable.
+        Anything already explained by Tier 0-3 correlation is excluded by
+        construction (requires suppressed_by_alert_id IS NULL) — only alerts
+        with no other explanation qualify as a candidate mass-failure event.
+        This only labels coincident firings for operator clarity; it makes no
+        attempt to distinguish a real shared-infrastructure event from an
+        artifact of the eval loop having been paused (e.g. an API restart).
+        """
+        for tid in tenant_ids:
+            settings = settings_by_tenant.get(tid, {})
+            min_devices = int(settings.get("mass_failure_min_devices", 3))
+            window_s = int(settings.get("mass_failure_window_s", 30))
+            if min_devices <= 0:
+                continue
+            alerts = (await db.execute(
+                select(Alert).join(AlertRule, AlertRule.id == Alert.rule_id).where(
+                    Alert.tenant_id == uuid.UUID(tid),
+                    AlertRule.metric == "device_down",
+                    Alert.status == "open",
+                    Alert.suppressed_by_alert_id.is_(None),
+                    Alert.triggered_at > datetime.now(timezone.utc) - timedelta(seconds=window_s),
+                )
+            )).scalars().all()
+            distinct_devices = {a.device_id for a in alerts}
+            if len(distinct_devices) < min_devices:
+                continue
+            to_tag = [a for a in alerts if a.correlation_id is None]
+            if not to_tag:
+                continue
+            gid = next((a.correlation_id for a in alerts if a.correlation_id is not None), None) or uuid.uuid4()
+            for a in to_tag:
+                a.correlation_id = gid
+                ctx = dict(a.context or {})
+                ctx["mass_failure"] = {"group_size": len(distinct_devices)}
+                a.context = ctx
+            dirty_tenants.add(uuid.UUID(tid))
+            logger.info("mass_failure_group_tagged", tenant_id=tid,
+                        group_id=str(gid), device_count=len(distinct_devices))
 
     async def _purge_expired_windows(self, db: AsyncSession) -> None:
         """Delete one-time maintenance windows that have passed their end time."""
@@ -574,8 +622,15 @@ class AlertEngine:
             if rule.metric in excluded_metrics:
                 continue
 
-            # Skip if device is in any active maintenance window
-            if device_in_maintenance(device, active_windows):
+            # Skip if device is in any active maintenance window this rule
+            # respects. An empty maintenance_window_ids list (the default)
+            # means "respect every active tenant window"; a non-empty list
+            # scopes the rule to just those specific windows.
+            windows_for_rule = (
+                [w for w in active_windows if str(w.id) in rule.maintenance_window_ids]
+                if rule.maintenance_window_ids else active_windows
+            )
+            if device_in_maintenance(device, windows_for_rule):
                 continue
 
             pre_breach_count = len(breaches)
@@ -717,32 +772,6 @@ class AlertEngine:
                 self._last_clear[fp] = now
                 self._fp_last_seen[fp] = now  # keep alive: suppress history still useful
 
-        # ── Correlated suppression: build set of devices whose parent is down ──
-        suppressed_device_ids: set[str] = set()
-        if rule.suppress_if_parent_down and rule.parent_device_id:
-            parent_alert = (await db.execute(
-                text("""
-                    SELECT 1 FROM alerts
-                    WHERE device_id = :pid
-                      AND status IN ('open','acknowledged')
-                      AND severity IN ('critical','major')
-                    LIMIT 1
-                """),
-                {"pid": str(rule.parent_device_id)},
-            )).first()
-            if parent_alert:
-                # Only suppress devices that are OSPF neighbors of the parent —
-                # not the entire rule scope, which could silence the whole tenant.
-                neighbor_rows = (await db.execute(
-                    text("""
-                        SELECT d.id::text FROM devices d
-                        JOIN ospf_neighbors n ON d.mgmt_ip = n.neighbor_ip
-                        WHERE n.device_id = :pid
-                    """),
-                    {"pid": str(rule.parent_device_id)},
-                )).fetchall()
-                suppressed_device_ids = {r[0] for r in neighbor_rows}
-
         # ── Fire / suppress alerts ─────────────────────────────────────────────
         _storm_counts: dict[str, int] = {}  # device_id → recent alert count, cached per cycle
         for breach in breaches:
@@ -781,14 +810,24 @@ class AlertEngine:
                         self._suppress_until_clear.add(fp)
                         continue
 
+                # Parent-child correlation (device_down / interface_down / peer-alert /
+                # collector-offline cascade) — computed before storm protection so a
+                # correlated cascade never trips the blunt per-device cap.
+                parent_aid = suppression.parent_for(
+                    breach.device_id, rule.metric,
+                    peer_ip=breach.extra.get("peer_ip") if rule.metric == "bgp_session_down" else None,
+                )
+                suppressed = parent_aid is not None
+
                 # ── Storm protection ────────────────────────────────────────────
                 storm_limit = int((platform or {}).get("max_alerts_per_device_per_hour", 0))
-                if storm_limit > 0 and breach.device_id:
+                if storm_limit > 0 and breach.device_id and not suppressed:
                     if breach.device_id not in _storm_counts:
                         _storm_counts[breach.device_id] = (await db.execute(text(
                             "SELECT count(*) FROM alerts "
                             "WHERE device_id = :did::uuid "
-                            "  AND triggered_at > now() - interval '1 hour'"
+                            "  AND triggered_at > now() - interval '1 hour' "
+                            "  AND status != 'suppressed'"
                         ), {"did": breach.device_id})).scalar_one()
                     if _storm_counts[breach.device_id] >= storm_limit:
                         logger.warning("storm_protection_triggered",
@@ -831,11 +870,6 @@ class AlertEngine:
                             pending.append((storm_alert, rule, False))
                         continue
 
-                # Existing OSPF-neighbor opt-in suppression (parent_device_id on rule)
-                ospf_suppressed = breach.device_id in suppressed_device_ids
-                # New automatic parent-child suppression (device_down / interface_down cascade)
-                parent_aid = suppression.parent_for(breach.device_id, rule.metric)
-                suppressed  = ospf_suppressed or parent_aid is not None
                 alert = Alert(
                     id=uuid.uuid4(),
                     tenant_id=rule.tenant_id,
@@ -878,22 +912,34 @@ class AlertEngine:
                     alert_engine_alerts_suppressed().inc(metric=rule.metric,
                                                          reason="created_suppressed")
             elif existing.status == "suppressed":
-                # Re-evaluate suppression: if neither the OSPF-neighbor rule nor
-                # the parent-child map flags this device any more, the parent
-                # recovered → unsuppress and notify.
-                still_ospf = breach.device_id in suppressed_device_ids
-                still_auto = suppression.parent_for(breach.device_id, rule.metric) is not None
-                if not still_ospf and not still_auto:
-                    existing.status = "open"
+                # Re-evaluate suppression: if the parent-child map no longer flags
+                # this device, the parent recovered → unsuppress and notify.
+                parent_aid = suppression.parent_for(
+                    breach.device_id, rule.metric,
+                    peer_ip=breach.extra.get("peer_ip") if rule.metric == "bgp_session_down" else None,
+                )
+                if parent_aid == existing.id:
+                    parent_aid = None  # an alert can never be its own parent
+                if parent_aid is None:
+                    # Preserve a prior acknowledgement instead of forcing it back
+                    # to 'open' — suppression shouldn't erase an operator's ack.
+                    existing.status = "acknowledged" if existing.acknowledged_at is not None else "open"
                     existing.suppressed_by_alert_id = None
                     existing.last_notified_at = now
                     dirty_tenants.add(rule.tenant_id)
                     pending.append((existing, rule, False))
-            elif existing.status == "open":
-                # Parent fired AFTER this child was opened — retroactively suppress.
-                # (Common when the upstream switch went down a moment after a port
-                # alert on the downstream device fired.)
-                parent_aid = suppression.parent_for(breach.device_id, rule.metric)
+            elif existing.status in ("open", "acknowledged"):
+                # Parent fired AFTER this child was opened/acked — retroactively
+                # suppress. (Common when the upstream switch went down a moment
+                # after a port alert on the downstream device fired.) The
+                # acknowledgement, if any, is preserved and restored above when
+                # the alert is later unsuppressed.
+                parent_aid = suppression.parent_for(
+                    breach.device_id, rule.metric,
+                    peer_ip=breach.extra.get("peer_ip") if rule.metric == "bgp_session_down" else None,
+                )
+                if parent_aid == existing.id:
+                    parent_aid = None
                 if parent_aid is not None:
                     existing.status = "suppressed"
                     existing.suppressed_by_alert_id = parent_aid
@@ -932,10 +978,15 @@ class AlertEngine:
                     pending.append((alert, rule, False))
 
         # ── Auto-resolve with flap suppression ─────────────────────────────────
+        # Includes 'suppressed' alerts: a child alert whose own condition clears
+        # while its parent is still down would otherwise sit in status='suppressed'
+        # forever (invisible, unresolved) until the parent eventually resolves or
+        # retention purges it. It resolves directly here, bypassing the
+        # revive-to-open dance, once its own condition has been clear long enough.
         open_alerts = (await db.execute(
             select(Alert).where(
                 Alert.rule_id == rule.id,
-                Alert.status.in_(["open", "acknowledged"]),
+                Alert.status.in_(["open", "acknowledged", "suppressed"]),
                 Alert.triggered_at >= now - timedelta(days=90),
             )
         )).scalars().all()
@@ -947,6 +998,9 @@ class AlertEngine:
             if fp:
                 self._fp_last_seen[fp] = now
             if fp in breaching_fps:
+                if alert.status == "suppressed":
+                    # Parent still explains this — don't renotify a suppressed alert.
+                    continue
                 # Still breaching — check re-notify interval
                 if rule.renotify_seconds > 0 and alert.last_notified_at is not None:
                     elapsed = (now - alert.last_notified_at).total_seconds()
@@ -955,10 +1009,11 @@ class AlertEngine:
                         pending.append((alert, rule, False))
                 continue
 
-            # Acknowledged alerts auto-resolve too once the condition clears and
-            # stays clear (same stability gate as open alerts below) — otherwise
-            # an acked-then-cleared alert sits forever and silently absorbs any
-            # future recurrence via the fingerprint dedup check above.
+            # Acknowledged and suppressed alerts auto-resolve too once the
+            # condition clears and stays clear (same stability gate as open
+            # alerts below) — otherwise a cleared alert sits forever and
+            # silently absorbs any future recurrence via the fingerprint
+            # dedup check above.
 
             # Condition cleared — start or check the stable clock
             stable_gate = max(rule.stable_for_seconds or 0, _MIN_STABLE_FOR)
@@ -992,7 +1047,8 @@ class AlertEngine:
                 )
 
             # Cascade-unsuppress: any alert that pointed at this one as its
-            # parent loses its suppressor.  Flip them to 'open' so the next cycle
+            # parent loses its suppressor.  Flip them to 'open' (or back to
+            # 'acknowledged' if they carried a preserved ack) so the next cycle
             # re-evaluates them naturally (still breaching → renotify; cleared
             # → auto-resolve).
             cascade = (await db.execute(
@@ -1002,7 +1058,7 @@ class AlertEngine:
                 )
             )).scalars().all()
             for child in cascade:
-                child.status = "open"
+                child.status = "acknowledged" if child.acknowledged_at is not None else "open"
                 child.suppressed_by_alert_id = None
                 child.last_notified_at = None  # let next cycle decide notify timing
                 logger.info("alert_unsuppressed",
@@ -1014,7 +1070,11 @@ class AlertEngine:
                 alert.context = ctx
 
             logger.info("alert_auto_resolved", alert_id=str(alert.id), rule=rule.name)
-            if rule.notify_on_resolve:
+            # Only notify if the alert was ever actually notified about in the
+            # first place — a suppressed alert that resolves without ever having
+            # been surfaced to an operator shouldn't generate a "resolved" email
+            # for something they were never told about.
+            if alert.last_notified_at is not None and rule.notify_on_resolve:
                 pending.append((alert, rule, True))
 
         return pending

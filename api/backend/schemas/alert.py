@@ -29,6 +29,8 @@ class AlertRead(BaseModel):
     suppressed_by_alert_id: Optional[uuid.UUID] = None
     suppressed_child_count: int = 0
     suppressed_children: list["SuppressedChildSummary"] = []
+    correlation_id: Optional[uuid.UUID] = None
+    mass_failure_siblings: list["SuppressedChildSummary"] = []
     created_at: datetime
     updated_at: datetime
 
@@ -60,9 +62,6 @@ class AlertRuleCreate(BaseModel):
     escalation_seconds: Optional[int] = None
     # Flap suppression
     stable_for_seconds: int = Field(default=0, ge=0)
-    # Correlated suppression
-    suppress_if_parent_down: bool = False
-    parent_device_id: Optional[uuid.UUID] = None
     # Baseline
     baseline_enabled: bool = False
     baseline_deviation_pct: Optional[float] = None
@@ -89,8 +88,6 @@ class AlertRuleUpdate(BaseModel):
     escalation_severity: Optional[str] = None
     escalation_seconds: Optional[int] = None
     stable_for_seconds: Optional[int] = None
-    suppress_if_parent_down: Optional[bool] = None
-    parent_device_id: Optional[uuid.UUID] = None
     baseline_enabled: Optional[bool] = None
     baseline_deviation_pct: Optional[float] = None
     extra_conditions: Optional[list[dict]] = None
@@ -119,8 +116,6 @@ class AlertRuleRead(BaseModel):
     escalation_severity: Optional[str] = None
     escalation_seconds: Optional[int] = None
     stable_for_seconds: int = 0
-    suppress_if_parent_down: bool = False
-    parent_device_id: Optional[uuid.UUID] = None
     baseline_enabled: bool = False
     baseline_deviation_pct: Optional[float] = None
     extra_conditions: list[Any] = []

@@ -82,6 +82,10 @@ func (c *ProbeCollector) Run(ctx context.Context) {
 }
 
 // probeAll pings all current devices concurrently (bounded to 32 workers).
+// Each device's result is posted to the hub independently, the moment its
+// own ping sequence finishes — not batched behind the whole cycle's
+// wg.Wait() — so one slow/lossy device's probe never delays last_polled for
+// every other device on this collector.
 func (c *ProbeCollector) probeAll(ctx context.Context) {
 	c.mu.RLock()
 	devices := make([]hub.Device, len(c.devices))
@@ -94,57 +98,52 @@ func (c *ProbeCollector) probeAll(ctx context.Context) {
 
 	sem := make(chan struct{}, 32)
 	var wg sync.WaitGroup
-	var mu sync.Mutex
-	var lines []string
 
 	for _, dev := range devices {
 		dev := dev
 		select {
 		case sem <- struct{}{}:
 		case <-ctx.Done():
-			break
+			return
 		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
-
-			rttMin, rttAvg, rttMax, lossPct := probeHost(ctx, dev.MgmtIP)
-			ts := time.Now().UnixMilli()
-			did := dev.ID
-			base := fmt.Sprintf(`device_id="%s"`, did)
-
-			mu.Lock()
-			lines = append(lines,
-				fmt.Sprintf(`anthrimon_device_loss_pct{%s} %.1f %d`, base, lossPct, ts),
-			)
-			if rttMin >= 0 {
-				lines = append(lines,
-					fmt.Sprintf(`anthrimon_device_rtt_ms{%s,stat="min"} %.3f %d`, base, rttMin, ts),
-					fmt.Sprintf(`anthrimon_device_rtt_ms{%s,stat="avg"} %.3f %d`, base, rttAvg, ts),
-					fmt.Sprintf(`anthrimon_device_rtt_ms{%s,stat="max"} %.3f %d`, base, rttMax, ts),
-				)
-			}
-			if lossPct == 100.0 {
-				// Device is completely unreachable via ICMP — tell the hub not to
-				// stamp last_seen or status='up' for this device this cycle.
-				lines = append(lines,
-					fmt.Sprintf(`anthrimon_device_unreachable{%s} 1 %d`, base, ts),
-				)
-			}
-			mu.Unlock()
+			c.probeOne(ctx, dev)
 		}()
 	}
 	wg.Wait()
+}
 
-	if len(lines) == 0 {
-		return
+// probeOne pings one device and posts its own metrics line(s) immediately.
+func (c *ProbeCollector) probeOne(ctx context.Context, dev hub.Device) {
+	rttMin, rttAvg, rttMax, lossPct := probeHost(ctx, dev.MgmtIP)
+	ts := time.Now().UnixMilli()
+	base := fmt.Sprintf(`device_id="%s"`, dev.ID)
+
+	var lines []string
+	lines = append(lines,
+		fmt.Sprintf(`anthrimon_device_loss_pct{%s} %.1f %d`, base, lossPct, ts),
+	)
+	if rttMin >= 0 {
+		lines = append(lines,
+			fmt.Sprintf(`anthrimon_device_rtt_ms{%s,stat="min"} %.3f %d`, base, rttMin, ts),
+			fmt.Sprintf(`anthrimon_device_rtt_ms{%s,stat="avg"} %.3f %d`, base, rttAvg, ts),
+			fmt.Sprintf(`anthrimon_device_rtt_ms{%s,stat="max"} %.3f %d`, base, rttMax, ts),
+		)
 	}
+	if lossPct == 100.0 {
+		// Device is completely unreachable via ICMP — tell the hub not to
+		// stamp last_seen or status='up' for this device this cycle.
+		lines = append(lines,
+			fmt.Sprintf(`anthrimon_device_unreachable{%s} 1 %d`, base, ts),
+		)
+	}
+
 	text := strings.Join(lines, "\n") + "\n"
 	if err := c.hubClient.PostMetrics(ctx, text); err != nil {
-		c.log.Error().Err(err).Msg("failed to post probe metrics to hub")
-	} else {
-		c.log.Debug().Int("lines", len(lines)).Msg("probe metrics posted")
+		c.log.Error().Err(err).Str("device_id", dev.ID).Msg("failed to post probe metrics to hub")
 	}
 }
 

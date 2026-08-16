@@ -14,7 +14,7 @@ Each rule has:
 
 | Metric | Description | Threshold |
 |--------|-------------|-----------|
-| `device_down` | Device unreachable for 2.5× poll interval | — |
+| `device_down` | Device unreachable for max(90s, 6× poll interval) | — |
 | `device_latency` | ICMP RTT or packet loss above threshold | RTT in ms or loss % |
 | `uptime` | Device uptime drops below threshold (reboot detection) | seconds |
 | `temperature` | Any sensor temperature exceeds threshold | °C |

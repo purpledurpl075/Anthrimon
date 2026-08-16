@@ -80,6 +80,17 @@ class Breach:
 
 # ── Device selector ────────────────────────────────────────────────────────────
 
+def _freshness_window_s(device: dict, floor_s: int = 300, multiplier: float = 3.0) -> int:
+    """Derive a staleness window from the device's own poll interval instead
+    of assuming a fixed cadence — floored at floor_s so nothing becomes less
+    forgiving than the historical fixed 5-minute window. Used by evaluators
+    that check "is this specific piece of state still fresh" rather than
+    "is the whole device unreachable" (see eval_device_down for that one,
+    which uses a separate, larger multiplier)."""
+    poll_interval = int(device.get("polling_interval_s") or 15)
+    return max(floor_s, int(poll_interval * multiplier))
+
+
 async def resolve_devices(db: AsyncSession, tenant_id: str, selector: Optional[dict]) -> list[dict]:
     """Return rows of {id, hostname, vendor, tags, polling_interval_s} matching the selector."""
     base = """
@@ -309,15 +320,18 @@ async def eval_temperature(db: AsyncSession, device: dict, threshold: float) -> 
 
 
 async def eval_interface_errors(db: AsyncSession, device: dict, threshold: float) -> list[Breach]:
-    """Alert on interfaces accumulating errors faster than threshold per 5-minute window.
+    """Alert on interfaces accumulating errors faster than threshold per window.
 
     Error counters are stored in VictoriaMetrics (anthrimon_if_in/out_errors_total).
-    Uses increase() over 5m so a counter reset (reboot) doesn't create false positives.
+    Uses increase() over a window scaled to the device's poll interval (see
+    _freshness_window_s) so a counter reset (reboot) doesn't create false positives
+    and slow-polled devices still see enough samples to compute a real increase.
     """
     device_id = device["id"]
+    window_s = _freshness_window_s(device)
     query = (
-        f'increase(anthrimon_if_in_errors_total{{device_id="{device_id}"}}[5m])'
-        f' + increase(anthrimon_if_out_errors_total{{device_id="{device_id}"}}[5m])'
+        f'increase(anthrimon_if_in_errors_total{{device_id="{device_id}"}}[{window_s}s])'
+        f' + increase(anthrimon_if_out_errors_total{{device_id="{device_id}"}}[{window_s}s])'
     )
     try:
         async with _shared_http() as client:
@@ -377,10 +391,12 @@ async def eval_interface_errors(db: AsyncSession, device: dict, threshold: float
 async def eval_interface_util(db: AsyncSession, device: dict, threshold: float) -> list[Breach]:
     """Alert when any interface's bandwidth utilisation (in OR out) exceeds threshold %.
 
-    Uses VictoriaMetrics rate(octets[5m]) * 8 / speed_bps * 100 per interface.
+    Uses VictoriaMetrics rate(octets[window]) * 8 / speed_bps * 100 per interface,
+    where window scales with the device's own poll interval (see _freshness_window_s).
     Falls back gracefully — returns [] if VM is unreachable or device has no speed data.
     """
     device_id = device["id"]
+    window_s = _freshness_window_s(device)
     # Compute utilisation % = (rate of octets * 8 bits) / link_speed * 100
     # Use max(in, out) so a single threshold covers both directions.
     # Only evaluate interfaces that have a known non-zero speed (> 0).
@@ -389,9 +405,9 @@ async def eval_interface_util(db: AsyncSession, device: dict, threshold: float) 
     # label_replace adds a discriminating "d" label so in and out produce distinct
     # label sets after the join; "or" then includes both, and "max by" takes the
     # higher of the two directions rather than silently preferring in over out.
-    in_util  = (f'clamp_min(rate(anthrimon_if_in_octets_total{{device_id="{device_id}"}}[5m]) * 8'
+    in_util  = (f'clamp_min(rate(anthrimon_if_in_octets_total{{device_id="{device_id}"}}[{window_s}s]) * 8'
                 f'  / on(if_index) group_left() ({speed_filter}) * 100, 0)')
-    out_util = (f'clamp_min(rate(anthrimon_if_out_octets_total{{device_id="{device_id}"}}[5m]) * 8'
+    out_util = (f'clamp_min(rate(anthrimon_if_out_octets_total{{device_id="{device_id}"}}[{window_s}s]) * 8'
                 f'  / on(if_index) group_left() ({speed_filter}) * 100, 0)')
     query = (
         f'max by (if_index, if_name) ('
@@ -556,7 +572,7 @@ async def eval_ospf_state(db: AsyncSession, device: dict) -> Optional[Breach]:
             FROM ospf_neighbors
             WHERE device_id = :did
               AND state NOT IN ('full', 'unknown')
-              AND updated_at > NOW() - INTERVAL '5 minutes'
+              AND updated_at > NOW() - make_interval(secs => :window_s)
             ORDER BY
                 CASE state
                     WHEN 'down'     THEN 1
@@ -569,7 +585,7 @@ async def eval_ospf_state(db: AsyncSession, device: dict) -> Optional[Breach]:
                     ELSE 8
                 END
         """),
-        {"did": device["id"]},
+        {"did": device["id"], "window_s": _freshness_window_s(device)},
     )).mappings().all()
     if not rows:
         return None
@@ -805,9 +821,9 @@ async def eval_bgp_session_down(db: AsyncSession, device: dict) -> list[Breach]:
             "  AND admin_status = 'start' "
             "  AND session_state != 'established' "
             "  AND session_state != 'unknown' "
-            "  AND updated_at > NOW() - INTERVAL '5 minutes'"
+            "  AND updated_at > NOW() - make_interval(secs => :window_s)"
         ),
-        {"did": device["id"]},
+        {"did": device["id"], "window_s": _freshness_window_s(device)},
     )).mappings().all()
 
     return [
@@ -1040,15 +1056,18 @@ async def eval_snmp_trap(
 
 
 async def eval_interface_discards(db: AsyncSession, device: dict, threshold: float) -> list[Breach]:
-    """Alert on interfaces accumulating discards faster than threshold per 5-minute window.
+    """Alert on interfaces accumulating discards faster than threshold per window.
 
     Discard counters are stored in VictoriaMetrics (anthrimon_if_in/out_discards_total).
-    Uses increase() over 5m so a counter reset (reboot) doesn't create false positives.
+    Uses increase() over a window scaled to the device's poll interval (see
+    _freshness_window_s) so a counter reset (reboot) doesn't create false positives
+    and slow-polled devices still see enough samples to compute a real increase.
     """
     device_id = device["id"]
+    window_s = _freshness_window_s(device)
     query = (
-        f'increase(anthrimon_if_in_discards_total{{device_id="{device_id}"}}[5m])'
-        f' + increase(anthrimon_if_out_discards_total{{device_id="{device_id}"}}[5m])'
+        f'increase(anthrimon_if_in_discards_total{{device_id="{device_id}"}}[{window_s}s])'
+        f' + increase(anthrimon_if_out_discards_total{{device_id="{device_id}"}}[{window_s}s])'
     )
     try:
         async with _shared_http() as client:
@@ -1118,7 +1137,7 @@ async def eval_isis_state(db: AsyncSession, device: dict) -> Optional[Breach]:
             FROM isis_neighbors
             WHERE device_id = :did
               AND adjacency_state NOT IN ('up', 'unknown')
-              AND updated_at > NOW() - INTERVAL '5 minutes'
+              AND updated_at > NOW() - make_interval(secs => :window_s)
             ORDER BY
                 CASE adjacency_state
                     WHEN 'down'         THEN 1
@@ -1127,7 +1146,7 @@ async def eval_isis_state(db: AsyncSession, device: dict) -> Optional[Breach]:
                     ELSE 4
                 END
         """),
-        {"did": device["id"]},
+        {"did": device["id"], "window_s": _freshness_window_s(device)},
     )).mappings().all()
     if not rows:
         return None

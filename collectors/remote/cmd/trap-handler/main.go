@@ -31,7 +31,7 @@ import (
 	"time"
 )
 
-const version = "0.1.8"
+const version = "0.1.9"
 
 const defaultCACertPath = "/etc/anthrimon/ca.crt"
 
@@ -62,6 +62,26 @@ var _standardTraps = map[string]trapMeta{
 	"1.3.6.1.6.3.1.1.5.4": {Name: "linkUp",                Severity: "info"},
 	"1.3.6.1.6.3.1.1.5.5": {Name: "authenticationFailure", Severity: "warning"},
 	"1.3.6.1.6.3.1.1.5.6": {Name: "egpNeighborLoss",       Severity: "warning"},
+
+	// ENTITY-MIB (RFC 4133) — standard IETF notification, not vendor-enterprise.
+	"1.3.6.1.2.1.47.2.0.1": {Name: "entity.configChange", Severity: "info"},
+
+	// BGP4-MIB (RFC 1657) legacy SNMPv1-style trap OIDs — some platforms (seen:
+	// Arista EOS) emit these alongside the modern RFC 4273 bgpTraps (.15.7.x)
+	// versions of the exact same two events, for backward compatibility with
+	// v1-only managers. Map to the same trap_type as their .7.x counterparts
+	// (see trap_catalog.py) rather than treating them as distinct trap types.
+	"1.3.6.1.2.1.15.0.1": {Name: "bgp.established",        Severity: "info"},
+	"1.3.6.1.2.1.15.0.2": {Name: "bgp.backwardTransition",  Severity: "warning"},
+
+	// ISIS-MIB (RFC 4444, isisNotifications = 1.3.6.1.2.1.138.0) — exact
+	// notification-number assignments confirmed directly against the RFC
+	// text; see the comment on the old (wrong) prefix-matched entries below
+	// for why these live here instead.
+	"1.3.6.1.2.1.138.0.1":  {Name: "isis.databaseOverload",   Severity: "critical"},
+	"1.3.6.1.2.1.138.0.3":  {Name: "isis.corruptedLSP",       Severity: "critical"},
+	"1.3.6.1.2.1.138.0.13": {Name: "isis.rejectedAdjacency",  Severity: "warning"},
+	"1.3.6.1.2.1.138.0.17": {Name: "isis.adjacencyChange",    Severity: "warning"},
 }
 
 var _enterpriseTraps = []enterpriseTrap{
@@ -81,10 +101,16 @@ var _enterpriseTraps = []enterpriseTrap{
 	{Prefix: "1.3.6.1.2.1.14.",        Name: "ospf.trap",                     Severity: "warning"},
 
 	// ── IS-IS (RFC 4444, 1.3.6.1.2.1.138) ───────────────────────────────────
-	{Prefix: "1.3.6.1.2.1.138.0.5", Name: "isis.databaseOverload", Severity: "critical"},
-	{Prefix: "1.3.6.1.2.1.138.0.7", Name: "isis.corruptedLSP",     Severity: "critical"},
-	{Prefix: "1.3.6.1.2.1.138.0.1", Name: "isis.adjacencyChange",  Severity: "warning"},
-	{Prefix: "1.3.6.1.2.1.138.",    Name: "isis.trap",              Severity: "warning"},
+	// The three specific entries this used to have here (.0.1, .0.5, .0.7)
+	// were wrong — verified against the RFC 4444 text directly, the correct
+	// numbers are .0.1=isisDatabaseOverload, .0.3=isisCorruptedLSPDetected,
+	// .0.17=isisAdjacencyChange. They only "worked" by accident: string-prefix
+	// matching means ".0.1" also matches ".0.10" through ".0.19", so real
+	// isisAdjacencyChange traps (.0.17) got labeled by the wrong entry. Moved
+	// to _standardTraps below as exact matches so this can't happen again —
+	// these are individually-enumerated notifications, not a variable-instance
+	// table, so exact matching is both correct and collision-proof.
+	{Prefix: "1.3.6.1.2.1.138.", Name: "isis.trap", Severity: "warning"},
 
 	// ── MPLS LSR (RFC 3813, 1.3.6.1.2.1.131) ────────────────────────────────
 	{Prefix: "1.3.6.1.2.1.131.0.2", Name: "mpls.xcDown", Severity: "warning"},
@@ -112,21 +138,47 @@ var _enterpriseTraps = []enterpriseTrap{
 	{Prefix: "1.3.6.1.4.1.30065.3.2.0.1", Name: "arista.macMove",  Severity: "info"},
 	{Prefix: "1.3.6.1.4.1.30065.3.2.0.2", Name: "arista.macLearn", Severity: "info"},
 	{Prefix: "1.3.6.1.4.1.30065.3.2.0.3", Name: "arista.macAge",   Severity: "info"},
+	// ARISTA-BGP4V2-MIB — same two events as bgp.established/backwardTransition
+	// (RFC 4273), just Arista's newer BGP4V2 MIB instead of the classic one.
+	// Reuse the vendor-neutral trap_type so the Traps UI aggregates the same
+	// real-world event across vendors instead of splitting it per-MIB.
+	{Prefix: "1.3.6.1.4.1.30065.4.1.0.1", Name: "bgp.established",        Severity: "info"},
+	{Prefix: "1.3.6.1.4.1.30065.4.1.0.2", Name: "bgp.backwardTransition", Severity: "warning"},
 	{Prefix: "1.3.6.1.4.1.30065.",        Name: "arista.trap",     Severity: "info"},
 
 	// ── Aruba CX ─────────────────────────────────────────────────────────────
-	{Prefix: "1.3.6.1.4.1.47196.4.1.1.3.20", Name: "aruba_cx.linkStateChange", Severity: "warning"},
-	{Prefix: "1.3.6.1.4.1.47196.",           Name: "aruba_cx.trap",             Severity: "info"},
+	{Prefix: "1.3.6.1.4.1.47196.4.1.1.3.20",      Name: "aruba_cx.linkStateChange", Severity: "warning"},
+	// ARUBAWIRED-MGMD-RMON-TRAP-MIB — generic RMON event-log export (carries
+	// RMON-MIB eventIndex/eventDescription varbinds; severity is really
+	// per-message, "warning" is a reasonable default over the generic fallback).
+	{Prefix: "1.3.6.1.4.1.47196.4.1.1.3.4.1.1",   Name: "aruba_cx.rmonEvent",       Severity: "warning"},
+	{Prefix: "1.3.6.1.4.1.47196.",                Name: "aruba_cx.trap",             Severity: "info"},
 
 	// ── HP / ProCurve ────────────────────────────────────────────────────────
 	{Prefix: "1.3.6.1.4.1.11.2.14.12.1", Name: "hp.linkChange", Severity: "warning"},
 	{Prefix: "1.3.6.1.4.1.11.2.",        Name: "hp.trap",        Severity: "info"},
 
 	// ── Cisco ────────────────────────────────────────────────────────────────
-	{Prefix: "1.3.6.1.4.1.9.9.187.", Name: "cisco.bgpBackwardTransition", Severity: "critical"},
-	{Prefix: "1.3.6.1.4.1.9.9.43.",  Name: "cisco.configChange",          Severity: "warning"},
-	{Prefix: "1.3.6.1.4.1.9.9.13.",  Name: "cisco.envMonAlert",           Severity: "critical"},
-	{Prefix: "1.3.6.1.4.1.9.",       Name: "cisco.trap",                   Severity: "info"},
+	{Prefix: "1.3.6.1.4.1.9.9.187.",      Name: "cisco.bgpBackwardTransition",  Severity: "critical"},
+	{Prefix: "1.3.6.1.4.1.9.9.43.",       Name: "cisco.configChange",           Severity: "warning"},
+	{Prefix: "1.3.6.1.4.1.9.9.13.",       Name: "cisco.envMonAlert",            Severity: "critical"},
+	{Prefix: "1.3.6.1.4.1.9.9.41.2.0.1",  Name: "cisco.syslogMessage",          Severity: "info"},
+	// CISCO-RF-MIB (Redundancy Framework) — ciscoRFSwactNotif (.2.0.1, an
+	// actual failover) is more severe than ciscoRFProgressionNotif (.2.0.2,
+	// routine state-machine progress); only the latter has shown up so far.
+	{Prefix: "1.3.6.1.4.1.9.9.176.2.0.1", Name: "cisco.rfSwitchover",           Severity: "warning"},
+	{Prefix: "1.3.6.1.4.1.9.9.176.2.0.2", Name: "cisco.rfProgression",          Severity: "info"},
+	// CISCO-IPSEC-MIB cryptomap add/delete
+	{Prefix: "1.3.6.1.4.1.9.10.62.2.0.3", Name: "cisco.ipsecCryptomapAdded",    Severity: "info"},
+	{Prefix: "1.3.6.1.4.1.9.10.62.2.0.4", Name: "cisco.ipsecCryptomapDeleted",  Severity: "warning"},
+	// Legacy CISCOTRAP-MIB enterprise trap #1 — TTY/VTY (SSH/Telnet) session
+	// torn down; fires on ordinary management-session teardown, including our
+	// own SSH-based polling, so it's routine noise rather than a fault signal.
+	{Prefix: "1.3.6.1.4.1.9.0.1",         Name: "cisco.tcpConnectionClose",     Severity: "info"},
+	{Prefix: "1.3.6.1.4.1.9.",            Name: "cisco.trap",                    Severity: "info"},
+
+	// ── Net-SNMP agent (1.3.6.1.4.1.8072) ───────────────────────────────────
+	{Prefix: "1.3.6.1.4.1.8072.4.0.1", Name: "netsnmp.agentStart", Severity: "info"},
 
 	// ── Juniper ──────────────────────────────────────────────────────────────
 	{Prefix: "1.3.6.1.4.1.2636.", Name: "juniper.trap", Severity: "info"},
