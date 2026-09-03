@@ -891,6 +891,23 @@ async def data_stats(
         ))).scalar_one()
         housekeeping_stats[table] = {"rows": count, "size": size}
 
+    platform = await load_platform_defaults(db)
+
+    # Stale routing rows: only the idle/down subset is ever pruned (an active
+    # session/neighbor is never deleted), so count eligible rows directly
+    # rather than the tables' full row counts.
+    stale_routing_days = platform.get("stale_routing_rows_days", 30)
+    stale_routing_rows = 0
+    for table, state_col, state_val in (
+        ("bgp_sessions",   "session_state",   "idle"),
+        ("ospf_neighbors", "state",           "down"),
+        ("isis_neighbors", "adjacency_state", "down"),
+    ):
+        stale_routing_rows += (await db.execute(text(
+            f"SELECT count(*) FROM {table} WHERE {state_col} = '{state_val}' "
+            f"AND COALESCE(last_state_change, updated_at) < now() - interval '{stale_routing_days} days'"
+        ))).scalar_one()
+
     def _du_human(path: str) -> str:
         try:
             result = subprocess.run(["du", "-sh", path], capture_output=True, text=True, timeout=10)
@@ -909,8 +926,6 @@ async def data_stats(
         journal_size = _du_human("/var/log/journal")
 
     disk_total, disk_used, disk_free = shutil.disk_usage("/")
-
-    platform = await load_platform_defaults(db)
 
     # ClickHouse queries — degrade gracefully if unavailable
     ch_flow: list[dict] = []
@@ -1026,6 +1041,7 @@ async def data_stats(
                                        "retention_days": platform.get("trap_events_days", 30)},
             "report_runs":           {**housekeeping_stats["report_runs"],
                                        "retention_days": platform.get("report_runs_retention_days", 90)},
+            "stale_routing_rows":    {"rows": stale_routing_rows, "retention_days": stale_routing_days},
             "config_backups_keep_per_device":   platform.get("config_backups_keep_per_device", 50),
             "compliance_results_keep_per_pair": platform.get("compliance_results_keep_per_pair", 20),
         },
@@ -1078,6 +1094,7 @@ class HousekeepingRetentionUpdate(BaseModel):
     config_backups_keep_per_device: int
     compliance_results_keep_per_pair: int
     report_runs_retention_days: int
+    stale_routing_rows_days: int
 
 
 @router.put("/data/retention/housekeeping", summary="Set Postgres housekeeping retention windows")

@@ -185,6 +185,22 @@ function fmtAgo(ts: string | null): string {
   return fmtUptime(Math.floor((Date.now() - new Date(ts).getTime()) / 1000)) + ' ago'
 }
 
+// A row's session/neighbor/adjacency state is only as current as the device
+// it came from. If the device itself isn't reachable right now, the stored
+// state is a last-known snapshot, not what's happening — flag it as such
+// rather than rendering it like a live "established"/"full"/"up" value.
+function isDeviceLive(item: { device_status: string; device_stale: boolean }): boolean {
+  return item.device_status === 'up' && !item.device_stale
+}
+
+function DeviceUnreachableBadge() {
+  return (
+    <span className="text-xs font-medium px-1.5 py-0.5 rounded text-red-700 bg-red-50" title="Device is unreachable — states below are last-known, not live">
+      device unreachable
+    </span>
+  )
+}
+
 function BGPSessionsTab({ sessions, isLoading, pfxByDevicePeer }: {
   sessions:         BGPSession[]
   isLoading:        boolean
@@ -298,10 +314,11 @@ function BGPSessionsTab({ sessions, isLoading, pfxByDevicePeer }: {
       ) : (
         <div className="space-y-2">
           {byDevice.map(dev => {
+            const live   = dev.sessions.length > 0 && isDeviceLive(dev.sessions[0])
             const est    = dev.sessions.filter(s => s.session_state === 'established').length
             const flaps  = dev.sessions.filter(s => s.flap_count > 1).length
             const totalPfx = dev.sessions.reduce((a, s) => a + (s.prefixes_received ?? 0), 0)
-            const allOk  = est === dev.sessions.length && flaps === 0
+            const allOk  = live && est === dev.sessions.length && flaps === 0
             const open   = isDeviceExpanded(dev.id)
 
             return (
@@ -319,10 +336,11 @@ function BGPSessionsTab({ sessions, isLoading, pfxByDevicePeer }: {
                   >
                     {dev.name}
                   </Link>
+                  {!live && <DeviceUnreachableBadge />}
                   <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${
                     est === dev.sessions.length ? 'text-green-700 bg-green-50' : 'text-red-600 bg-red-50'
                   }`}>
-                    {est}/{dev.sessions.length} established
+                    {est}/{dev.sessions.length} established{live ? '' : ' (last known)'}
                   </span>
                   {totalPfx > 0 && (
                     <span className="text-xs text-slate-500">{fmtNum(totalPfx)} pfx</span>
@@ -383,12 +401,21 @@ function BGPSessionsTab({ sessions, isLoading, pfxByDevicePeer }: {
                                 </span>
                               </td>
                               <td className="px-4 py-2.5">
-                                <span className="flex items-center gap-1.5">
-                                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: BGP_STATE_COLOR[s.session_state] ?? '#94a3b8' }} />
-                                  <span className={`text-xs font-medium capitalize px-1.5 py-0.5 rounded ${BGP_STATE_CLS[s.session_state] ?? 'text-slate-600 bg-slate-100'}`}>
-                                    {s.session_state}
+                                {isDeviceLive(s) ? (
+                                  <span className="flex items-center gap-1.5">
+                                    <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: BGP_STATE_COLOR[s.session_state] ?? '#94a3b8' }} />
+                                    <span className={`text-xs font-medium capitalize px-1.5 py-0.5 rounded ${BGP_STATE_CLS[s.session_state] ?? 'text-slate-600 bg-slate-100'}`}>
+                                      {s.session_state}
+                                    </span>
                                   </span>
-                                </span>
+                                ) : (
+                                  <span className="flex items-center gap-1.5" title={`Last known: ${s.session_state}`}>
+                                    <span className="w-2 h-2 rounded-full shrink-0 bg-red-500" />
+                                    <span className="text-xs font-medium capitalize px-1.5 py-0.5 rounded text-red-700 bg-red-50">
+                                      unreachable
+                                    </span>
+                                  </span>
+                                )}
                               </td>
                               <td className="px-4 py-2.5 text-right tabular-nums">
                                 <div className="text-xs font-medium text-slate-700">
@@ -873,8 +900,9 @@ function OSPFNeighborsTab({ neighbors }: { neighbors: OSPFNeighbor[] }) {
       ) : (
         <div className="space-y-2">
           {byDevice.map(dev => {
+            const live    = dev.neighbors.length > 0 && isDeviceLive(dev.neighbors[0])
             const full    = dev.neighbors.filter(n => n.state === 'full').length
-            const allOk   = full === dev.neighbors.length
+            const allOk   = live && full === dev.neighbors.length
             const open    = isDeviceOpen(dev.id)
             return (
               <div key={dev.id} className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
@@ -882,12 +910,13 @@ function OSPFNeighborsTab({ neighbors }: { neighbors: OSPFNeighbor[] }) {
                   className="w-full flex items-center gap-3 px-5 py-3 hover:bg-slate-50 transition-colors text-left"
                   onClick={() => setExpanded(e => ({ ...e, [dev.id]: !isDeviceOpen(dev.id) }))}
                 >
-                  <span className={`w-2 h-2 rounded-full shrink-0 ${allOk ? 'bg-green-500' : 'bg-amber-400'}`} />
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${!live ? 'bg-red-500' : allOk ? 'bg-green-500' : 'bg-amber-400'}`} />
                   <Link to={`/devices/${dev.id}`} className="text-sm font-semibold text-slate-800 hover:text-blue-600" onClick={e => e.stopPropagation()}>
                     {dev.name}
                   </Link>
-                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${allOk ? 'text-green-700 bg-green-50' : 'text-amber-700 bg-amber-50'}`}>
-                    {full}/{dev.neighbors.length} full
+                  {!live && <DeviceUnreachableBadge />}
+                  <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${full === dev.neighbors.length ? 'text-green-700 bg-green-50' : 'text-amber-700 bg-amber-50'}`}>
+                    {full}/{dev.neighbors.length} full{live ? '' : ' (last known)'}
                   </span>
                   <span className="ml-auto text-slate-400 text-xs">{open ? '▲' : '▼'}</span>
                 </button>
@@ -911,12 +940,21 @@ function OSPFNeighborsTab({ neighbors }: { neighbors: OSPFNeighbor[] }) {
                           <td className="px-4 py-2.5 text-xs text-slate-500">{n.interface_name ?? '—'}</td>
                           <td className="px-4 py-2.5 text-xs text-slate-500">{n.area}</td>
                           <td className="px-4 py-2.5">
-                            <span className="flex items-center gap-1.5">
-                              <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: OSPF_STATE_COLOR[n.state] ?? '#94a3b8' }} />
-                              <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${OSPF_STATE_CLS[n.state] ?? 'text-slate-600 bg-slate-100'}`}>
-                                {n.state.replace('_', ' ')}
+                            {isDeviceLive(n) ? (
+                              <span className="flex items-center gap-1.5">
+                                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: OSPF_STATE_COLOR[n.state] ?? '#94a3b8' }} />
+                                <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${OSPF_STATE_CLS[n.state] ?? 'text-slate-600 bg-slate-100'}`}>
+                                  {n.state.replace('_', ' ')}
+                                </span>
                               </span>
-                            </span>
+                            ) : (
+                              <span className="flex items-center gap-1.5" title={`Last known: ${n.state.replace('_', ' ')}`}>
+                                <span className="w-2 h-2 rounded-full shrink-0 bg-red-500" />
+                                <span className="text-xs font-medium px-1.5 py-0.5 rounded text-red-700 bg-red-50">
+                                  unreachable
+                                </span>
+                              </span>
+                            )}
                           </td>
                           <td className="px-4 py-2.5 text-xs text-slate-500 text-right tabular-nums">
                             {n.uptime_seconds != null
@@ -1164,12 +1202,14 @@ function ISISAdjacenciesPanel() {
         <div className="space-y-2">
           {byDeviceInstance.map(grp => {
             const key      = `${grp.id}|${grp.instance}`
+            const live     = grp.neighbors.length > 0 && isDeviceLive(grp.neighbors[0])
             const upCount  = grp.neighbors.filter(n => n.adjacency_state === 'up').length
-            const severity = upCount === grp.neighbors.length ? 'ok'
+            const severity = !live                            ? 'unreachable'
+                           : upCount === grp.neighbors.length ? 'ok'
                            : upCount === 0                    ? 'down'
                            : 'partial'
             const dotCls   = severity === 'ok' ? 'bg-green-500' : severity === 'partial' ? 'bg-amber-400' : 'bg-red-500'
-            const badgeCls = severity === 'ok' ? 'text-green-700 bg-green-50' : severity === 'partial' ? 'text-amber-700 bg-amber-50' : 'text-red-700 bg-red-50'
+            const badgeCls = upCount === grp.neighbors.length ? 'text-green-700 bg-green-50' : upCount === 0 ? 'text-red-700 bg-red-50' : 'text-amber-700 bg-amber-50'
             const open     = isGroupOpen(key)
             const areaList = areaByKey[key] ?? []
             const isNamed  = grp.instance && grp.instance !== 'default'
@@ -1187,8 +1227,9 @@ function ISISAdjacenciesPanel() {
                   <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${isNamed ? 'bg-purple-100 text-purple-700' : 'bg-slate-100 text-slate-500'}`}>
                     {grp.instance}
                   </span>
+                  {!live && <DeviceUnreachableBadge />}
                   <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${badgeCls}`}>
-                    {upCount}/{grp.neighbors.length} up
+                    {upCount}/{grp.neighbors.length} up{live ? '' : ' (last known)'}
                   </span>
                   {areaList.length > 0 && (
                     <span className="text-xs text-slate-400 font-mono">
@@ -1249,24 +1290,35 @@ function ISISAdjacenciesPanel() {
                               {n.ipv4_address ?? n.ipv6_address ?? '—'}
                             </td>
                             <td className="px-4 py-2.5">
-                              <span
-                                className="flex items-center gap-1.5"
-                                title={stateAt}
-                              >
-                                <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: ISIS_STATE_COLOR[n.adjacency_state] ?? '#94a3b8' }} />
-                                <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${ISIS_STATE_CLS[n.adjacency_state] ?? 'text-slate-600 bg-slate-100'}`}>
-                                  {n.adjacency_state}
-                                </span>
-                                {stateAt && (
-                                  <span className="text-[10px] text-slate-400 hidden group-hover:inline">
-                                    {isUp ? '' : fmtAgo(n.last_state_change)}
+                              {isDeviceLive(n) ? (
+                                <>
+                                  <span
+                                    className="flex items-center gap-1.5"
+                                    title={stateAt}
+                                  >
+                                    <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: ISIS_STATE_COLOR[n.adjacency_state] ?? '#94a3b8' }} />
+                                    <span className={`text-xs font-medium px-1.5 py-0.5 rounded ${ISIS_STATE_CLS[n.adjacency_state] ?? 'text-slate-600 bg-slate-100'}`}>
+                                      {n.adjacency_state}
+                                    </span>
+                                    {stateAt && (
+                                      <span className="text-[10px] text-slate-400 hidden group-hover:inline">
+                                        {isUp ? '' : fmtAgo(n.last_state_change)}
+                                      </span>
+                                    )}
                                   </span>
-                                )}
-                              </span>
-                              {!isUp && n.last_state_change && (
-                                <div className="text-[10px] text-amber-500 mt-0.5" title={stateAt}>
-                                  {fmtAgo(n.last_state_change)}
-                                </div>
+                                  {!isUp && n.last_state_change && (
+                                    <div className="text-[10px] text-amber-500 mt-0.5" title={stateAt}>
+                                      {fmtAgo(n.last_state_change)}
+                                    </div>
+                                  )}
+                                </>
+                              ) : (
+                                <span className="flex items-center gap-1.5" title={`Last known: ${n.adjacency_state}`}>
+                                  <span className="w-2 h-2 rounded-full shrink-0 bg-red-500" />
+                                  <span className="text-xs font-medium px-1.5 py-0.5 rounded text-red-700 bg-red-50">
+                                    unreachable
+                                  </span>
+                                </span>
                               )}
                             </td>
                             <td className="px-4 py-2.5 text-right tabular-nums">

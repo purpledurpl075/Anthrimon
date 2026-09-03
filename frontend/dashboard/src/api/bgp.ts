@@ -4,6 +4,8 @@ export interface BGPSession {
   id:                  string
   device_id:           string
   device_name:         string
+  device_status:       string
+  device_stale:        boolean
   vrf:                 string
   peer_ip:             string
   peer_asn:            number | null
@@ -96,6 +98,8 @@ export interface OSPFNeighbor {
   id:                 string
   device_id:          string
   device_name:        string
+  device_status:      string
+  device_stale:       boolean
   vrf:                string
   neighbor_router_id: string | null
   neighbor_ip:        string | null
@@ -116,6 +120,8 @@ export interface ISISNeighbor {
   id:               string
   device_id:        string
   device_name:      string
+  device_status:    string
+  device_stale:     boolean
   instance:         string
   sys_id:           string
   hostname:         string | null

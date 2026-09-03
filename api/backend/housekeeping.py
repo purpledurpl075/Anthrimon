@@ -40,6 +40,27 @@ async def _run_housekeeping() -> None:
         if res.rowcount:
             logger.info("housekeeping_pruned", table="bgp_session_events", deleted=res.rowcount, retention_days=days)
 
+        # Stale routing state — the collector never deletes a bgp_sessions /
+        # ospf_neighbors / isis_neighbors row, only marks it idle/down when the
+        # peer disappears (see collectors/snmp/internal/writer/postgres.go
+        # orphan-mark). A genuinely decommissioned peer would otherwise sit
+        # there forever, indistinguishable in the DB from one that's merely
+        # flapping. Prune rows that have sat in that terminal state past
+        # retention, using last_state_change (falling back to updated_at).
+        days = settings["stale_routing_rows_days"]
+        for table, state_col, state_val in (
+            ("bgp_sessions",   "session_state",   "idle"),
+            ("ospf_neighbors", "state",           "down"),
+            ("isis_neighbors", "adjacency_state", "down"),
+        ):
+            res = await db.execute(text(
+                f"DELETE FROM {table} "
+                f"WHERE {state_col} = '{state_val}' "
+                f"AND COALESCE(last_state_change, updated_at) < now() - interval '{days} days'"
+            ))
+            if res.rowcount:
+                logger.info("housekeeping_pruned", table=table, deleted=res.rowcount, retention_days=days)
+
         # Notification send log
         days = settings["notification_send_log_days"]
         res = await db.execute(text(

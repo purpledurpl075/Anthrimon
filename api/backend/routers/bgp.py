@@ -18,6 +18,8 @@ from ..models.bgp import BGPSession, BGPSessionEvent
 from ..models.device import Device
 from ..models.interface import OSPFNeighbor, ISISNeighbor, ISISArea, ISISCircuitLevel, ISISLsp, RouteEntry
 
+from ..alerting.settings import get_effective_alerting_settings
+from ..alerting.staleness import is_device_stale
 from ..services.urls import vm_url
 
 logger = structlog.get_logger(__name__)
@@ -34,13 +36,24 @@ STATE_COLOR = {
 }
 
 
-def _session_out(s: BGPSession, device_name: str = "") -> dict:
+def _device_liveness(dev: Device, alert_settings: dict) -> tuple[str, bool]:
+    """(device_status, device_stale) for a joined Device row, using the exact
+    same staleness formula as the device_down alert (eval_device_down) so the
+    Routing tab can't drift from what alerting considers "down". device_stale
+    catches the window before the alert engine's own ~15s cycle has caught up."""
+    stale = is_device_stale(dev.last_polled, dev.polling_interval_s, alert_settings)
+    return dev.status, stale
+
+
+def _session_out(s: BGPSession, device_name: str = "", device_status: str = "unknown", device_stale: bool = False) -> dict:
     peer_asn = s.peer_asn
     local_asn = s.local_asn
     return {
         "id":                  str(s.id),
         "device_id":           str(s.device_id),
         "device_name":         device_name,
+        "device_status":       device_status,
+        "device_stale":        device_stale,
         "vrf":                 s.vrf,
         "peer_ip":             str(s.peer_ip),
         "peer_asn":            peer_asn,
@@ -77,7 +90,11 @@ async def list_all_sessions(
     if state:
         q = q.where(BGPSession.session_state == state)
     rows = (await db.execute(q)).all()
-    return [_session_out(s, dev.display_name) for s, dev in rows]
+    alert_settings = await get_effective_alerting_settings(db, principal.active_tenant_id)
+    return [
+        _session_out(s, dev.display_name, *_device_liveness(dev, alert_settings))
+        for s, dev in rows
+    ]
 
 
 @router.get("/devices/{device_id}/sessions", summary="BGP sessions for a device")
@@ -99,7 +116,9 @@ async def device_sessions(
         select(BGPSession).where(BGPSession.device_id == device_id).order_by(BGPSession.peer_ip)
     )).scalars().all()
     name = dev.display_name
-    return [_session_out(s, name) for s in rows]
+    alert_settings = await get_effective_alerting_settings(db, principal.active_tenant_id)
+    device_status, device_stale = _device_liveness(dev, alert_settings)
+    return [_session_out(s, name, device_status, device_stale) for s in rows]
 
 
 @router.get("/sessions/{session_id}/events", summary="State-change history for a BGP session")
@@ -328,11 +347,14 @@ async def ospf_neighbors_all(
         .where(Device.id.in_(accessible_device_ids_subquery(principal)))
         .order_by(Device.hostname, OSPFNeighbor.area, OSPFNeighbor.neighbor_ip)
     )).all()
+    alert_settings = await get_effective_alerting_settings(db, principal.active_tenant_id)
     return [
         {
             "id":                 str(n.id),
             "device_id":          str(n.device_id),
             "device_name":        dev.display_name,
+            "device_status":      dev.status,
+            "device_stale":       is_device_stale(dev.last_polled, dev.polling_interval_s, alert_settings),
             "vrf":                n.vrf,
             "neighbor_router_id": str(n.neighbor_router_id) if n.neighbor_router_id else None,
             "neighbor_ip":        str(n.neighbor_ip) if n.neighbor_ip else None,
@@ -391,11 +413,14 @@ async def isis_neighbors_all(
         .where(Device.id.in_(accessible_device_ids_subquery(principal)))
         .order_by(Device.hostname, ISISNeighbor.interface_name, ISISNeighbor.sys_id)
     )).all()
+    alert_settings = await get_effective_alerting_settings(db, principal.active_tenant_id)
     return [
         {
             "id":               str(n.id),
             "device_id":        str(n.device_id),
             "device_name":      dev.display_name,
+            "device_status":    dev.status,
+            "device_stale":     is_device_stale(dev.last_polled, dev.polling_interval_s, alert_settings),
             "instance":         n.instance,
             "sys_id":           n.sys_id,
             "hostname":         n.hostname,

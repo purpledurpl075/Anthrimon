@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import crypto as _crypto
 
 from ..services.urls import ch_url, vm_url
+from .staleness import is_device_stale
 
 logger = structlog.get_logger(__name__)
 
@@ -195,23 +196,18 @@ async def eval_device_down(db: AsyncSession, device: dict, platform: dict | None
     status = row["status"]
     last_polled = row["last_polled"]
     poll_interval = int(device.get("polling_interval_s") or 15)
-    stale_min = int((platform or {}).get("device_down_stale_min_s", 90))
-    # Multiplier applied to the poll interval: generous enough by default that
-    # an SNMP reconnect (up to 60s max backoff) doesn't trigger a false Device
-    # Down during the reconnect window, while still detecting a genuinely
-    # unreachable device promptly. Configurable — see device_down_stale_multiplier.
-    stale_multiplier = float((platform or {}).get("device_down_stale_multiplier", 6))
-    stale_seconds = max(stale_min, int(poll_interval * stale_multiplier))
-    stale = (
-        last_polled is None or
-        (datetime.now(timezone.utc) - last_polled).total_seconds() > stale_seconds
-    )
+    # Stale threshold: device_down_stale_multiplier x poll interval, floored at
+    # device_down_stale_min_s (platform settings). Generous enough by default
+    # that an SNMP reconnect (up to 60s max backoff) doesn't trigger a false
+    # Device Down during the reconnect window, while still detecting a
+    # genuinely unreachable device promptly. Shared with routers/bgp.py so the
+    # Routing tab's live-reachability check can't drift from this threshold.
+    stale = is_device_stale(last_polled, poll_interval, platform)
     breached = status != "up" or stale
     last_polled_age = round((datetime.now(timezone.utc) - last_polled).total_seconds()) if last_polled else None
     logger.debug("eval_device_down",
                  hostname=device.get("hostname"), status=status,
-                 last_polled_age_s=last_polled_age,
-                 stale_threshold_s=stale_seconds, breached=breached)
+                 last_polled_age_s=last_polled_age, breached=breached)
     if breached:
         # Suppress when the device's remote collector is offline — the collector-offline
         # alert already covers this, and firing device_down on top creates alert spam

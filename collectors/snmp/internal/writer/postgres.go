@@ -1257,6 +1257,100 @@ func (w *PostgresWriter) LoadDevices(ctx context.Context) ([]model.DeviceRow, er
 	return devices, rows.Err()
 }
 
+// StaleDeviceIDs returns IDs of managed devices (is_active, this collector's
+// own — collector_id IS NULL, matching LoadDevices) whose last_polled has
+// exceeded the platform's device-down staleness threshold. Mirrors
+// api/backend/alerting/evaluators.go eval_device_down's formula exactly:
+// max(device_down_stale_min_s, poll_interval_s * device_down_stale_multiplier),
+// read from the same platform_settings table (defaults 90s / 6x if unset).
+// It implements poller.DeviceSource.
+func (w *PostgresWriter) StaleDeviceIDs(ctx context.Context) ([]uuid.UUID, error) {
+	staleMinS, multiplier, err := w.deviceDownStaleSettings(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("load device_down stale settings: %w", err)
+	}
+
+	rows, err := w.pool.Query(ctx, `
+		SELECT id, polling_interval_s, last_polled
+		FROM devices
+		WHERE is_active = true AND collector_id IS NULL
+	`)
+	if err != nil {
+		return nil, fmt.Errorf("query devices for stale sweep: %w", err)
+	}
+	defer rows.Close()
+
+	var stale []uuid.UUID
+	for rows.Next() {
+		var id uuid.UUID
+		var pollIntervalS int
+		var lastPolled *time.Time
+		if err := rows.Scan(&id, &pollIntervalS, &lastPolled); err != nil {
+			return nil, fmt.Errorf("scan device for stale sweep: %w", err)
+		}
+		threshold := time.Duration(staleMinS) * time.Second
+		if fromInterval := time.Duration(float64(pollIntervalS)*multiplier) * time.Second; fromInterval > threshold {
+			threshold = fromInterval
+		}
+		if lastPolled == nil || time.Since(*lastPolled) > threshold {
+			stale = append(stale, id)
+		}
+	}
+	return stale, rows.Err()
+}
+
+// deviceDownStaleSettings reads device_down_stale_min_s / device_down_stale_multiplier
+// from platform_settings. Each value is stored as JSONB and — depending on how it was
+// last written by the API — is either a bare scalar (e.g. `90`) or an object wrapper
+// (e.g. `{"value": 90}`); both shapes are handled, matching alerting/settings.py's
+// load_platform_defaults() unwrap logic. Falls back to the same defaults on any miss.
+func (w *PostgresWriter) deviceDownStaleSettings(ctx context.Context) (minSeconds int, multiplier float64, err error) {
+	minSeconds, multiplier = 90, 6.0
+	rows, err := w.pool.Query(ctx, `
+		SELECT key, value FROM platform_settings
+		WHERE key IN ('device_down_stale_min_s', 'device_down_stale_multiplier')
+	`)
+	if err != nil {
+		return minSeconds, multiplier, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var key string
+		var raw []byte
+		if err := rows.Scan(&key, &raw); err != nil {
+			return minSeconds, multiplier, err
+		}
+		num, ok := jsonSettingNumber(raw)
+		if !ok {
+			continue
+		}
+		switch key {
+		case "device_down_stale_min_s":
+			minSeconds = int(num)
+		case "device_down_stale_multiplier":
+			multiplier = num
+		}
+	}
+	return minSeconds, multiplier, rows.Err()
+}
+
+// jsonSettingNumber unwraps a platform_settings JSONB value into a float64,
+// accepting both a bare JSON number and an {"value": <number>} wrapper.
+func jsonSettingNumber(raw []byte) (float64, bool) {
+	var bare float64
+	if err := json.Unmarshal(raw, &bare); err == nil {
+		return bare, true
+	}
+	var wrapped struct {
+		Value float64 `json:"value"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil {
+		return wrapped.Value, true
+	}
+	return 0, false
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 func avgCPU(samples []model.CPUSample) *float64 {

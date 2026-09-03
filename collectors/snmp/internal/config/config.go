@@ -46,6 +46,14 @@ type PollingConfig struct {
 	HealthMultiplier     int `yaml:"health_multiplier"` // kept for config-file compat; no longer used
 	DeviceRefreshS       int `yaml:"device_refresh_s"`
 	MaxConcurrentDevices int `yaml:"max_concurrent_devices"`
+	// StaleSweepIntervalS: how often to check for devices whose per-device
+	// poll loop is stuck retrying a dead connection (runDevice never returns
+	// on repeated failure, so it never calls Handle() again) and, for any
+	// device stale per the same threshold alerting.eval_device_down uses,
+	// feed the writer an empty-but-successful routing result so the existing
+	// orphan-mark SQL flips its bgp_sessions/ospf_neighbors/isis_neighbors
+	// rows to down/idle instead of leaving last-known state forever.
+	StaleSweepIntervalS int `yaml:"stale_sweep_interval_s"`
 }
 
 type MetricsConfig struct {
@@ -63,7 +71,7 @@ func defaults() Config {
 	return Config{
 		Database:   DatabaseConfig{MaxConns: 25, MinConns: 2},
 		SNMP:       SNMPConfig{TimeoutSeconds: 10, Retries: 3, MaxOids: 60, MaxRepetitions: 25},
-		Polling:    PollingConfig{DefaultIntervalS: 60, StateIntervalS: 15, HealthIntervalS: 60, HealthMultiplier: 5, DeviceRefreshS: 300, MaxConcurrentDevices: 500},
+		Polling:    PollingConfig{DefaultIntervalS: 60, StateIntervalS: 15, HealthIntervalS: 60, HealthMultiplier: 5, DeviceRefreshS: 300, MaxConcurrentDevices: 500, StaleSweepIntervalS: 30},
 		Metrics:    MetricsConfig{VictoriaMetricsURL: "http://localhost:8428", FlushInterval: 10 * time.Second, BatchSize: 500},
 		Log:        LogConfig{Level: "info"},
 	}
@@ -118,6 +126,7 @@ func applyEnv(cfg *Config) {
 	if v := env("SNMP_POLLING_HEALTH_INTERVAL_S");      v != "" { cfg.Polling.HealthIntervalS = atoi(v, cfg.Polling.HealthIntervalS) }
 	if v := env("SNMP_POLLING_HEALTH_MULTIPLIER");      v != "" { cfg.Polling.HealthMultiplier = atoi(v, cfg.Polling.HealthMultiplier) }
 	if v := env("SNMP_POLLING_DEVICE_REFRESH_S");       v != "" { cfg.Polling.DeviceRefreshS = atoi(v, cfg.Polling.DeviceRefreshS) }
+	if v := env("SNMP_POLLING_STALE_SWEEP_INTERVAL_S"); v != "" { cfg.Polling.StaleSweepIntervalS = atoi(v, cfg.Polling.StaleSweepIntervalS) }
 	if v := env("SNMP_POLLING_MAX_CONCURRENT_DEVICES"); v != "" { cfg.Polling.MaxConcurrentDevices = atoi(v, cfg.Polling.MaxConcurrentDevices) }
 	if v := env("SNMP_METRICS_VICTORIAMETRICS_URL");  v != "" { cfg.Metrics.VictoriaMetricsURL = v }
 	if v := env("SNMP_LOG_LEVEL");                    v != "" { cfg.Log.Level = v }

@@ -60,6 +60,11 @@ PLATFORM_DEFAULTS: dict = {
     "config_backups_keep_per_device":   50,
     "compliance_results_keep_per_pair": 20,
     "report_runs_retention_days":       90,
+    # Routing tables (bgp_sessions, ospf_neighbors, isis_neighbors) are never
+    # row-deleted by the collector — a genuinely decommissioned peer just sits
+    # forever marked idle/down. This prunes rows that have been in that
+    # terminal state longer than the window, same housekeeping sweep as above.
+    "stale_routing_rows_days":          30,
     # Scheduler retry/failure-notify (feature 6) — consecutive failures a
     # schedule must hit before a report_failure AlertRule notification fires.
     "report_schedule_failure_threshold": 3,
@@ -86,6 +91,7 @@ TENANT_OVERRIDABLE_KEYS: frozenset[str] = frozenset({
     "business_days",
     "mass_failure_min_devices",
     "mass_failure_window_s",
+    "stale_routing_rows_days",
 })
 
 

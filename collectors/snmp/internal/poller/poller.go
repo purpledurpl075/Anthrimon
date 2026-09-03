@@ -84,6 +84,9 @@ func (m *Manager) Run(ctx context.Context, deviceSource DeviceSource) error {
 	refreshTicker := time.NewTicker(time.Duration(m.cfg.Polling.DeviceRefreshS) * time.Second)
 	defer refreshTicker.Stop()
 
+	staleTicker := time.NewTicker(time.Duration(m.cfg.Polling.StaleSweepIntervalS) * time.Second)
+	defer staleTicker.Stop()
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -94,7 +97,40 @@ func (m *Manager) Run(ctx context.Context, deviceSource DeviceSource) error {
 			if err := m.sync(ctx, deviceSource); err != nil {
 				m.log.Error().Err(err).Msg("device list refresh failed")
 			}
+		case <-staleTicker.C:
+			m.sweepStale(ctx, deviceSource)
 		}
+	}
+}
+
+// sweepStale marks routing state (BGP/OSPF/IS-IS) down/idle for devices whose
+// last successful poll has exceeded the device-down staleness threshold.
+// A device's own runDevice goroutine never returns on repeated connect
+// failure (see connectAndSysInfo below), so it never calls Handle() again
+// once the device goes fully unreachable — nothing else flips its last-known
+// "established"/"full"/"up" routing rows to down. Handle() already treats a
+// non-nil-but-empty slice as "polled successfully with 0 results", which is
+// exactly what the writer's existing orphan-mark UPDATE needs to run — so
+// this reuses that path rather than duplicating any down-marking SQL.
+func (m *Manager) sweepStale(ctx context.Context, ds DeviceSource) {
+	staleIDs, err := ds.StaleDeviceIDs(ctx)
+	if err != nil {
+		m.log.Error().Err(err).Msg("stale device sweep: query failed")
+		return
+	}
+	for _, id := range staleIDs {
+		result := &PollResult{
+			DeviceID:        id,
+			BGPSessions:     []*model.BGPSession{},
+			OSPFNeighbours:  []*model.OSPFNeighbour{},
+			ISISAdjacencies: []*model.ISISAdjacency{},
+		}
+		if err := m.handler.Handle(ctx, result); err != nil {
+			m.log.Error().Err(err).Str("device_id", id.String()).Msg("stale device sweep: handle failed")
+		}
+	}
+	if len(staleIDs) > 0 {
+		m.log.Info().Int("count", len(staleIDs)).Msg("stale device sweep: marked routing state down")
 	}
 }
 
@@ -521,6 +557,14 @@ func (m *Manager) decodeCred(dev model.DeviceRow) (interface{}, error) {
 // package implements this so the poller never directly imports the writer.
 type DeviceSource interface {
 	LoadDevices(ctx context.Context) ([]model.DeviceRow, error)
+
+	// StaleDeviceIDs returns the IDs of managed devices whose last successful
+	// poll is older than the platform's device-down staleness threshold
+	// (mirroring api/backend/alerting/evaluators.go's eval_device_down
+	// formula), so the poller can flip their routing state to down/idle even
+	// though their per-device goroutine is still stuck retrying a dead
+	// connection and will never call Handle() again on its own.
+	StaleDeviceIDs(ctx context.Context) ([]uuid.UUID, error)
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
